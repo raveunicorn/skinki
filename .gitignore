@@ -1,0 +1,48 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+!*.xcworkspace/contents.xcworkspacedata
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Tuist (generated artifacts; keep manifests)
+Derived/
+.tuist/
+graph.dot
+*.xcodeproj
+*.xcworkspace
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Models & local data (never commit weights or user memory)
+Models/
+*.gguf
+*.safetensors
+*.mlx
+*.riv.backup
+
+# Secrets / signing
+*.p12
+*.cer
+*.mobileprovision
+.env
+.env.*
+
+# Misc
+*.log
