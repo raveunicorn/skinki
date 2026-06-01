@@ -44,5 +44,13 @@ Models/
 .env
 .env.*
 
+# Rust (kortex engine)
+target/
+**/*.rs.bk
+# Keep Cargo.lock: the workspace ships a binary (kortex-harness).
+
+# Cursor IDE (local session plans/artifacts)
+.cursor/
+
 # Misc
 *.log

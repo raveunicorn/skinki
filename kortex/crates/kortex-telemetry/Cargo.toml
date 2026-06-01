@@ -1,0 +1,12 @@
+[package]
+name = "kortex-telemetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Latency and memory telemetry for measuring against the M1 Air fitness budgets."
+
+[dependencies]
+serde.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
