@@ -1,74 +1,87 @@
 <div align="center">
 
-# 🦎 Skinki
+# Skinki — Exocortex
 
-**The ultimate local AI assistant for macOS — what Apple Intelligence should have been.**
+**A portable, local-first memory & insight engine — your second brain that thinks in a dimension you can't.**
 
-Native. Private. Joyful. Powered by on-device Gemma 4 via Apple MLX.
+Capture a lifetime of raw thoughts. Get back structured, linked memory and
+non-obvious, *cited* insights. 100% on-device. No cloud. No subscription.
 
 </div>
 
 ---
 
-## What is Skinki?
+## The pivot
 
-Skinki is a fully local, privacy-first AI assistant for macOS, shipped as a consumer-ready `.dmg`. Its mascot — a friendly, expressive lizard — is a modern, joy-design reimagining of the classic desktop assistant. Skinki is built to feel like a *hidden feature of the OS itself*: deeply integrated, beautifully animated, and respectful of your machine's resources.
+Skinki began as a local macOS AI assistant. It has since been refocused around
+its hardest, most valuable core: **the memory**. The thesis is simple —
 
-It is designed to be equally **intuitive for a non-technical user** on a base MacBook and **incredibly powerful for a developer** on a Mac Studio.
+> **Intelligence lives in the memory substrate, not in the model.**
 
-> Everything runs on your Mac. No cloud. No subscription. No telemetry.
+On an 8 GB M1 Air the "brain" is only a ~4B model. So the leverage is in the
+memory: a substrate that ingests years of voice/text, compresses it, links it
+into a knowledge graph, consolidates it offline ("sleep"), and surfaces grounded
+insights — making a small model punch far above its weight.
 
-## Core Pillars
+The primary product is therefore a **headless, embeddable Rust engine**
+(`kortex`) — think "FFmpeg for personal knowledge." The macOS app is a secondary
+consumer wrapper.
 
-1. **Uncompromising UI/UX** — native blurs, fluid SwiftUI/Metal animations, a *living* mascot, and a zero-friction onboarding. No terminals, ever.
-2. **Native-like macOS integration** — global hotkeys, Finder Quick Actions, a Status Bar home, and system-wide text capture via the Accessibility API.
-3. **Extreme hardware efficiency** — `mmap` cold start, idle model unload, quantization. Skinki should *fly* even on modest machines, in the background.
-4. **Evolution & memory** — long-term memory that learns your preferences, tone of voice, frequent paths, and coding style (RAG over a local vector store).
-5. **LLM core & multilingual** — built on Google's open-weight **Gemma 4** family with first-class Russian and English support out of the box.
+## Two laws of the architecture
 
-## Tech Stack (at a glance)
+1. **Intelligence lives in the memory, not the model.** All the heavy lifting —
+   index, graph, consolidation, context assembly — happens in the substrate.
+2. **You earn the right to invent with a benchmark.** We push the best existing
+   building blocks (RaBitQ, Model2Vec, Lance/Cozo, LightRAG/HippoRAG 2) against
+   hard budgets first, and invent a new format/algorithm only where they
+   objectively break. Maximum with minimum means.
 
-| Layer | Choice |
-| --- | --- |
-| UI | SwiftUI + [Rive](https://rive.app) (interactive mascot) + Metal |
-| Inference | [`mlx-swift-lm`](https://github.com/ml-explore/mlx-swift-lm) (Apple MLX, **no Python**) |
-| Models | Gemma 4 **E4B** (base Macs) · Gemma 4 **26B-A4B MoE** (32GB+ unified memory) |
-| Embeddings / RAG | EmbeddingGemma (`MLXEmbedders`) + SQLite + [`sqlite-vec`](https://github.com/asg017/sqlite-vec) |
-| Voice | Native dictation in · `AVSpeechSynthesizer` out (neural TTS later) |
-| Project | [Tuist](https://tuist.dev) + modular local Swift packages |
+## Repository layout (monorepo)
 
-## Requirements
-
-- Apple Silicon Mac (M1 or newer)
-- macOS 15 (Sequoia) or later
-- 16 GB unified memory recommended for the E4B tier; 32 GB+ for the 26B-A4B tier
-
-## Getting Started (development)
-
-> The project is scaffolded but not yet implemented. These are the intended commands.
-
-```bash
-# 1. Install Tuist (https://tuist.dev)
-curl -Ls https://install.tuist.io | bash
-
-# 2. Generate the Xcode project + workspace
-tuist generate
-
-# 3. Open and run
-open Skinki.xcworkspace
+```
+Skinki/
+  kortex/              # PRIMARY: headless Rust memory + insight engine
+    crates/
+      kortex-corpus/      deterministic synthetic corpus + planted ground truth
+      kortex-eval/        RetrievalSystem trait + metrics + Report
+      kortex-telemetry/   latency p50/p95 + peak RSS (M1 Air budgets)
+      kortex-baseline/    BM25 lexical baseline (the yardstick)
+      kortex-harness/     `kortex` CLI: generate / eval / demo
+  apps/
+    skinki-macos/      # SECONDARY: parked SwiftUI/Tuist consumer wrapper (Stage 7)
+  ARCHITECTURE.md      # Exocortex layered architecture (this repo)
+  ROADMAP.md           # staged, hypothesis-driven plan (Stage 0 → 7)
 ```
 
-## Documentation
+- Engine: [`kortex/`](kortex/) — see [`kortex/README.md`](kortex/README.md).
+- App: [`apps/skinki-macos/`](apps/skinki-macos/) — see its [README](apps/skinki-macos/README.md).
 
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — high-level architecture, layers, and the SwiftUI ↔ MLX ↔ macOS bridge.
-- [`ROADMAP.md`](ROADMAP.md) — the 4-week MVP plan and the beyond.
-- [`docs/DESIGN.md`](docs/DESIGN.md) — joy-design principles and the mascot system.
-- [`docs/MEMORY.md`](docs/MEMORY.md) — the long-term memory & RAG design.
+## Hard budgets (worst-case ~10 years, ~5M memory units)
+
+| Budget | Target on M1 Air 8 GB |
+| --- | --- |
+| Idle engine RAM (model unloaded) | < 250 MB (mmap, not all in RAM) |
+| Retrieval latency (vector + 1-2 graph hops) | p50 < 50 ms, p95 < 150 ms |
+| Cold start to first result | < 1 s (mmap) |
+| Recall after compression | >= 95% vs full-precision |
+| False-insight rate / uncited claims | < 5% / **0** |
+| Network | 0 bytes |
 
 ## Status
 
-🚧 **Foundation / scaffolding stage.** This repository currently contains the architecture, documentation, project configuration, and module skeletons. Feature implementation follows the [roadmap](ROADMAP.md).
+**Stage 0 complete — the measuring stick.** A reproducible eval harness with a
+deterministic synthetic corpus, retrieval/QA/insight metrics, latency+RAM
+telemetry, and a BM25 baseline that proves the harness cleanly separates recall
+(solved) from multi-hop and insight discovery (the targets for Stages 1-5).
+
+```bash
+cd kortex
+cargo run --release -p kortex-harness -- demo --years 10 --entries-per-day 270
+cargo test
+```
+
+See [`ROADMAP.md`](ROADMAP.md) for all stages and their decision gates.
 
 ## License
 
-To be released under a permissive open-source license (MIT or Apache-2.0) once it goes public. Currently developed in a private repository.
+MIT OR Apache-2.0.

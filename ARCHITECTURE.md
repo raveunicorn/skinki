@@ -1,215 +1,143 @@
-# Skinki — Architecture
+# Skinki Exocortex — Architecture
 
-This document describes the high-level architecture of Skinki: how SwiftUI (UI + animations), Apple MLX (Gemma 4 inference), and low-level macOS system APIs are composed into a single, fast, native, non-blocking application.
+This document describes the architecture of the **Exocortex**: a portable,
+local-first memory and insight engine. The primary artifact is a headless Rust
+crate (`kortex`); the macOS app ([`apps/skinki-macos/`](apps/skinki-macos/)) is
+a secondary consumer wrapper whose own architecture is documented
+[there](apps/skinki-macos/ARCHITECTURE.md).
 
 - **Audience:** contributors.
-- **Status:** living document. The foundation stage establishes these boundaries; implementation fills them in per the [roadmap](ROADMAP.md).
+- **Status:** living document. Stage 0 (the eval harness) is implemented; later
+  layers are built and benchmarked stage by stage per the [roadmap](ROADMAP.md).
 
----
+## Guiding constraints
 
-## 1. Guiding constraints
+- **Intelligence in the memory, not the model.** A ~4B model on an M1 Air; the
+  substrate (index, graph, consolidation, context assembly) carries the weight.
+- **Benchmark before invention.** Compress the best existing building blocks
+  against hard budgets first; invent a format/algorithm only where they break.
+- **Realtime capture is cheap; thinking is deferred.** Capture is an instant
+  append. All heavy processing happens during "sleep" (idle + on power),
+  interruptibly and incrementally — never blocking realtime or draining battery.
+- **Local and private.** Zero network bytes. Provenance is preserved end-to-end
+  so every surfaced claim is traceable to source bytes.
 
-These constraints shape every decision below.
+## Layered overview
 
-- **Single native binary.** No Python sidecar. Inference runs in-process via `mlx-swift-lm`. This gives the best cold-start, lowest memory overhead, and a clean consumer `.dmg`.
-- **Non-sandboxed, Developer-ID signed, notarized.** Deep integration (Accessibility, input simulation, shell, Full Disk Access) is incompatible with the App Store sandbox. Skinki ships outside the App Store as a notarized `.dmg`.
-- **Apple Silicon, macOS 15+.** MLX requires Apple Silicon; macOS 15 gives us the latest SwiftUI, `ScreenCaptureKit`, and Speech APIs.
-- **The UI thread is sacred.** Inference, embeddings, disk, and system calls never block the main actor. Everything heavy lives behind `actor`s and `async` streams.
-- **Resource humility (Pillar 3).** The model is loaded lazily via `mmap`, kept warm only while in use, and aggressively unloaded on idle.
-
-## 2. Layered overview
-
-Skinki is split into three layers connected by protocols defined in `SkinkiCore`, so the UI depends on abstractions, not on fragile system APIs or the inference backend.
+The engine is a stack of layers, from a cheap append-only capture log up to a
+grounded insight/query layer. Heavy transforms are quarantined in the offline
+"sleep" layer.
 
 ```mermaid
 graph TD
-  subgraph ui [UI Layer - SwiftUI + Rive]
-    HUD[ChatHUD - floating spotlight panel]
-    Menu[MenuBar / StatusItem]
-    Onb[Onboarding / Permissions]
-    Settings[Settings]
-    DS[DesignSystem + Mascot]
+  subgraph capture [Realtime - cheap]
+    L0["L0 Capture: append-only raw log (source of truth + provenance)"]
+    L1["L1 Units: atomic thoughts/facts referencing L0 bytes"]
   end
-
-  subgraph core [Core Layer - local Swift packages]
-    Engine[InferenceEngine]
-    Memory[MemoryStore]
-    TextEng[TextEngine]
-    Voice[VoiceEngine]
-    SkCore[SkinkiCore - protocols, models, DI]
+  subgraph index [Index - mmap/disk]
+    Vec["L2a Vector index: Model2Vec first-pass + RaBitQ compression"]
+    Graph["L2b Knowledge graph: entities, relations, temporal edges"]
   end
-
-  subgraph sys [System Layer - SystemBridge]
-    AX[Accessibility - selection capture + input simulation]
-    Hotkey[Global Hotkeys]
-    Clip[Smart Clipboard]
-    Finder[Finder Quick Actions]
-    Shell[Shell Runner - human-in-the-loop]
+  subgraph sleep [L3 Sleep - offline, on idle]
+    Extract["Entity/relation extraction (LightRAG-style, incremental)"]
+    Comm["Communities (Leiden) + hierarchical summaries (RAPTOR)"]
+    PPR["Associative index (HippoRAG 2 / Personalized PageRank)"]
   end
+  subgraph insight [L4 Insight Engine - keystone]
+    Disc["Discovery: link prediction, bridges, lags, anomalies, contradictions"]
+    Valid["Validation: effect size, support, FDR"]
+    Narr["Narration: LLM voices only the validated, with citations"]
+  end
+  L5["L5 Agent/Query: hybrid retrieval + grounded synthesis"]
 
-  HUD --> Engine
-  HUD --> Voice
-  HUD --> DS
-  Menu --> Engine
-  Onb --> AX
-  Settings --> Engine
-  TextEng --> AX
-  TextEng --> Engine
-  Engine --> Memory
-  Voice --> Engine
-
-  Engine -. conforms to .-> SkCore
-  Memory -. conforms to .-> SkCore
-  Voice -. conforms to .-> SkCore
+  L0 --> L1 --> Vec
+  L1 --> Graph
+  Vec --> sleep
+  Graph --> sleep
+  sleep --> Disc --> Valid --> Narr
+  Vec --> L5
+  PPR --> L5
+  Comm --> L5
+  Narr --> L5
 ```
 
 ### Layer responsibilities
 
-- **UI Layer** — SwiftUI views, windows (menu-bar `NSStatusItem`, a borderless floating `NSPanel` for the HUD), onboarding, settings, and the `DesignSystem` (tokens + the Rive mascot). Holds no business logic; talks to the core through injected protocol types.
-- **Core Layer** — the brains. Inference, memory/RAG, text transformations, voice. Each is a local Swift package exposing a small protocol-driven API.
-- **System Layer (`SystemBridge`)** — the only place allowed to touch fragile/low-level macOS APIs (Accessibility `AX*`, `CGEvent` input simulation, Carbon hotkeys, pasteboard, `ScreenCaptureKit`, shell). Everything else depends on its protocols, so risky code is quarantined and testable.
+- **L0 Capture / L1 Units** — an append-only raw log (the source of truth) and
+  the atomic memory units extracted from it, each pointing back to L0 byte
+  ranges for provenance.
+- **L2 Index** — a compressed vector index (cheap static first-pass, then a
+  compressed precise rerank) plus a knowledge graph of entities/relations with
+  temporal edges, all mmap-backed so RAM stays bounded.
+- **L3 Sleep** — offline consolidation: incremental extraction, community
+  detection, hierarchical summarization, and the associative (PPR) index. Runs
+  only when idle and on power, interruptible and resumable.
+- **L4 Insight Engine** — the keystone, designed to be non-hallucinating by
+  *separating discovery from narration* (see below).
+- **L5 Agent/Query** — hybrid vector + graph retrieval feeding grounded
+  synthesis; the surface the app and bindings talk to.
 
-## 3. Module map (local Swift packages)
+## Insight Engine without hallucinations
 
-The codebase is split into independent local SPM packages under `Packages/`. Tuist generates the Xcode workspace and the thin app target; functionality and third-party dependencies live in the packages.
+Discovery is deterministic and evidence-bearing; statistical validation gates
+what survives; only then does an LLM narrate — and only with provenance. If it
+can't cite, it stays silent.
+
+```mermaid
+graph LR
+  Cand["Candidate links (deterministic algorithms, with evidence)"] --> Filter["Stat filter: effect size, support, FDR, causal skepticism"]
+  Filter --> Rank["Rank: surprising + supported + useful"]
+  Rank --> Label["Calibrate: Observation / Pattern / Hypothesis"]
+  Label --> Cite["LLM narrative strictly with provenance ('cite or be silent')"]
+```
+
+## Engine ↔ app boundary
 
 ```mermaid
 graph TD
-  App[App target] --> Features
-  Features --> DesignSystem
-  Features --> InferenceEngine
-  Features --> MemoryStore
-  Features --> SystemBridge
-  Features --> TextEngine
-  Features --> VoiceEngine
-  Features --> SkinkiCore
-
-  InferenceEngine --> SkinkiCore
-  MemoryStore --> SkinkiCore
-  SystemBridge --> SkinkiCore
-  TextEngine --> SkinkiCore
-  TextEngine --> SystemBridge
-  VoiceEngine --> SkinkiCore
-  DesignSystem --> SkinkiCore
-```
-
-| Package | Responsibility | Key external deps |
-| --- | --- | --- |
-| `SkinkiCore` | Domain models, cross-cutting protocols (`LLMService`, `EmbeddingService`, `SpeechSynthesizing`, `MemoryStoring`), DI container, config, logging. The dependency sink that breaks cycles. | — |
-| `InferenceEngine` | Loads/unloads Gemma 4, streams tokens, detects hardware tier, owns the `ModelContainer`. Implements `LLMService` + `EmbeddingService`. | `mlx-swift-lm` (`MLXLLM`, `MLXLMCommon`, `MLXEmbedders`), `swift-transformers`, `swift-huggingface` |
-| `MemoryStore` | Long-term memory & RAG over SQLite + `sqlite-vec`. Implements `MemoryStoring`. | `SQLiteVec` |
-| `SystemBridge` | Accessibility selection capture, `CGEvent` input simulation, global hotkeys, smart clipboard, shell runner, screen capture (later). | — (system frameworks) |
-| `TextEngine` | Rewrite / translate / summarize pipelines and prompt templates operating on captured text. | — |
-| `VoiceEngine` | Speech-to-text (native dictation) + `SpeechSynthesizing` (`AVSpeechSynthesizer` now, neural later). | — |
-| `DesignSystem` | Design tokens (color, blur, motion timings, haptics), reusable joy components, the `MascotView` Rive controller. | `RiveRuntime` |
-| `Features` | Composition layer: `ChatHUD`, `MenuBarUI`, `Onboarding`, `Settings`. Wires core packages into SwiftUI. | (all of the above) |
-
-## 4. The SwiftUI ↔ MLX ↔ macOS bridge
-
-The central concern: connect SwiftUI, MLX inference, and system calls elegantly **without ever blocking the UI**.
-
-### 4.1 Inference as an actor with streaming
-
-`InferenceEngine` is an `actor` that owns the MLX `ModelContainer`. Generation is exposed as an `AsyncStream<String>` of token deltas. SwiftUI views consume the stream with `for await` and append to an `@Observable` view model — natural backpressure, no callbacks, no locks.
-
-```swift
-public protocol LLMService: Sendable {
-    func ensureLoaded(tier: ModelTier) async throws
-    func generate(_ request: GenerationRequest) -> AsyncThrowingStream<String, Error>
-    func unload() async
-}
-```
-
-```mermaid
-sequenceDiagram
-  participant V as SwiftUI View (@MainActor)
-  participant VM as ChatViewModel (@Observable)
-  participant E as InferenceEngine (actor)
-  participant M as MLX / Metal
-
-  V->>VM: send(prompt)
-  VM->>E: generate(request) -> AsyncStream
-  E->>M: tokenize + prefill (mmap-loaded weights)
-  loop each token
-    M-->>E: token logits
-    E-->>VM: yield(token delta)
-    VM-->>V: update text (main actor hop)
+  subgraph engine [kortex - headless Rust]
+    Core["Memory engine: capture, index, graph, sleep, insight, query"]
+    FFI["C-ABI / FFI + CLI (Stage 6)"]
   end
-  E-->>VM: finish
+  subgraph app [apps/skinki-macos - parked, Stage 7]
+    UI["SwiftUI HUD + menu bar + Rive mascot"]
+    Bind["Swift bindings"]
+  end
+  Py["Python bindings (CI / eval)"]
+
+  Core --> FFI
+  FFI --> Bind --> UI
+  FFI --> Py
 ```
 
-### 4.2 Hardware tiering
+The engine is the portable artifact ("FFmpeg for personal knowledge"): headless,
+embeddable, with a stable C-ABI/FFI and CLI (Stage 6). The macOS app consumes it
+through Swift bindings at Stage 7. A Python binding drives CI and evaluation.
 
-On first run (and when memory pressure changes), `InferenceEngine` picks a model tier from unified memory size, with a manual override in Settings.
+## How the code maps to the layers (current)
 
-```mermaid
-graph TD
-  Start[Detect unified memory] --> Q{">= 32 GB?"}
-  Q -- yes --> Big[Gemma 4 26B-A4B MoE - 4-bit]
-  Q -- no --> Mid{">= 16 GB?"}
-  Mid -- yes --> E4B[Gemma 4 E4B - 4-bit]
-  Mid -- no --> E2B[Gemma 4 E2B - 4-bit fallback]
-```
+| Layer | Where it lives today |
+| --- | --- |
+| Eval harness (cross-cutting) | [`kortex/crates/kortex-eval`](kortex/crates/kortex-eval), [`kortex-telemetry`](kortex/crates/kortex-telemetry) |
+| Synthetic corpus + ground truth | [`kortex/crates/kortex-corpus`](kortex/crates/kortex-corpus) |
+| Baseline retriever (L2a proxy) | [`kortex/crates/kortex-baseline`](kortex/crates/kortex-baseline) |
+| CLI / orchestration | [`kortex/crates/kortex-harness`](kortex/crates/kortex-harness) |
+| L1-L5 engine | built stage by stage (see [`ROADMAP.md`](ROADMAP.md)) |
+| Consumer wrapper | [`apps/skinki-macos`](apps/skinki-macos) (parked, Stage 7) |
 
-### 4.3 Memory humility lifecycle (Pillar 3)
+## Why these choices (trade-offs)
 
-- **Cold start:** weights are memory-mapped (`mmap`), so time-to-first-token stays low without reading the whole file up front.
-- **Warm:** the `ModelContainer` is retained while a session is active.
-- **Idle:** an idle timer (e.g. 90s with no activity) triggers `unload()`, releasing weights back to the OS. The next request transparently reloads.
-- **Pressure:** subscribe to `DISPATCH_SOURCE_TYPE_MEMORYPRESSURE` to unload eagerly under system pressure.
+- **Rust core over a Swift-only app:** portability (embeddable anywhere),
+  predictable memory, and `no_std`-friendly hot paths — at the cost of an FFI
+  boundary, which we pay deliberately so the engine outlives any one UI.
+- **Synthetic eval first:** real journals aren't labeled; planted ground truth
+  is the only way to honestly measure recall vs multi-hop vs insight before
+  building the expensive layers.
+- **Sleep-time consolidation:** keeps realtime capture instant and the battery
+  budget intact by deferring all heavy graph/summary work to idle-on-power.
 
-### 4.4 System calls behind a bridge
+## Related documents
 
-The UI and core never import Accessibility or Carbon directly. `SystemBridge` exposes async, `Sendable` protocols (e.g. `SelectionReading`, `InputSimulating`, `HotkeyRegistering`). This isolates the riskiest, most permission-sensitive, and OS-version-fragile code, and makes it mockable in tests.
-
-```mermaid
-sequenceDiagram
-  participant U as User (any app)
-  participant HK as SystemBridge.Hotkey
-  participant TE as TextEngine
-  participant AX as SystemBridge.Accessibility
-  participant E as InferenceEngine
-
-  U->>HK: presses global shortcut
-  HK->>TE: trigger(action: .rewrite)
-  TE->>AX: readSelectedText()
-  AX-->>TE: selected string
-  TE->>E: generate(rewrite prompt) stream
-  E-->>TE: rewritten text
-  TE->>AX: replaceSelection(with: result)  %% simulated paste / typing
-  AX-->>U: text replaced in place
-```
-
-## 5. Concurrency & threading model
-
-- **`@MainActor`** — all SwiftUI views and view models that drive UI.
-- **`actor InferenceEngine`** — serializes access to the (non-`Sendable`) MLX model; only one generation runs at a time.
-- **`actor MemoryStore`** — serializes SQLite access.
-- **Detached work** — embeddings and disk I/O run off the main actor and hand results back via `async` returns or streams.
-- **Cancellation** — generation streams are cancellable; closing the HUD cancels the in-flight task.
-
-## 6. Security & privacy posture
-
-- 100% on-device. No network calls for inference; the only network use is the one-time model download (Hugging Face), shown transparently during onboarding.
-- **Human-in-the-loop** for any destructive action: shell commands and file mutations require explicit confirmation in the UI, with a clear diff/preview. Destructive operations are gated behind a confirmation protocol in `SystemBridge`.
-- Memory data is stored locally in `~/Library/Application Support/Skinki/` and is encryptable at rest (SQLCipher) — see [`docs/MEMORY.md`](docs/MEMORY.md).
-- TCC permissions (Accessibility, Microphone, Speech Recognition, optionally Full Disk Access, Screen Recording) are requested contextually with friendly explanations, never up front in a wall.
-
-## 7. Packaging & distribution
-
-- Built and signed with a Developer ID certificate, **Hardened Runtime** enabled.
-- Notarized and stapled, distributed as a `.dmg`.
-- Models are downloaded on first launch (not bundled), keeping the `.dmg` small.
-
-## 8. Why these choices (trade-offs)
-
-- **`mlx-swift-lm` over a Python sidecar:** single binary, lower RAM, faster start, simpler packaging — at the cost of being tied to the Swift MLX API surface and its model coverage. Acceptable: it already supports Gemma 4 text + MoE and EmbeddingGemma.
-- **Local SPM packages over a monolith:** enforced module boundaries, faster incremental builds, testability — at the cost of some manifest overhead.
-- **Rive over Lottie/pure-Metal:** a reactive, state-machine mascot that responds to events (thinking, typing, success, error) — the "living" feel — without the cost of hand-writing Metal.
-- **Non-sandboxed:** required for the deep integration that is the whole point; mitigated by notarization and explicit, contextual permission prompts.
-
-## 9. Related documents
-
-- [`ROADMAP.md`](ROADMAP.md) — phased delivery plan.
-- [`docs/MEMORY.md`](docs/MEMORY.md) — RAG and long-term memory.
-- [`docs/DESIGN.md`](docs/DESIGN.md) — joy-design system and mascot.
+- [`ROADMAP.md`](ROADMAP.md) — staged, hypothesis-driven plan with decision gates.
+- [`kortex/README.md`](kortex/README.md) — the engine and the Stage 0 harness.
+- [`apps/skinki-macos/ARCHITECTURE.md`](apps/skinki-macos/ARCHITECTURE.md) — the macOS wrapper (Stage 7).
