@@ -42,8 +42,25 @@ for the 20% that matters*.
 
 ## Index
 
-- `STAGE_2.md` — storage substrate (next; not yet written).
-- (later) `STAGE_3.md` ... `STAGE_7.md`.
+**Safe to delegate now** (mechanical impl behind a fixed interface; subtle design
+decisions pre-made and isolated as frontier-only tickets):
+
+- [`STAGE_2.md`](STAGE_2.md) — storage substrate: append-only L0 log +
+  content-addressed unit store (pure Rust, mmap). The Lance-vs-`.kx` call is a
+  deferred design ticket; the delegatable slice produces the data for it.
+- [`STAGE_4.md`](STAGE_4.md) — "sleep" scheduler: interruptible, resumable,
+  signal-gated background jobs, proven in a deterministic simulator (jobs are
+  stubs here; real ones come from Stage 3/5).
+- [`STAGE_6.md`](STAGE_6.md) — portable engine: stable C-ABI + Swift/Python
+  bindings with cross-language result parity (one frontier-reviewed `unsafe`
+  boundary).
+
+**Keep on a frontier model** (algorithm cores / anti-hallucination / UX):
+
+- Stage 3 (GraphRAG extraction + PPR) and Stage 5 (Insight Engine) — the "soul";
+  no spec hand-off, built with heavy review.
+- Stage 7 (macOS app) — parked; interaction design is human, boilerplate can be
+  delegated later.
 
 Stages 0 and 1 are complete; their "specs" are the shipped code, tests, and the
 results documented in [`../README.md`](../README.md).

@@ -1,0 +1,122 @@
+# Stage 6 — Portable engine: stable C-ABI/FFI + Swift/Python bindings (SPEC)
+
+- **Status:** ready-to-build (v0 surface = the Stage 1 search engine; the surface
+  grows as later stages land)
+- **Owner of the design (frontier/human):** done below — the C-ABI shape, memory
+  ownership, and error model are locked. The **only** frontier-review item is the
+  `unsafe` boundary in `ffi.rs` (R1).
+- **Delegatable to (cheaper model):** **yes** for all wiring (T1–T6). R1 (the
+  `unsafe` review) must be signed off by a frontier model/human before merge.
+
+> Read [`../../AGENTS.md`](../../AGENTS.md). Gate is law; determinism mandatory.
+> **No new runtime deps:** Python uses `ctypes` (pure C-ABI), Swift uses a module
+> map over a hand-written header. `cbindgen` is *optional* and dev-only.
+
+## 1. Hypothesis
+
+The engine packages into a Rust crate exposing a small, stable **C-ABI** so any
+host (Swift app, Python eval, third party) can build the index and run searches
+and get **byte-identical** results to the pure-Rust path — making `kortex` a
+genuinely portable "FFmpeg for personal knowledge."
+
+## 2. Budgets / fitness function (the gate)
+
+| Metric | Budget | How measured |
+| --- | --- | --- |
+| Cross-language result parity | **exact** | C, Python, (macOS: Swift) search ids == Rust `two_stage_search` ids |
+| ABI stability | header matches symbols | symbol-existence test + `kortex.h` checked in |
+| No leaks on the happy path | 0 | open→search×N→free under a leak check (e.g. `cargo test` + valgrind in CI optional) |
+| Panic safety | no unwHelpers across FFI | `panic = "abort"` for the cdylib, or `catch_unwind` at every boundary |
+
+The gate here is the **cross-language equality test**, not a numeric budget.
+
+## 3. Public interface (the C-ABI v0)
+
+New crate `kortex-ffi` (`crate-type = ["cdylib", "staticlib"]`). Hand-written
+header `kortex/crates/kortex-ffi/include/kortex.h`:
+
+```c
+#include <stdint.h>
+#include <stddef.h>
+
+typedef struct kx_engine kx_engine;   // opaque handle
+
+// Status codes: 0 = OK, negative = error (see kx_last_error for detail).
+int  kx_open(const char* index_dir, kx_engine** out_engine);
+int  kx_search(kx_engine* engine,
+               const float* query, size_t dim,
+               size_t k,
+               uint32_t* out_ids, size_t* out_len); // caller allocates out_ids[k]
+void kx_free_engine(kx_engine* engine);
+const char* kx_last_error(void);                     // thread-local, NUL-terminated
+const char* kx_version(void);
+```
+
+### Design, locked
+
+- **Opaque handle**: `kx_engine*` wraps the Rust engine; never expose Rust types.
+- **Memory ownership**: results are written into a **caller-allocated** buffer
+  (`out_ids` of length `k`); the engine writes `*out_len` actually filled. No
+  engine-allocated buffers to free → simplest, leak-free contract.
+- **Errors**: integer status + a **thread-local** last-error string
+  (`kx_last_error`). No panics cross the boundary: set
+  `panic = "abort"` in the cdylib profile, or wrap every `extern "C"` body in
+  `std::panic::catch_unwind` and return an error code. (Implementer picks one;
+  document it.)
+- **v0 engine**: back the handle with the existing Stage 1 pipeline
+  (`kortex-vector` two-stage search over a loaded index). `kx_open` loads a
+  prebuilt index directory; index *building* can stay Rust/CLI-only for v0.
+- **Bindings are thin**:
+  - **Python** (`bindings/python/kortex.py`): pure `ctypes` over the cdylib —
+    a `KortexEngine` class with `open`/`search`/`close`. No PyO3, no build step.
+  - **Swift** (`bindings/swift/`): a module map exposing `kortex.h` + a small
+    `KortexEngine` Swift wrapper. Compiles on macOS only.
+
+## 4. Invariants
+
+- Calling `kx_search` from any language returns ids identical to Rust
+  `two_stage_search` on the same seeded index + query.
+- The header in `include/kortex.h` exactly matches the exported symbols (a test
+  asserts every declared symbol is present in the built library).
+- No `unsafe` outside `ffi.rs`; that module is small and reviewed (R1).
+- Determinism preserved end-to-end. No new runtime dependencies.
+
+## 5. Test plan
+
+- **Rust unit:** the safe inner functions behind the FFI (handle lifecycle,
+  error-slot set/get) tested without crossing the ABI.
+- **C harness** (`tests/ffi/`): a tiny `.c` that opens an index, searches, prints
+  ids; a script builds the staticlib and runs it.
+- **Python parity test:** `ctypes` calls `kx_search`; asserts ids == a JSON dump
+  of Rust results for the same seed/query (produced by a harness subcommand).
+- **Swift parity test** (macOS CI only): same assertion via the Swift wrapper.
+- **Symbol test:** assert `kortex.h` declarations all resolve in the cdylib.
+- **Gate command:** a `scripts/ffi-gate.sh` that builds the lib and runs the C +
+  Python parity tests; CI invokes it. Non-zero on any mismatch.
+
+## 6. Task decomposition
+
+| Ticket | Type | Tier | Acceptance |
+| --- | --- | --- | --- |
+| R1: review the `unsafe` in `ffi.rs` (ptr validity, lifetimes, panic strategy) | review | **frontier/human** | sign-off required before merge |
+| T1: `kortex-ffi` crate (cdylib+staticlib) + opaque handle + thread-local error | impl | cheaper | builds both lib types |
+| T2: `extern "C"` wrappers for open/search/free/last_error/version | impl | cheaper | symbols exported |
+| T3: hand-written `include/kortex.h` + symbol-existence test | impl | cheaper | symbol test passes |
+| T4: C harness + build script | impl | cheaper | C test prints matching ids |
+| T5: Python `ctypes` binding + parity test | impl | cheaper | Python ids == Rust ids |
+| T6: Swift module map + wrapper + (macOS) parity test; `scripts/ffi-gate.sh` + CI | impl | cheaper | gate green |
+
+## 7. Definition of done
+
+- [ ] `scripts/ffi-gate.sh` green: C + Python (+ Swift on macOS) parity == Rust.
+- [ ] R1 `unsafe` review signed off.
+- [ ] `cargo test`, `clippy -D warnings`, `cargo fmt --check` clean.
+- [ ] CI: add an `ffi gate` job (builds the lib, runs C + Python parity).
+- [ ] ROADMAP Stage 6 row → done; this spec Status → done.
+
+## 8. Out of scope
+
+- Exposing graph/insight APIs over FFI — added incrementally as Stages 3/5 land
+  (this v0 covers index load + search).
+- Packaging/distribution (`.dmg`, wheels) — **Stage 7** / release work.
+- Async or streaming FFI — v0 is synchronous.
