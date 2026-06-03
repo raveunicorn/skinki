@@ -56,3 +56,10 @@ jobs:
         run: >
           cargo run --release --locked -p kortex-harness -- compress-bench
           --source synthetic --dim 256 --vectors 4000 --queries 100 --assert-gate
+      # Stage 2: storage substrate gate (content overhead ≤ 1.25x;
+      # index bytes/unit ≤ 24; p95 < 1ms; ingest ≥ 50k/s).
+      # Uses the Stage 0 synthetic corpus — deterministic, no external deps.
+      - name: Stage 2 store gate
+        run: >
+          cargo run --release --locked -p kortex-harness -- store-bench
+          --years 5 --assert-gate

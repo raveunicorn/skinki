@@ -155,8 +155,20 @@ dependencies = [
  "kortex-baseline",
  "kortex-corpus",
  "kortex-eval",
+ "kortex-store",
  "kortex-telemetry",
  "kortex-vector",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kortex-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "serde",
  "serde_json",
 ]
 

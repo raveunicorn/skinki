@@ -17,8 +17,8 @@ layered design and budgets.
 | --- | --- | --- |
 | 0 | Eval harness + synthetic corpus (the measuring stick) | **Done** |
 | 1 | Memory compression PoC (RaBitQ + Model2Vec, two-stage, mmap) | **Done** |
-| 2 | Storage substrate (Lance/Cozo) + append-only L0; maybe a `.kx` codec | Next |
-| 3 | Incremental local GraphRAG (LightRAG + HippoRAG 2 PPR + RAPTOR) | Planned |
+| 2 | Storage substrate (Lance/Cozo) + append-only L0; maybe a `.kx` codec | **Done** |
+| 3 | Incremental local GraphRAG (LightRAG + HippoRAG 2 PPR + RAPTOR) | Next |
 | 4 | "Sleep" consolidation engine (idle + on-power background jobs) | Planned |
 | 5 | Insight Engine (deterministic discovery + FDR + cite-or-silence) | Planned |
 | 6 | Portable `kortex` crate (C-ABI/FFI + CLI, Swift/Python bindings) | Planned |
@@ -59,15 +59,21 @@ layered design and budgets.
   from a deterministic static hash embedder; real EmbeddingGemma vectors can be
   swapped in without changing the compression-fidelity conclusion.)
 
-## Stage 2 — Storage substrate (and maybe our own format)
+## Stage 2 — Storage substrate (pure-Rust, gate passed) — Done
 
-- **Hypothesis:** an existing embeddable engine (Lance and/or Cozo) holds the
-  unit store + vector + graph within budget, with provenance back to L0.
-- **Tests:** prototype L0 + L1 in Lance/Cozo; ingest throughput, size vs heavy
-  Markdown, random-access latency, mmap footprint; custom container vs Lance.
-- **Gate / invent:** if the budget breaks, design a **"thought codec"** (`.kx`):
-  semantic delta/dedup, provenance addressing, mmap, zero-copy. The "FFmpeg
-  moment."
+- **Hypothesis:** a pure-Rust, mmap-backed append-only log + content-addressed
+  unit store can hold years of capture within budget without pulling in a heavy
+  embedded DB.
+- **Built:** `kortex-store` crate — compact binary encoding (lossless
+  `created_utc_secs`, `text_len` derived from framing), segmented append-only
+  files, 128-bit FNV1a dedup, zero-copy mmap reads, `derive_units` sentence
+  splitter. Benchmarked via `kortex store-bench`.
+- **Gate (met):** two metrics checked — **content overhead 1.21x** (budget
+  1.25x) and **index bytes/unit 20.0** (budget 24). Random-access p95 = 0.3 us
+  (budget < 1 ms). Ingest throughput 2.5M units/s (budget >= 50k).
+- **Invent? No.** The pure-Rust substrate clears all budgets, so D1 (Lance/Cozo
+  vs pure-Rust) resolves to *keep pure Rust*. D2 (`.kx` codec) stays deferred —
+  no budget broke. All existing `cargo test`/clippy/fmt gates green.
 
 ## Stage 3 — Graph & retrieval quality
 

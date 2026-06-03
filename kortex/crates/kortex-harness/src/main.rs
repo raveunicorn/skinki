@@ -19,9 +19,11 @@ use kortex_eval::{
     answer_in_entries, ndcg_at_k, precision_at_k, recall_at_k, score_insights, Latency, Report,
     RetrievalScores, RetrievalSystem,
 };
+use kortex_store::{derive_units, RawEvent, Source, Store};
 use kortex_telemetry::{peak_rss_bytes, LatencySummary};
 use kortex_vector::bench::{passes_gate, run_matrix, verdict, BenchReport, Budgets};
 use kortex_vector::embed::{synthetic_clusters, StaticHashEmbedder};
+
 use kortex_vector::VectorSet;
 
 #[derive(Parser)]
@@ -68,6 +70,20 @@ enum Cmd {
         entries_per_day: u32,
         #[arg(long, default_value_t = 10)]
         k: usize,
+    },
+    /// Stage 2: benchmark L0 store (overhead, random-access, ingest throughput).
+    StoreBench {
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long, default_value_t = 5)]
+        years: u32,
+        #[arg(long, default_value_t = 2)]
+        entries_per_day: u32,
+        #[arg(long)]
+        report_out: Option<PathBuf>,
+        /// Exit non-zero if budgets miss (for CI).
+        #[arg(long, default_value_t = false)]
+        assert_gate: bool,
     },
     /// Stage 1: benchmark compression codecs (int8/PQ/RaBitQ) vs exact float32.
     CompressBench {
@@ -257,6 +273,40 @@ fn main() -> Result<()> {
                  and to surface zero insights. Those gaps are the targets for Stages 1-5."
             );
         }
+        Cmd::StoreBench {
+            seed,
+            years,
+            entries_per_day,
+            report_out,
+            assert_gate,
+        } => {
+            let report = run_store_bench(seed, years, entries_per_day)?;
+            print_store_bench(&report);
+            if let Some(path) = report_out {
+                let file = std::fs::File::create(&path)
+                    .with_context(|| format!("creating {}", path.display()))?;
+                serde_json::to_writer_pretty(file, &report).context("writing report")?;
+                println!("Report written to {}", path.display());
+            }
+            if assert_gate {
+                let pass = report.content_overhead <= 1.25
+                    && report.index_bytes_per_unit <= 24.0
+                    && report.p95_us >= 0.0
+                    && report.p95_us < 1_000.0
+                    && report.ingest_units_per_sec >= 50_000.0;
+                if pass {
+                    println!("\nGATE: PASS (store-bench --assert-gate satisfied)");
+                } else {
+                    anyhow::bail!(
+                        "Stage 2 gate FAILED: content_overhead={:.3}x (budget 1.25x), index={:.1} B/unit (budget 24), p95={:.0}us (budget <1000us), ingest={:.0} units/s (budget >=50k)",
+                        report.content_overhead,
+                        report.index_bytes_per_unit,
+                        report.p95_us,
+                        report.ingest_units_per_sec
+                    );
+                }
+            }
+        }
         Cmd::CompressBench {
             source,
             seed,
@@ -417,6 +467,174 @@ fn print_compress_report(r: &BenchReport) {
         r.mmap.supported, r.mmap.code_bytes, r.mmap.recall_matches_ram, r.mmap.note
     );
     print!("{}", verdict(r));
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoreBenchReport {
+    corpus_entries: usize,
+    event_count: usize,
+    unit_count: usize,
+    raw_text_bytes: u64,
+    event_store_bytes: u64,
+    unit_store_bytes: u64,
+    store_bytes: u64,
+    content_overhead: f64,
+    index_bytes_per_unit: f64,
+    p50_us: f64,
+    p95_us: f64,
+    ingest_elapsed_secs: f64,
+    ingest_units_per_sec: f64,
+}
+
+// FIX 5: deterministic shuffle using the same SplitMix64 as the project.
+fn shuffle_det(seed: u64, items: &mut [kortex_store::UnitId]) {
+    // Simple portable SplitMix64 shuffle — same constants as kortex-corpus::Rng.
+    let mut state = seed;
+    for i in (1..items.len()).rev() {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        let j = (z ^ (z >> 31)) as usize % (i + 1);
+        items.swap(i, j);
+    }
+}
+
+fn run_store_bench(seed: u64, years: u32, entries_per_day: u32) -> Result<StoreBenchReport> {
+    let corpus = generate(&GenConfig {
+        seed,
+        years,
+        entries_per_day,
+    });
+
+    let dir = std::env::temp_dir().join(format!("kortex_store_bench_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut store = Store::open(&dir).context("opening store")?;
+
+    let ingest_start = Instant::now();
+    let mut total_units = 0usize;
+    for entry in &corpus.entries {
+        let ev = RawEvent {
+            source: if entry.kind == kortex_corpus::EntryKind::Voice {
+                Source::Voice
+            } else {
+                Source::Text
+            },
+            created_utc_secs: entry.day as i64 * 86400,
+            text: entry.text.clone(),
+        };
+        let event_id = store.append_event(&ev)?;
+        let units = derive_units(event_id, &entry.text);
+        total_units += units.len();
+        for u in &units {
+            store.append_unit(u)?;
+        }
+    }
+    let ingest_elapsed = ingest_start.elapsed();
+    store.sync()?;
+
+    let ingest_elapsed_secs = ingest_elapsed.as_secs_f64();
+    let ingest_units_per_sec = total_units as f64 / ingest_elapsed_secs.max(0.001);
+
+    // FIX 1: two explicit metrics, both checked by the gate.
+    let content_overhead = if store.raw_text_bytes() > 0 {
+        store.event_store_bytes() as f64 / store.raw_text_bytes() as f64
+    } else {
+        0.0
+    };
+    let unit_count = store.unit_count();
+    let index_bytes_per_unit = if unit_count > 0 {
+        store.unit_store_bytes() as f64 / unit_count as f64
+    } else {
+        0.0
+    };
+
+    // FIX 5: random-access measured in random order (deterministic shuffle).
+    let mut uids: Vec<kortex_store::UnitId> = store.units().map(|(id, _)| id).collect();
+    shuffle_det(seed, &mut uids);
+    let mut latencies_us: Vec<f64> = Vec::new();
+    for &uid in &uids {
+        let start = Instant::now();
+        let _ = store.unit_text(uid);
+        latencies_us.push(start.elapsed().as_secs_f64() * 1_000_000.0);
+    }
+    latencies_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = latencies_us.len();
+    let pct = |p: f64| {
+        let idx = ((p * (n as f64 - 1.0)).round() as usize).min(n.saturating_sub(1));
+        latencies_us[idx]
+    };
+    let p50_us = if n > 0 { pct(0.50) } else { 0.0 };
+    let p95_us = if n > 0 { pct(0.95) } else { 0.0 };
+
+    let _ = std::fs::remove_dir_all(&dir);
+
+    Ok(StoreBenchReport {
+        corpus_entries: corpus.entries.len(),
+        event_count: store.event_count(),
+        unit_count,
+        raw_text_bytes: store.raw_text_bytes(),
+        event_store_bytes: store.event_store_bytes(),
+        unit_store_bytes: store.unit_store_bytes(),
+        store_bytes: store.store_bytes(),
+        content_overhead,
+        index_bytes_per_unit,
+        p50_us,
+        p95_us,
+        ingest_elapsed_secs,
+        ingest_units_per_sec,
+    })
+}
+
+fn print_store_bench(r: &StoreBenchReport) {
+    println!("\n=== Kortex Stage 2 — Store Benchmark ===");
+    println!("corpus entries    : {}", r.corpus_entries);
+    println!("events stored     : {}", r.event_count);
+    println!("units stored      : {}", r.unit_count);
+    println!(
+        "raw text bytes    : {} ({:.1} MB)",
+        r.raw_text_bytes,
+        r.raw_text_bytes as f64 / 1_048_576.0
+    );
+    println!(
+        "event store bytes : {} ({:.1} MB)",
+        r.event_store_bytes,
+        r.event_store_bytes as f64 / 1_048_576.0
+    );
+    println!(
+        "unit store bytes  : {} ({:.1} MB)",
+        r.unit_store_bytes,
+        r.unit_store_bytes as f64 / 1_048_576.0
+    );
+    println!(
+        "content overhead  : {:.3}x  (budget: <= 1.25x)",
+        r.content_overhead
+    );
+    println!(
+        "index B/unit      : {:.1}  (budget: <= 24.0)",
+        r.index_bytes_per_unit
+    );
+    println!("get_unit p50      : {:.1} us", r.p50_us);
+    println!(
+        "get_unit p95      : {:.1} us  (budget: < 1000 us)",
+        r.p95_us
+    );
+    println!(
+        "ingest throughput : {:.0} units/s  (budget: >= 50000 units/s, {:.3}s)",
+        r.ingest_units_per_sec, r.ingest_elapsed_secs
+    );
+    let ok_content = r.content_overhead <= 1.25;
+    let ok_index = r.index_bytes_per_unit <= 24.0;
+    let ok_p95 = r.p95_us >= 0.0 && r.p95_us < 1_000.0;
+    let ok_ingest = r.ingest_units_per_sec >= 50_000.0;
+    println!();
+    println!(
+        "gate check: content={} index={} p95={} ingest={}",
+        if ok_content { "PASS" } else { "FAIL" },
+        if ok_index { "PASS" } else { "FAIL" },
+        if ok_p95 { "PASS" } else { "FAIL" },
+        if ok_ingest { "PASS" } else { "FAIL" },
+    );
 }
 
 fn print_ground_truth_summary(corpus: &Corpus) {
