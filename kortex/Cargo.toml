@@ -5,6 +5,7 @@ members = [
     "crates/kortex-eval",
     "crates/kortex-telemetry",
     "crates/kortex-baseline",
+    "crates/kortex-vector",
     "crates/kortex-harness",
 ]
 
@@ -30,6 +31,7 @@ kortex-corpus = { path = "crates/kortex-corpus" }
 kortex-eval = { path = "crates/kortex-eval" }
 kortex-telemetry = { path = "crates/kortex-telemetry" }
 kortex-baseline = { path = "crates/kortex-baseline" }
+kortex-vector = { path = "crates/kortex-vector" }
 
 [profile.release]
 opt-level = 3

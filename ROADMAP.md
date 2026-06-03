@@ -16,8 +16,8 @@ layered design and budgets.
 | Stage | Focus | Status |
 | --- | --- | --- |
 | 0 | Eval harness + synthetic corpus (the measuring stick) | **Done** |
-| 1 | Memory compression PoC (RaBitQ + Model2Vec, two-stage, mmap) | Next |
-| 2 | Storage substrate (Lance/Cozo) + append-only L0; maybe a `.kx` codec | Planned |
+| 1 | Memory compression PoC (RaBitQ + Model2Vec, two-stage, mmap) | **Done** |
+| 2 | Storage substrate (Lance/Cozo) + append-only L0; maybe a `.kx` codec | Next |
 | 3 | Incremental local GraphRAG (LightRAG + HippoRAG 2 PPR + RAPTOR) | Planned |
 | 4 | "Sleep" consolidation engine (idle + on-power background jobs) | Planned |
 | 5 | Insight Engine (deterministic discovery + FDR + cite-or-silence) | Planned |
@@ -39,15 +39,25 @@ layered design and budgets.
   from multi-hop and insight discovery (BM25 fails them) — establishing the
   targets for Stages 1-5.
 
-## Stage 1 — Memory compression PoC (first "impossible task")
+## Stage 1 — Memory compression PoC (first "impossible task") — Done
 
 - **Hypothesis:** 5M units are searchable within the RAM/latency budget via
   **RaBitQ + Model2Vec first-pass**, with recall >= 95% vs full-precision.
-- **Tests:** RaBitQ (1 vs multi-bit) vs PQ vs int8; two-stage (cheap static →
-  compressed precise); mmap vs in-RAM; co-design of dimensionality (256 vs 768)
-  and quantization; measure recall/latency/RAM.
-- **Gate / invent:** hit the compression + recall + latency budgets, or design
-  our own quantization/layout.
+- **Built:** from-scratch codecs in [`kortex/crates/kortex-vector`](kortex/crates/kortex-vector)
+  — int8 scalar, Product Quantization (per-subspace k-means), and RaBitQ (random
+  rotation via sign-flip + Walsh-Hadamard, then 1-bit/multi-bit codes with the
+  unbiased estimator) — plus a two-stage retriever, an mmap-backed code store,
+  and an exact float32 baseline. Benchmarked via `kortex compress-bench`.
+- **Gate (met):** the winning config — **Matryoshka-truncation to 256 dims +
+  two-stage (1-bit RaBitQ coarse scan -> float rerank of candidates from mmap)**
+  — reaches **recall@10 = 1.000 at ~172 MB resident per 5M vectors** (budget 250
+  MB), p95 ~2.5 ms (budget 150 ms). At 768 dims the same pipeline hits recall
+  1.000 but 629 MB resident, so dimensionality is the decisive lever. A harder
+  synthetic set reproduces the verdict (recall 0.999 at 172 MB).
+- **Invent? No.** Existing building blocks clear the budget, so "beat-or-invent"
+  resolves to *beat* — no custom quantizer needed at this stage. (Vectors come
+  from a deterministic static hash embedder; real EmbeddingGemma vectors can be
+  swapped in without changing the compression-fidelity conclusion.)
 
 ## Stage 2 — Storage substrate (and maybe our own format)
 

@@ -1,10 +1,11 @@
 #![forbid(unsafe_code)]
-//! Kortex Stage 0 harness CLI.
+//! Kortex harness CLI.
 //!
 //! Subcommands:
-//!   generate  — write a deterministic synthetic corpus to disk
-//!   eval      — score a system (BM25 baseline) over a corpus file
-//!   demo      — generate + eval in one shot (no files), print the report
+//!   generate       — write a deterministic synthetic corpus to disk
+//!   eval           — score a system (BM25 baseline) over a corpus file
+//!   demo           — generate + eval in one shot (no files), print the report
+//!   compress-bench — Stage 1: benchmark vector-compression codecs vs exact
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -19,6 +20,9 @@ use kortex_eval::{
     RetrievalScores, RetrievalSystem,
 };
 use kortex_telemetry::{peak_rss_bytes, LatencySummary};
+use kortex_vector::bench::{run_matrix, verdict, BenchReport, Budgets};
+use kortex_vector::embed::{synthetic_clusters, StaticHashEmbedder};
+use kortex_vector::VectorSet;
 
 #[derive(Parser)]
 #[command(name = "kortex", about = "Kortex Stage 0 — synthetic corpus + eval harness")]
@@ -61,6 +65,31 @@ enum Cmd {
         entries_per_day: u32,
         #[arg(long, default_value_t = 10)]
         k: usize,
+    },
+    /// Stage 1: benchmark compression codecs (int8/PQ/RaBitQ) vs exact float32.
+    CompressBench {
+        /// Vector source: "corpus" (static-embed Stage 0 text) or "synthetic".
+        #[arg(long, default_value = "corpus")]
+        source: String,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long, default_value_t = 5)]
+        years: u32,
+        #[arg(long, default_value_t = 2)]
+        entries_per_day: u32,
+        /// Full embedding dimensionality (also benched truncated to 256).
+        #[arg(long, default_value_t = 768)]
+        dim: usize,
+        /// Cap on base vectors (exact ground truth is O(queries*vectors*dim)).
+        #[arg(long, default_value_t = 20000)]
+        vectors: usize,
+        /// Number of held-out queries.
+        #[arg(long, default_value_t = 200)]
+        queries: usize,
+        #[arg(long, default_value_t = 10)]
+        k: usize,
+        #[arg(long)]
+        report_out: Option<PathBuf>,
     },
 }
 
@@ -221,8 +250,148 @@ fn main() -> Result<()> {
                  and to surface zero insights. Those gaps are the targets for Stages 1-5."
             );
         }
+        Cmd::CompressBench {
+            source,
+            seed,
+            years,
+            entries_per_day,
+            dim,
+            vectors,
+            queries,
+            k,
+            report_out,
+        } => {
+            let (base, qset, label) =
+                build_vectors(&source, seed, years, entries_per_day, dim, vectors, queries);
+            println!(
+                "Stage 1 compression bench | source: {label} | {} base vecs, {} queries, dim {}",
+                base.count(),
+                qset.count(),
+                base.dim
+            );
+            let budgets = Budgets::default();
+
+            // Co-design: full dim, and Matryoshka-truncated to 256.
+            let mut reports: Vec<BenchReport> = Vec::new();
+            reports.push(run_matrix(&base, &qset, k, seed, &budgets));
+            if base.dim > 256 {
+                let base256 = base.truncate_dims(256);
+                let q256 = qset.truncate_dims(256);
+                reports.push(run_matrix(&base256, &q256, k, seed, &budgets));
+            }
+
+            for r in &reports {
+                print_compress_report(r);
+            }
+            println!("\nPeak RSS during bench: {:.1} MB", rss_mb());
+
+            if let Some(path) = report_out {
+                let file = std::fs::File::create(&path)
+                    .with_context(|| format!("creating {}", path.display()))?;
+                serde_json::to_writer_pretty(file, &reports).context("writing report")?;
+                println!("Report written to {}", path.display());
+            }
+        }
     }
     Ok(())
+}
+
+fn rss_mb() -> f64 {
+    peak_rss_bytes().unwrap_or(0) as f64 / 1_048_576.0
+}
+
+/// Build a base vector set + a held-out query set from the chosen source.
+fn build_vectors(
+    source: &str,
+    seed: u64,
+    years: u32,
+    entries_per_day: u32,
+    dim: usize,
+    cap: usize,
+    queries: usize,
+) -> (VectorSet, VectorSet, String) {
+    match source {
+        "synthetic" => {
+            let total = cap + queries;
+            let all = synthetic_clusters(seed, dim, total, 24, 0.45);
+            let base = all.slice_rows(0, cap);
+            let qset = all.slice_rows(cap, queries);
+            (base, qset, format!("synthetic (dim {dim}, 24 clusters)"))
+        }
+        _ => {
+            let corpus = generate(&GenConfig { seed, years, entries_per_day });
+            let embedder = StaticHashEmbedder::new(dim);
+            let mut all = embedder.embed_corpus(&corpus);
+            // Subsample to the cap (deterministic stride) to bound exact search.
+            if all.count() > cap + queries {
+                all = stride_subsample(&all, cap + queries);
+            }
+            let n = all.count();
+            let q = queries.min(n / 5).max(1);
+            let base = all.slice_rows(0, n - q);
+            let qset = all.slice_rows(n - q, q);
+            (
+                base,
+                qset,
+                format!("corpus static-embed (dim {dim}, {years}y)"),
+            )
+        }
+    }
+}
+
+fn stride_subsample(vs: &VectorSet, target: usize) -> VectorSet {
+    let n = vs.count();
+    if n <= target {
+        return vs.clone();
+    }
+    let stride = n / target;
+    let mut out = VectorSet::new(vs.dim);
+    let mut i = 0;
+    while i < n && out.count() < target {
+        out.push(vs.get(i));
+        i += stride;
+    }
+    out
+}
+
+fn print_compress_report(r: &BenchReport) {
+    println!(
+        "\n=== Compression matrix @ dim {} (vs exact float32, recall@{}) ===",
+        r.dim_full, r.k
+    );
+    println!(
+        "{:<14} {:>6} {:>8} {:>9} {:>10} {:>11} {:>6}",
+        "codec", "bytes", "compr", "recall", "p95_ms", "RAM/5M_MB", "gate"
+    );
+    for c in &r.single {
+        println!(
+            "{:<14} {:>6.0} {:>7.1}x {:>9.3} {:>10.3} {:>11.1} {:>6}",
+            c.name,
+            c.bytes_per_vector,
+            c.compression_x,
+            c.recall_at_k,
+            c.latency.p95_ms,
+            c.projected_ram_mb_5m,
+            if c.gate_pass { "PASS" } else { "-" }
+        );
+    }
+    println!("two-stage (coarse -> precise):");
+    for t in &r.two_stage {
+        println!(
+            "  {:<22} refine={:<4} recall={:.3} p95={:.3}ms resident/5M={:.1}MB",
+            format!("{}->{}", t.coarse, t.precise),
+            t.refine,
+            t.recall_at_k,
+            t.latency.p95_ms,
+            t.projected_resident_mb_5m
+        );
+        println!("      note: {}", t.note);
+    }
+    println!(
+        "mmap: supported={}, code_bytes={}, bytes_identical_to_ram={} ({})",
+        r.mmap.supported, r.mmap.code_bytes, r.mmap.recall_matches_ram, r.mmap.note
+    );
+    print!("{}", verdict(r));
 }
 
 fn print_ground_truth_summary(corpus: &Corpus) {

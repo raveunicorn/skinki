@@ -69,14 +69,22 @@ Skinki/
 
 ## Status
 
-**Stage 0 complete — the measuring stick.** A reproducible eval harness with a
+**Stage 0 — the measuring stick (done).** A reproducible eval harness with a
 deterministic synthetic corpus, retrieval/QA/insight metrics, latency+RAM
-telemetry, and a BM25 baseline that proves the harness cleanly separates recall
-(solved) from multi-hop and insight discovery (the targets for Stages 1-5).
+telemetry, and a BM25 baseline that cleanly separates recall (solved) from
+multi-hop and insight discovery (the targets for Stages 1-5).
+
+**Stage 1 — memory compression (done, gate passed).** From-scratch codecs
+(int8/PQ/RaBitQ) benchmarked against exact float32. The winning config —
+Matryoshka-256 + two-stage (1-bit RaBitQ scan -> float rerank from mmap) —
+hits **recall@10 = 1.000 at ~172 MB resident per 5M vectors** (budget 250 MB),
+p95 ~2.5 ms. Existing building blocks clear the budget, so no custom quantizer
+was needed yet. See [`kortex/README.md`](kortex/README.md#stage-1--memory-compression-the-first-impossible-task).
 
 ```bash
 cd kortex
-cargo run --release -p kortex-harness -- demo --years 10 --entries-per-day 270
+cargo run --release -p kortex-harness -- demo --years 10 --entries-per-day 270   # Stage 0
+cargo run --release -p kortex-harness -- compress-bench --source corpus          # Stage 1
 cargo test
 ```
 
