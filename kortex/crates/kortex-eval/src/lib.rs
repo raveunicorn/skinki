@@ -141,7 +141,10 @@ fn insight_matches(d: &DiscoveredInsight, planted: &InsightBridge) -> bool {
 /// Score surfaced insights against the planted ground truth. This is the
 /// keystone anti-hallucination metric: we want high recall of real insights
 /// AND a low false-insight rate (no apophenia).
-pub fn score_insights(discovered: &[DiscoveredInsight], planted: &[InsightBridge]) -> InsightScores {
+pub fn score_insights(
+    discovered: &[DiscoveredInsight],
+    planted: &[InsightBridge],
+) -> InsightScores {
     let surfaced = discovered.len();
     let true_positives = discovered
         .iter()

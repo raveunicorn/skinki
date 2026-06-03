@@ -50,7 +50,10 @@ struct BitWriter {
 
 impl BitWriter {
     fn with_capacity(bytes: usize) -> Self {
-        BitWriter { buf: Vec::with_capacity(bytes), bit_len: 0 }
+        BitWriter {
+            buf: Vec::with_capacity(bytes),
+            bit_len: 0,
+        }
     }
     fn write(&mut self, val: u32, bits: u8) {
         for b in 0..bits as usize {
@@ -113,7 +116,9 @@ impl Quantizer for FloatStore {
             .collect()
     }
     fn scores_subset(&self, query: &[f32], ids: &[u32]) -> Vec<f32> {
-        ids.iter().map(|&i| dot(self.data.get(i as usize), query)).collect()
+        ids.iter()
+            .map(|&i| dot(self.data.get(i as usize), query))
+            .collect()
     }
 }
 
@@ -145,7 +150,11 @@ impl ScalarI8 {
         let step: Vec<f32> = (0..dim)
             .map(|d| {
                 let r = hi[d] - lo[d];
-                if r > 1e-12 { r / 255.0 } else { 1.0 }
+                if r > 1e-12 {
+                    r / 255.0
+                } else {
+                    1.0
+                }
             })
             .collect();
         let mut codes = vec![0u8; n * dim];
@@ -156,7 +165,13 @@ impl ScalarI8 {
                 codes[i * dim + d] = q as u8;
             }
         }
-        ScalarI8 { dim, count: n, lo, step, codes }
+        ScalarI8 {
+            dim,
+            count: n,
+            lo,
+            step,
+            codes,
+        }
     }
 
     #[inline]
@@ -189,11 +204,15 @@ impl Quantizer for ScalarI8 {
     }
     fn scores(&self, query: &[f32]) -> Vec<f32> {
         let (c0, w) = self.prep(query);
-        (0..self.count).map(|i| self.score_with(c0, &w, i)).collect()
+        (0..self.count)
+            .map(|i| self.score_with(c0, &w, i))
+            .collect()
     }
     fn scores_subset(&self, query: &[f32], ids: &[u32]) -> Vec<f32> {
         let (c0, w) = self.prep(query);
-        ids.iter().map(|&i| self.score_with(c0, &w, i as usize)).collect()
+        ids.iter()
+            .map(|&i| self.score_with(c0, &w, i as usize))
+            .collect()
     }
 }
 
@@ -206,8 +225,8 @@ const PQ_ITERS: usize = 12;
 
 pub struct ProductQuantizer {
     count: usize,
-    m: usize,    // number of subspaces
-    sub: usize,  // dim per subspace = dim / m
+    m: usize,   // number of subspaces
+    sub: usize, // dim per subspace = dim / m
     /// Codebooks: m * PQ_K * sub, row-major [subspace][centroid][component].
     codebooks: Vec<f32>,
     codes: Vec<u8>, // count * m
@@ -217,7 +236,10 @@ impl ProductQuantizer {
     /// `m` must divide `vs.dim`.
     pub fn build(vs: &VectorSet, m: usize, seed: u64) -> Self {
         let dim = vs.dim;
-        assert!(dim.is_multiple_of(m), "PQ subspaces ({m}) must divide dim ({dim})");
+        assert!(
+            dim.is_multiple_of(m),
+            "PQ subspaces ({m}) must divide dim ({dim})"
+        );
         let sub = dim / m;
         let n = vs.count();
         let mut codebooks = vec![0.0f32; m * PQ_K * sub];
@@ -243,7 +265,13 @@ impl ProductQuantizer {
                 codes[i * m + sp] = nearest_centroid(&v[off..off + sub], cb, sub) as u8;
             }
         }
-        ProductQuantizer { count: n, m, sub, codebooks, codes }
+        ProductQuantizer {
+            count: n,
+            m,
+            sub,
+            codebooks,
+            codes,
+        }
     }
 
     /// Precompute the asymmetric similarity table: table[sp*PQ_K + c] =
@@ -352,11 +380,15 @@ impl Quantizer for ProductQuantizer {
     }
     fn scores(&self, query: &[f32]) -> Vec<f32> {
         let table = self.build_table(query);
-        (0..self.count).map(|i| self.score_with(&table, i)).collect()
+        (0..self.count)
+            .map(|i| self.score_with(&table, i))
+            .collect()
     }
     fn scores_subset(&self, query: &[f32], ids: &[u32]) -> Vec<f32> {
         let table = self.build_table(query);
-        ids.iter().map(|&i| self.score_with(&table, i as usize)).collect()
+        ids.iter()
+            .map(|&i| self.score_with(&table, i as usize))
+            .collect()
     }
 }
 
@@ -403,7 +435,11 @@ impl RaBitQ {
 
         let r = RABITQ_RANGE_SIGMA / (padded as f32).sqrt();
         let levels = 1u32 << bits;
-        let step = if bits == 1 { 0.0 } else { 2.0 * r / levels as f32 };
+        let step = if bits == 1 {
+            0.0
+        } else {
+            2.0 * r / levels as f32
+        };
         let lo = -r;
 
         let mut factors = vec![0.0f32; n];
@@ -527,18 +563,26 @@ impl Quantizer for RaBitQ {
         let y = self.prep(query);
         if self.bits == 1 {
             let total: f32 = y.iter().sum();
-            (0..self.count).map(|i| self.score_one_bit1(&y, total, i)).collect()
+            (0..self.count)
+                .map(|i| self.score_one_bit1(&y, total, i))
+                .collect()
         } else {
-            (0..self.count).map(|i| self.score_one_multibit(&y, i)).collect()
+            (0..self.count)
+                .map(|i| self.score_one_multibit(&y, i))
+                .collect()
         }
     }
     fn scores_subset(&self, query: &[f32], ids: &[u32]) -> Vec<f32> {
         let y = self.prep(query);
         if self.bits == 1 {
             let total: f32 = y.iter().sum();
-            ids.iter().map(|&i| self.score_one_bit1(&y, total, i as usize)).collect()
+            ids.iter()
+                .map(|&i| self.score_one_bit1(&y, total, i as usize))
+                .collect()
         } else {
-            ids.iter().map(|&i| self.score_one_multibit(&y, i as usize)).collect()
+            ids.iter()
+                .map(|&i| self.score_one_multibit(&y, i as usize))
+                .collect()
         }
     }
 }

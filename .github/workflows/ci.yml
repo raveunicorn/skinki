@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The eval gate is law: every PR must keep build/test/clippy/fmt green AND keep
+# the active stage's fitness gate passing. See AGENTS.md and kortex/specs/.
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: kortex
+
+jobs:
+  check:
+    name: build / test / clippy / fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: kortex
+      - name: Formatting
+        run: cargo fmt --check
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Build
+        run: cargo build --locked
+      - name: Tests
+        run: cargo test --locked
+
+  gate:
+    name: stage fitness gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: kortex
+      # Stage 1: compression gate (recall >= 95% within the M1 Air RAM budget).
+      # Synthetic source keeps it fast and deterministic; the verdict is
+      # N-independent so a small set still validates the budget.
+      - name: Stage 1 compression gate
+        run: >
+          cargo run --release --locked -p kortex-harness -- compress-bench
+          --source synthetic --dim 256 --vectors 4000 --queries 100 --assert-gate

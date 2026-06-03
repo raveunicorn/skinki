@@ -20,12 +20,15 @@ use kortex_eval::{
     RetrievalScores, RetrievalSystem,
 };
 use kortex_telemetry::{peak_rss_bytes, LatencySummary};
-use kortex_vector::bench::{run_matrix, verdict, BenchReport, Budgets};
+use kortex_vector::bench::{passes_gate, run_matrix, verdict, BenchReport, Budgets};
 use kortex_vector::embed::{synthetic_clusters, StaticHashEmbedder};
 use kortex_vector::VectorSet;
 
 #[derive(Parser)]
-#[command(name = "kortex", about = "Kortex Stage 0 — synthetic corpus + eval harness")]
+#[command(
+    name = "kortex",
+    about = "Kortex Stage 0 — synthetic corpus + eval harness"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -90,6 +93,9 @@ enum Cmd {
         k: usize,
         #[arg(long)]
         report_out: Option<PathBuf>,
+        /// Exit non-zero if no config meets the Stage 1 gate (for CI).
+        #[arg(long, default_value_t = false)]
+        assert_gate: bool,
     },
 }
 
@@ -184,7 +190,8 @@ fn run_eval(corpus: &Corpus, k: usize) -> Report {
 }
 
 fn load_corpus(path: &PathBuf) -> Result<Corpus> {
-    let bytes = std::fs::read(path).with_context(|| format!("reading corpus {}", path.display()))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("reading corpus {}", path.display()))?;
     let corpus: Corpus = serde_json::from_slice(&bytes).context("parsing corpus JSON")?;
     Ok(corpus)
 }
@@ -260,6 +267,7 @@ fn main() -> Result<()> {
             queries,
             k,
             report_out,
+            assert_gate,
         } => {
             let (base, qset, label) =
                 build_vectors(&source, seed, years, entries_per_day, dim, vectors, queries);
@@ -291,6 +299,19 @@ fn main() -> Result<()> {
                 serde_json::to_writer_pretty(file, &reports).context("writing report")?;
                 println!("Report written to {}", path.display());
             }
+
+            if assert_gate {
+                let any_pass = reports.iter().any(passes_gate);
+                if any_pass {
+                    println!("\nGATE: PASS (assert-gate satisfied)");
+                } else {
+                    anyhow::bail!(
+                        "Stage 1 gate FAILED: no config met recall {:.2} within {:.0} MB /5M",
+                        Budgets::default().recall_at_k,
+                        Budgets::default().idle_ram_mb_at_5m
+                    );
+                }
+            }
         }
     }
     Ok(())
@@ -319,7 +340,11 @@ fn build_vectors(
             (base, qset, format!("synthetic (dim {dim}, 24 clusters)"))
         }
         _ => {
-            let corpus = generate(&GenConfig { seed, years, entries_per_day });
+            let corpus = generate(&GenConfig {
+                seed,
+                years,
+                entries_per_day,
+            });
             let embedder = StaticHashEmbedder::new(dim);
             let mut all = embedder.embed_corpus(&corpus);
             // Subsample to the cap (deterministic stride) to bound exact search.

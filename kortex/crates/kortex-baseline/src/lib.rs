@@ -102,7 +102,11 @@ mod tests {
 
     #[test]
     fn finds_recall_answers_reasonably() {
-        let corpus = generate(&GenConfig { seed: 11, years: 3, ..Default::default() });
+        let corpus = generate(&GenConfig {
+            seed: 11,
+            years: 3,
+            ..Default::default()
+        });
         let mut bm25 = Bm25::new();
         bm25.index(&corpus);
 

@@ -240,25 +240,79 @@ const PEOPLE: &[&str] = &[
     "Viktor", "Mara", "Ivan", "Stella", "Hugo",
 ];
 const BOOKS: &[&str] = &[
-    "Deep Work", "Sapiens", "The Pragmatic Programmer", "Dune", "Meditations",
-    "Thinking Fast and Slow", "Antifragile", "The Beginning of Infinity", "Gödel Escher Bach",
+    "Deep Work",
+    "Sapiens",
+    "The Pragmatic Programmer",
+    "Dune",
+    "Meditations",
+    "Thinking Fast and Slow",
+    "Antifragile",
+    "The Beginning of Infinity",
+    "Gödel Escher Bach",
     "The Mythical Man-Month",
 ];
 const PROJECTS: &[&str] = &[
-    "Project Aurora", "the billing refactor", "the mobile rewrite", "Project Helix",
+    "Project Aurora",
+    "the billing refactor",
+    "the mobile rewrite",
+    "Project Helix",
     "the search migration",
 ];
-const TOOLS: &[&str] = &["Postgres", "Redis", "SwiftUI", "Rust", "Kafka", "Sqlite", "Datalog"];
-const FEELINGS: &[&str] = &["optimistic", "frustrated", "calm", "tired", "curious", "restless"];
+const TOOLS: &[&str] = &[
+    "Postgres", "Redis", "SwiftUI", "Rust", "Kafka", "Sqlite", "Datalog",
+];
+const FEELINGS: &[&str] = &[
+    "optimistic",
+    "frustrated",
+    "calm",
+    "tired",
+    "curious",
+    "restless",
+];
 
 const CLUSTERS: &[&str] = &["work", "health", "music", "travel", "reading"];
 
 const TOPICS_BY_CLUSTER: &[(&str, &[&str])] = &[
-    ("work", &["distributed systems", "code review", "on-call", "latency budgets"]),
-    ("health", &["trail running", "sleep", "strength training", "nutrition"]),
-    ("music", &["jazz harmony", "the band rehearsal", "a new synth", "songwriting"]),
-    ("travel", &["the Lisbon trip", "train schedules", "a hike in the Alps", "visa paperwork"]),
-    ("reading", &["habit formation", "memory consolidation", "stoicism", "complexity theory"]),
+    (
+        "work",
+        &[
+            "distributed systems",
+            "code review",
+            "on-call",
+            "latency budgets",
+        ],
+    ),
+    (
+        "health",
+        &["trail running", "sleep", "strength training", "nutrition"],
+    ),
+    (
+        "music",
+        &[
+            "jazz harmony",
+            "the band rehearsal",
+            "a new synth",
+            "songwriting",
+        ],
+    ),
+    (
+        "travel",
+        &[
+            "the Lisbon trip",
+            "train schedules",
+            "a hike in the Alps",
+            "visa paperwork",
+        ],
+    ),
+    (
+        "reading",
+        &[
+            "habit formation",
+            "memory consolidation",
+            "stoicism",
+            "complexity theory",
+        ],
+    ),
 ];
 
 // ---------------------------------------------------------------------------
@@ -341,7 +395,12 @@ impl Generator {
     }
 
     fn push(&mut self, day: u32, kind: EntryKind, text: String, tag: Option<Tag>) {
-        self.raw.push(RawEntry { day, kind, text, tag });
+        self.raw.push(RawEntry {
+            day,
+            kind,
+            text,
+            tag,
+        });
     }
 
     fn kind(&mut self) -> EntryKind {
@@ -366,10 +425,16 @@ impl Generator {
             let feeling = (*self.rng.pick(FEELINGS)).to_string();
             let person = (*self.rng.pick(PEOPLE)).to_string();
             let text = match self.rng.below(5) {
-                0 => format!("Spent the morning on {}. Feeling {feeling} about {topic}.", self.rng.pick(PROJECTS)),
+                0 => format!(
+                    "Spent the morning on {}. Feeling {feeling} about {topic}.",
+                    self.rng.pick(PROJECTS)
+                ),
                 1 => format!("Talked with {person} about {topic} today."),
                 2 => format!("Reading more on {topic}. {feeling} about where it leads."),
-                3 => format!("Tried {} for {topic}. Mixed results, a bit {feeling}.", self.rng.pick(TOOLS)),
+                3 => format!(
+                    "Tried {} for {topic}. Mixed results, a bit {feeling}.",
+                    self.rng.pick(TOOLS)
+                ),
                 _ => format!("Quiet day. Thought about {topic} on a walk, felt {feeling}."),
             };
             let kind = self.kind();
@@ -409,7 +474,9 @@ impl Generator {
             self.multihop_params.push(MultiHopParams { p, book });
 
             let day1 = self.rng.range(0, self.total_days.saturating_sub(2).max(1));
-            let day2 = self.rng.range(day1 + 1, (day1 + 60).min(self.total_days).max(day1 + 2));
+            let day2 = self
+                .rng
+                .range(day1 + 1, (day1 + 60).min(self.total_days).max(day1 + 2));
             let t1 = format!("{p_name} introduced me to {q_name} at the meetup.");
             let t2 = format!("{q_name} recommended the book {book_name}. Noted.");
             let k1 = self.kind();
@@ -434,7 +501,9 @@ impl Generator {
             // Several lead mentions, each followed `lag` days later by a trail event.
             let occurrences = self.rng.range(5, 9);
             for _ in 0..occurrences {
-                let start = self.rng.range(0, self.total_days.saturating_sub(lag + 1).max(1));
+                let start = self
+                    .rng
+                    .range(0, self.total_days.saturating_sub(lag + 1).max(1));
                 let lead_text = format!("Lots of {lead_name} again today.");
                 let kl = self.kind();
                 self.push(start, kl, lead_text, Some(Tag::TemporalLead(plan)));
@@ -461,7 +530,8 @@ impl Generator {
             let day1 = self.rng.range(0, self.total_days.saturating_sub(2).max(1));
             let day2 = self.rng.range(day1 + 1, self.total_days.max(day1 + 2));
             let t1 = format!("Convinced {x_name} is the best choice. Going all in on it.");
-            let t2 = format!("Changed my mind: {x_name} was a mistake. {y_name} is clearly better.");
+            let t2 =
+                format!("Changed my mind: {x_name} was a mistake. {y_name} is clearly better.");
             let k1 = self.kind();
             let k2 = self.kind();
             self.push(day1, k1, t1, Some(Tag::ContradictionBefore(plan)));
@@ -691,7 +761,11 @@ mod tests {
 
     #[test]
     fn deterministic_across_runs() {
-        let cfg = GenConfig { seed: 7, years: 2, ..Default::default() };
+        let cfg = GenConfig {
+            seed: 7,
+            years: 2,
+            ..Default::default()
+        };
         let a = serde_json::to_string(&generate(&cfg)).unwrap();
         let b = serde_json::to_string(&generate(&cfg)).unwrap();
         assert_eq!(a, b, "same seed must produce byte-identical corpus");
@@ -699,8 +773,16 @@ mod tests {
 
     #[test]
     fn different_seeds_differ() {
-        let a = generate(&GenConfig { seed: 1, years: 2, ..Default::default() });
-        let b = generate(&GenConfig { seed: 2, years: 2, ..Default::default() });
+        let a = generate(&GenConfig {
+            seed: 1,
+            years: 2,
+            ..Default::default()
+        });
+        let b = generate(&GenConfig {
+            seed: 2,
+            years: 2,
+            ..Default::default()
+        });
         assert_ne!(a.entries.len(), 0);
         assert_ne!(
             serde_json::to_string(&a).unwrap(),
@@ -710,7 +792,11 @@ mod tests {
 
     #[test]
     fn ground_truth_references_are_valid() {
-        let c = generate(&GenConfig { seed: 42, years: 3, ..Default::default() });
+        let c = generate(&GenConfig {
+            seed: 42,
+            years: 3,
+            ..Default::default()
+        });
         let n = c.entries.len() as u64;
         let check = |id: EntryId| assert!(id < n, "entry id {id} out of range {n}");
 
@@ -740,7 +826,10 @@ mod tests {
         for con in &c.ground_truth.contradictions {
             check(con.entry_before);
             check(con.entry_after);
-            assert!(con.entry_before < con.entry_after, "before must precede after");
+            assert!(
+                con.entry_before < con.entry_after,
+                "before must precede after"
+            );
         }
         for ins in &c.ground_truth.insights {
             assert!(ins.supporting_entries.len() >= 2);
@@ -752,7 +841,11 @@ mod tests {
 
     #[test]
     fn plants_something_of_each_kind() {
-        let c = generate(&GenConfig { seed: 3, years: 3, ..Default::default() });
+        let c = generate(&GenConfig {
+            seed: 3,
+            years: 3,
+            ..Default::default()
+        });
         assert!(!c.ground_truth.recall.is_empty());
         assert!(!c.ground_truth.multi_hop.is_empty());
         assert!(!c.ground_truth.temporal.is_empty());

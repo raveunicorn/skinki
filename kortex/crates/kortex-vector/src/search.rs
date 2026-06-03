@@ -21,8 +21,7 @@ pub fn two_stage_search(
 ) -> Vec<u32> {
     let shortlist = coarse.search(query, refine.max(k));
     let scores = precise.scores_subset(query, &shortlist);
-    let mut scored: Vec<(f32, u32)> =
-        scores.into_iter().zip(shortlist.iter().copied()).collect();
+    let mut scored: Vec<(f32, u32)> = scores.into_iter().zip(shortlist.iter().copied()).collect();
     select_top_k(&mut scored, k)
 }
 

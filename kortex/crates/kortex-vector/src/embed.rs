@@ -147,7 +147,11 @@ mod tests {
 
     #[test]
     fn embed_corpus_matches_entry_count() {
-        let c = generate(&GenConfig { seed: 1, years: 1, ..Default::default() });
+        let c = generate(&GenConfig {
+            seed: 1,
+            years: 1,
+            ..Default::default()
+        });
         let e = StaticHashEmbedder::new(64);
         let vs = e.embed_corpus(&c);
         assert_eq!(vs.count(), c.entries.len());

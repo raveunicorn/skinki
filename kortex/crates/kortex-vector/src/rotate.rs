@@ -70,7 +70,12 @@ impl Rotator {
             }
             signs.push(s);
         }
-        Rotator { in_dim, padded, signs, passes }
+        Rotator {
+            in_dim,
+            padded,
+            signs,
+            passes,
+        }
     }
 
     pub fn out_dim(&self) -> usize {

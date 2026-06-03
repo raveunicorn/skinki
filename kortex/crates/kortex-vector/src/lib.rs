@@ -104,7 +104,10 @@ pub struct VectorSet {
 
 impl VectorSet {
     pub fn new(dim: usize) -> Self {
-        VectorSet { dim, data: Vec::new() }
+        VectorSet {
+            dim,
+            data: Vec::new(),
+        }
     }
 
     pub fn count(&self) -> usize {

@@ -90,6 +90,21 @@ cargo test
 
 See [`ROADMAP.md`](ROADMAP.md) for all stages and their decision gates.
 
+## Contributing & delegation
+
+Every stage is built against a fixed interface and a machine-checkable fitness
+gate, so work can be delegated safely — the gate decides correctness, not
+reviewer taste.
+
+- [`AGENTS.md`](AGENTS.md) — hard rules for any coding agent/model (the gate is
+  law, determinism, no `unsafe` outside quarantine, minimal deps).
+- [`kortex/specs/`](kortex/specs/) — per-stage contracts (hypothesis, interface,
+  budgets, test plan, task tickets) written from a [template](kortex/specs/TEMPLATE.md),
+  plus which model tier each stage needs.
+- [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — CI runs build, tests,
+  `clippy -D warnings`, `cargo fmt --check`, and the active stage gate
+  (`compress-bench --assert-gate`) on every push/PR.
+
 ## License
 
 MIT OR Apache-2.0.

@@ -87,7 +87,11 @@ fn projected_mb(bytes_per_vector: f64, n: f64) -> f64 {
 }
 
 /// Time single-stage queries and gather latencies.
-fn timed_single(q: &dyn Quantizer, queries: &VectorSet, k: usize) -> (Vec<Vec<u32>>, Vec<Duration>) {
+fn timed_single(
+    q: &dyn Quantizer,
+    queries: &VectorSet,
+    k: usize,
+) -> (Vec<Vec<u32>>, Vec<Duration>) {
     let mut results = Vec::with_capacity(queries.count());
     let mut durations = Vec::with_capacity(queries.count());
     for qi in 0..queries.count() {
@@ -296,6 +300,20 @@ fn mmap_check(coarse: &RaBitQ) -> MmapCheck {
     }
 }
 
+/// Machine-checkable gate: does any config meet recall AND the RAM budget?
+///
+/// A single-stage codec passes if `gate_pass` (recall + projected RAM). A
+/// two-stage pipeline passes if it meets the recall budget AND its resident
+/// footprint at 5M is within the RAM budget. This is what CI asserts.
+pub fn passes_gate(report: &BenchReport) -> bool {
+    let single = report.single.iter().any(|c| c.gate_pass);
+    let two = report.two_stage.iter().any(|t| {
+        t.recall_at_k >= report.budgets.recall_at_k
+            && t.projected_resident_mb_5m <= report.budgets.idle_ram_mb_at_5m
+    });
+    single || two
+}
+
 /// Apply the gate and produce a human-readable verdict string.
 pub fn verdict(report: &BenchReport) -> String {
     let passing: Vec<&CodecResult> = report.single.iter().filter(|c| c.gate_pass).collect();
@@ -326,4 +344,44 @@ pub fn verdict(report: &BenchReport) -> String {
         ));
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embed::synthetic_clusters;
+
+    #[test]
+    fn gate_passes_on_separable_data() {
+        // A small, clearly-clustered set: the two-stage pipeline must clear the
+        // recall + RAM gate. This is the contract CI's --assert-gate relies on.
+        // The gate verdict is N-independent (footprint is per-vector), so a
+        // small N keeps the test fast while still validating the contract.
+        let all = synthetic_clusters(7, 256, 700, 16, 0.4);
+        let base = all.slice_rows(0, 600);
+        let queries = all.slice_rows(600, 40);
+        let report = run_matrix(&base, &queries, 10, 7, &Budgets::default());
+        assert!(
+            passes_gate(&report),
+            "expected gate to pass:\n{}",
+            verdict(&report)
+        );
+    }
+
+    #[test]
+    fn gate_fails_under_impossible_ram_budget() {
+        let all = synthetic_clusters(8, 256, 640, 16, 0.4);
+        let base = all.slice_rows(0, 600);
+        let queries = all.slice_rows(600, 40);
+        let tight = Budgets {
+            recall_at_k: 0.95,
+            idle_ram_mb_at_5m: 1.0, // 1 MB / 5M vectors is unattainable
+            p95_ms: 150.0,
+        };
+        let report = run_matrix(&base, &queries, 10, 8, &tight);
+        assert!(
+            !passes_gate(&report),
+            "gate should fail under a 1 MB budget"
+        );
+    }
 }

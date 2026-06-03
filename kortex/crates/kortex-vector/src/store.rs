@@ -61,7 +61,10 @@ impl MmapBytes {
         let len = std::fs::metadata(path)?.len() as usize;
         if len == 0 {
             // mmap of length 0 is invalid; represent as an empty, valid view.
-            return Ok(MmapBytes { ptr: std::ptr::NonNull::dangling().as_ptr(), len: 0 });
+            return Ok(MmapBytes {
+                ptr: std::ptr::NonNull::dangling().as_ptr(),
+                len: 0,
+            });
         }
         let mut cpath: Vec<u8> = path.as_os_str().as_bytes().to_vec();
         cpath.push(0);
