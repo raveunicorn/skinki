@@ -69,10 +69,14 @@ Skinki/
 
 ## Status
 
-**Stage 0 — the measuring stick (done).** A reproducible eval harness with a
-deterministic synthetic corpus, retrieval/QA/insight metrics, latency+RAM
-telemetry, and a BM25 baseline that cleanly separates recall (solved) from
-multi-hop and insight discovery (the targets for Stages 1-5).
+**Stage 0 — the measuring stick (done, hardened to V2).** A reproducible eval
+harness with a deterministic synthetic corpus, retrieval/QA/insight metrics,
+latency+RAM telemetry, and a BM25 baseline. The default **V2 corpus** adds
+paraphrase banks, coreference, apophenia traps (planted *negative* bridges),
+distractors, and topic drift, so lexical overlap no longer saturates any metric
+(BM25 recall@10 = 0.138 at ~1M entries vs 1.000 on the legacy V1) — the
+benchmark now discriminates semantic retrieval, relational reasoning, and
+grounded discovery instead of rewarding grep.
 
 **Stage 1 — memory compression (done, gate passed).** From-scratch codecs
 (int8/PQ/RaBitQ) benchmarked against exact float32. The winning config —

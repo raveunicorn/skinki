@@ -100,16 +100,15 @@ mod tests {
     use super::*;
     use kortex_corpus::{generate, GenConfig};
 
-    #[test]
-    fn finds_recall_answers_reasonably() {
+    fn recall_hit_rate(difficulty: kortex_corpus::Difficulty) -> f64 {
         let corpus = generate(&GenConfig {
             seed: 11,
             years: 3,
-            ..Default::default()
+            entries_per_day: 2,
+            difficulty,
         });
         let mut bm25 = Bm25::new();
         bm25.index(&corpus);
-
         let mut found = 0;
         for q in &corpus.ground_truth.recall {
             let res = bm25.search(&q.question, 10);
@@ -117,9 +116,21 @@ mod tests {
                 found += 1;
             }
         }
-        // Lexical retrieval should land a healthy share of single-entry facts.
-        let rate = found as f64 / corpus.ground_truth.recall.len() as f64;
-        assert!(rate > 0.3, "expected >30% recall hits, got {rate:.2}");
+        found as f64 / corpus.ground_truth.recall.len() as f64
+    }
+
+    /// The yardstick contract, both directions: the legacy corpus (V1) is
+    /// lexically saturated — BM25 solves recall — while the hardened corpus
+    /// (V2: paraphrases + distractors) must NOT be solvable by lexical overlap
+    /// alone. If V2 creeps back toward 1.0, the hardening has regressed and
+    /// the benchmark stops discriminating semantic systems from grep.
+    #[test]
+    fn v1_recall_is_lexically_saturated_v2_is_not() {
+        let v1 = recall_hit_rate(kortex_corpus::Difficulty::V1);
+        let v2 = recall_hit_rate(kortex_corpus::Difficulty::V2);
+        assert!(v1 > 0.9, "V1 should be lexically easy, got {v1:.2}");
+        assert!(v2 < 0.5, "V2 must not saturate lexically, got {v2:.2}");
+        assert!(v2 < v1, "hardening must strictly reduce BM25 recall");
     }
 
     #[test]

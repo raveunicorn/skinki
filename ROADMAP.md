@@ -38,6 +38,12 @@ layered design and budgets.
   dimensions (recall + insight), and cleanly separates recall (BM25 solves it)
   from multi-hop and insight discovery (BM25 fails them) — establishing the
   targets for Stages 1-5.
+- **Hardened (V2, default):** paraphrase banks, coreference in multi-hop
+  chains, planted *negative* bridges (apophenia traps with a `neg-hits`
+  metric), lexical distractors, and per-year topic drift. BM25 recall@10 drops
+  from 1.000 (V1) to 0.138 at ~1M entries, so no metric is solvable by lexical
+  overlap alone. The legacy generator remains behind `--difficulty v1`, pinned
+  byte-for-byte by a golden-hash test.
 
 ## Stage 1 — Memory compression PoC (first "impossible task") — Done
 

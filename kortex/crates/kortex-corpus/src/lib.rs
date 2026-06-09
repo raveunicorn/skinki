@@ -98,6 +98,20 @@ pub enum EntryKind {
     Voice,
 }
 
+/// Generation hardness. `V1` reproduces the original Stage 0 generator
+/// byte-for-byte (single-template phenomena; lexically easy). `V2` is the
+/// hardened corpus: paraphrase banks, coreference in multi-hop chains,
+/// planted *negative* bridges (apophenia traps), lexical distractors near the
+/// needles, and non-stationary topic drift. V2 exists because a measuring
+/// stick that a regex can max out cannot measure Stages 3-5.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Difficulty {
+    V1,
+    #[default]
+    V2,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub id: EntryId,
@@ -181,6 +195,21 @@ pub struct InsightBridge {
     pub surprise: f32,
 }
 
+/// An apophenia trap (V2 only): an entity that casually spans *many* clusters.
+/// A naive "name appears in two clusters" detector fires on every pair of its
+/// clusters, but none of those links is an insight — the entity is a hub, so
+/// co-occurrence carries no surprise. A real Insight Engine must rank by
+/// rarity/surprise and stay silent here; matches against these entries are
+/// certified false insights.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NegativeBridge {
+    pub id: usize,
+    pub entity: EntityId,
+    /// The clusters the entity casually appears in (>= 3).
+    pub clusters: Vec<String>,
+    pub entries: Vec<EntryId>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct GroundTruth {
     pub entities: Vec<Entity>,
@@ -189,6 +218,9 @@ pub struct GroundTruth {
     pub temporal: Vec<TemporalPattern>,
     pub contradictions: Vec<Contradiction>,
     pub insights: Vec<InsightBridge>,
+    /// V2 apophenia traps; empty for V1 corpora.
+    #[serde(default)]
+    pub negative_bridges: Vec<NegativeBridge>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -196,6 +228,8 @@ pub struct CorpusMeta {
     pub seed: u64,
     pub years: u32,
     pub num_entries: usize,
+    #[serde(default)]
+    pub difficulty: Difficulty,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -219,6 +253,7 @@ pub struct GenConfig {
     /// Average routine entries per day. Crank this to stress-test "years of
     /// thoughts" scale (e.g. ~270/day over 10 years approximates ~1M entries).
     pub entries_per_day: u32,
+    pub difficulty: Difficulty,
 }
 
 impl Default for GenConfig {
@@ -227,6 +262,7 @@ impl Default for GenConfig {
             seed: 42,
             years: 5,
             entries_per_day: 2,
+            difficulty: Difficulty::V2,
         }
     }
 }
@@ -271,6 +307,17 @@ const FEELINGS: &[&str] = &[
 ];
 
 const CLUSTERS: &[&str] = &["work", "health", "music", "travel", "reading"];
+
+/// Where multi-hop introductions happen (V2). The venue is the coreference
+/// anchor: when the second hop drops the person's name, the venue is the only
+/// thread linking the two entries.
+const VENUES: &[&str] = &[
+    "the meetup",
+    "the conference",
+    "the climbing gym",
+    "the workshop",
+    "the book club",
+];
 
 const TOPICS_BY_CLUSTER: &[(&str, &[&str])] = &[
     (
@@ -329,6 +376,7 @@ enum Tag {
     ContradictionBefore(usize),
     ContradictionAfter(usize),
     Insight(usize),
+    NegativeBridge(usize),
 }
 
 struct RawEntry {
@@ -360,10 +408,16 @@ struct InsightParams {
     cluster_b: String,
 }
 
+struct NegativeParams {
+    e: EntityId,
+    clusters: Vec<String>,
+}
+
 struct Generator {
     rng: Rng,
     total_days: u32,
     entries_per_day: u32,
+    difficulty: Difficulty,
     raw: Vec<RawEntry>,
     entities: Vec<Entity>,
     interner: HashMap<String, EntityId>,
@@ -372,9 +426,31 @@ struct Generator {
     temporal_params: Vec<TemporalParams>,
     contradiction_params: Vec<ContradictionParams>,
     insight_params: Vec<InsightParams>,
+    negative_params: Vec<NegativeParams>,
+    /// Names already used as positive bridge entities (so V2 negatives avoid them).
+    bridge_names: Vec<String>,
+    /// V2 only: per-year cluster weights for non-stationary topic drift.
+    year_weights: Vec<Vec<u32>>,
 }
 
 impl Generator {
+    /// Template index for a paraphrase bank. V1 always renders template 0 (the
+    /// legacy string) and — crucially — consumes no RNG draw, so the V1 stream
+    /// stays byte-identical to the original generator.
+    fn tpl(&mut self, n: usize) -> usize {
+        match self.difficulty {
+            Difficulty::V1 => 0,
+            Difficulty::V2 => self.rng.below(n),
+        }
+    }
+
+    /// A probability gate that exists only in V2 (V1 consumes no draw).
+    fn v2_chance(&mut self, p: f64) -> bool {
+        match self.difficulty {
+            Difficulty::V1 => false,
+            Difficulty::V2 => self.rng.chance(p),
+        }
+    }
     fn intern(&mut self, name: &str, kind: EntityKind, cluster: &str) -> EntityId {
         if let Some(&id) = self.interner.get(name) {
             return id;
@@ -411,11 +487,34 @@ impl Generator {
         }
     }
 
+    /// Pick the day's cluster. V1: uniform (legacy). V2: weighted by the
+    /// current year's drifted weights, so the background distribution is
+    /// non-stationary — patterns learned on year 1 don't trivially hold in
+    /// year 5.
+    fn routine_cluster(&mut self, day: u32) -> &'static str {
+        match self.difficulty {
+            Difficulty::V1 => CLUSTERS[self.rng.below(CLUSTERS.len())],
+            Difficulty::V2 => {
+                let year = (day / 365) as usize;
+                let w = &self.year_weights[year.min(self.year_weights.len() - 1)];
+                let total: u32 = w.iter().sum();
+                let mut r = self.rng.below(total.max(1) as usize) as u32;
+                for (i, &wi) in w.iter().enumerate() {
+                    if r < wi {
+                        return CLUSTERS[i];
+                    }
+                    r -= wi;
+                }
+                CLUSTERS[CLUSTERS.len() - 1]
+            }
+        }
+    }
+
     fn routine_day(&mut self, day: u32) {
         // 0..=2*epd entries, averaging `entries_per_day`.
         let n = self.rng.below((2 * self.entries_per_day + 1) as usize);
         for _ in 0..n {
-            let cluster = *self.rng.pick(CLUSTERS);
+            let cluster = self.routine_cluster(day);
             let topics = TOPICS_BY_CLUSTER
                 .iter()
                 .find(|(c, _)| *c == cluster)
@@ -442,6 +541,36 @@ impl Generator {
         }
     }
 
+    /// Render the recall fact through a paraphrase bank. Every template must
+    /// contain the book title verbatim (the answer-in-entry invariant) and the
+    /// person's name (so the fact is findable in principle), but only some
+    /// share vocabulary with the question — partial lexical overlap is the
+    /// whole point of V2.
+    fn recall_text(&mut self, p: &str, b: &str) -> String {
+        match self.tpl(8) {
+            0 => format!("{p} recommended the book {b} to me today. Want to remember that."),
+            1 => format!(
+                "Coffee with {p} today — they kept coming back to {b}, said I have to read it."
+            ),
+            2 => format!("{p} couldn't stop praising {b}. Added it to my list."),
+            3 => format!("Note to self: {b} — a tip from {p}."),
+            4 => format!("{p} swears {b} changed how they think about everything."),
+            5 => format!("Got a reading suggestion from {p}: {b}. Sounds promising."),
+            6 => format!("{p} told me to read {b}; apparently it's exactly my kind of thing."),
+            _ => format!("Long chat with {p} about books — the clear favorite was {b}."),
+        }
+    }
+
+    /// A lexical distractor near a recall needle: same person, *different*
+    /// book, no recommendation semantics. Pulls BM25 toward the wrong entry.
+    fn recall_distractor_text(&mut self, p: &str, other: &str) -> String {
+        match self.tpl(3) {
+            0 => format!("Saw {p} reading {other} on the train this morning."),
+            1 => format!("{p} mentioned {other} in passing; didn't sound convinced."),
+            _ => format!("Almost bought {other} at the shop; ran into {p} there too."),
+        }
+    }
+
     fn plan_recall(&mut self, count: usize) {
         for _ in 0..count {
             let person_name = (*self.rng.pick(PEOPLE)).to_string();
@@ -451,11 +580,54 @@ impl Generator {
             let qid = self.recall_params.len();
             self.recall_params.push(RecallParams { person, book });
             let day = self.rng.range(0, self.total_days);
-            let text = format!(
-                "{person_name} recommended the book {book_name} to me today. Want to remember that."
-            );
+            let text = self.recall_text(&person_name, &book_name);
             let kind = self.kind();
             self.push(day, kind, text, Some(Tag::Recall(qid)));
+
+            // V2: 1-2 distractor entries (person + a different book).
+            if self.difficulty == Difficulty::V2 {
+                let n = self.rng.range(1, 3);
+                for _ in 0..n {
+                    let mut other = (*self.rng.pick(BOOKS)).to_string();
+                    while other == book_name {
+                        other = (*self.rng.pick(BOOKS)).to_string();
+                    }
+                    self.intern(&other, EntityKind::Book, "reading");
+                    let dday = self.rng.range(0, self.total_days);
+                    let dtext = self.recall_distractor_text(&person_name, &other);
+                    let dkind = self.kind();
+                    self.push(dday, dkind, dtext, None);
+                }
+            }
+        }
+    }
+
+    /// Hop A: the introduction. Always names both people and the venue (the
+    /// venue is the coreference anchor for hop B).
+    fn multihop_a_text(&mut self, p: &str, q: &str, venue: &str) -> String {
+        match self.tpl(3) {
+            0 => format!("{p} introduced me to {q} at {venue}."),
+            1 => format!("Met {q} today through {p}, at {venue} of all places."),
+            _ => format!("{p} brought {q} along to {venue}; we hit it off."),
+        }
+    }
+
+    /// Hop B with the person named (no coreference).
+    fn multihop_b_text(&mut self, q: &str, b: &str) -> String {
+        match self.tpl(3) {
+            0 => format!("{q} recommended the book {b}. Noted."),
+            1 => format!("{q} kept insisting I read {b}."),
+            _ => format!("Turns out {q} is a huge fan of {b}; told me to start it this week."),
+        }
+    }
+
+    /// Hop B with coreference: the person's name is *absent*; only the venue
+    /// links back to hop A. Joining now requires entity linking, not string
+    /// matching.
+    fn multihop_b_coref_text(&mut self, venue: &str, b: &str) -> String {
+        match self.tpl(2) {
+            0 => format!("The person I met at {venue} recommended the book {b}. Noted."),
+            _ => format!("That new acquaintance from {venue} told me to read {b}."),
         }
     }
 
@@ -477,12 +649,35 @@ impl Generator {
             let day2 = self
                 .rng
                 .range(day1 + 1, (day1 + 60).min(self.total_days).max(day1 + 2));
-            let t1 = format!("{p_name} introduced me to {q_name} at the meetup.");
-            let t2 = format!("{q_name} recommended the book {book_name}. Noted.");
+            // V1 always uses the legacy venue; V2 varies it (the coref anchor).
+            let venue = match self.difficulty {
+                Difficulty::V1 => "the meetup".to_string(),
+                Difficulty::V2 => (*self.rng.pick(VENUES)).to_string(),
+            };
+            let t1 = self.multihop_a_text(&p_name, &q_name, &venue);
+            let t2 = if self.v2_chance(0.4) {
+                self.multihop_b_coref_text(&venue, &book_name)
+            } else {
+                self.multihop_b_text(&q_name, &book_name)
+            };
             let k1 = self.kind();
             let k2 = self.kind();
             self.push(day1, k1, t1, Some(Tag::MultiHopA(plan)));
             self.push(day2, k2, t2, Some(Tag::MultiHopB(plan)));
+
+            // V2: a distractor — Q talking about a *different* book.
+            if self.difficulty == Difficulty::V2 && self.rng.chance(0.5) {
+                let mut other = (*self.rng.pick(BOOKS)).to_string();
+                while other == book_name {
+                    other = (*self.rng.pick(BOOKS)).to_string();
+                }
+                self.intern(&other, EntityKind::Book, "reading");
+                let dday = self.rng.range(0, self.total_days);
+                let dtext =
+                    format!("{q_name} and I argued about {other} for an hour; not convinced.");
+                let dkind = self.kind();
+                self.push(dday, dkind, dtext, None);
+            }
         }
     }
 
@@ -529,9 +724,16 @@ impl Generator {
             });
             let day1 = self.rng.range(0, self.total_days.saturating_sub(2).max(1));
             let day2 = self.rng.range(day1 + 1, self.total_days.max(day1 + 2));
-            let t1 = format!("Convinced {x_name} is the best choice. Going all in on it.");
-            let t2 =
-                format!("Changed my mind: {x_name} was a mistake. {y_name} is clearly better.");
+            let t1 = match self.tpl(3) {
+                0 => format!("Convinced {x_name} is the best choice. Going all in on it."),
+                1 => format!("After a week of digging, {x_name} wins. Committing to it."),
+                _ => format!("I keep coming back to {x_name}; it just fits. Decision made."),
+            };
+            let t2 = match self.tpl(3) {
+                0 => format!("Changed my mind: {x_name} was a mistake. {y_name} is clearly better."),
+                1 => format!("Six months in, {x_name} has been nothing but pain. Moving everything to {y_name}."),
+                _ => format!("Regret picking {x_name}. {y_name} would have saved us weeks."),
+            };
             let k1 = self.kind();
             let k2 = self.kind();
             self.push(day1, k1, t1, Some(Tag::ContradictionBefore(plan)));
@@ -549,6 +751,7 @@ impl Generator {
                 cb = (*self.rng.pick(CLUSTERS)).to_string();
             }
             let e = self.intern(&e_name, EntityKind::Person, "bridge");
+            self.bridge_names.push(e_name.clone());
             let plan = self.insight_params.len();
             self.insight_params.push(InsightParams {
                 e,
@@ -560,16 +763,72 @@ impl Generator {
             for _ in 0..per_side {
                 let day = self.rng.range(0, self.total_days);
                 let topic = self.cluster_topic(&ca);
-                let text = format!("{e_name} showed up while I was deep in {topic}.");
+                let text = match self.tpl(3) {
+                    0 => format!("{e_name} showed up while I was deep in {topic}."),
+                    1 => format!("Unexpectedly, {e_name} had sharp opinions on {topic}."),
+                    _ => {
+                        format!("Spent the afternoon on {topic}; {e_name} joined halfway through.")
+                    }
+                };
                 let k = self.kind();
                 self.push(day, k, text, Some(Tag::Insight(plan)));
             }
             for _ in 0..per_side {
                 let day = self.rng.range(0, self.total_days);
                 let topic = self.cluster_topic(&cb);
-                let text = format!("Ran into {e_name} again, this time around {topic}.");
+                let text = match self.tpl(3) {
+                    0 => format!("Ran into {e_name} again, this time around {topic}."),
+                    1 => format!("{e_name} again — this time in the middle of {topic}."),
+                    _ => format!("Funny how {e_name} keeps appearing whenever {topic} comes up."),
+                };
                 let k = self.kind();
                 self.push(day, k, text, Some(Tag::Insight(plan)));
+            }
+        }
+    }
+
+    /// V2 only: plant apophenia traps — hub entities casually spanning many
+    /// clusters. See [`NegativeBridge`].
+    fn plan_negative_bridges(&mut self, count: usize) {
+        debug_assert_eq!(self.difficulty, Difficulty::V2);
+        for _ in 0..count {
+            // Avoid names already used as positive bridges; bounded retries
+            // keep this deterministic even if the pool is nearly exhausted.
+            let mut e_name = (*self.rng.pick(PEOPLE)).to_string();
+            for _ in 0..50 {
+                if !self.bridge_names.contains(&e_name) {
+                    break;
+                }
+                e_name = (*self.rng.pick(PEOPLE)).to_string();
+            }
+            let e = self.intern(&e_name, EntityKind::Person, "hub");
+            // The hub spans 4 distinct clusters: any pair co-occurs, so no
+            // single pair is surprising.
+            let mut clusters: Vec<String> = Vec::new();
+            while clusters.len() < 4 {
+                let c = (*self.rng.pick(CLUSTERS)).to_string();
+                if !clusters.contains(&c) {
+                    clusters.push(c);
+                }
+            }
+            let plan = self.negative_params.len();
+            self.negative_params.push(NegativeParams {
+                e,
+                clusters: clusters.clone(),
+            });
+            for cluster in &clusters.clone() {
+                let n = self.rng.range(1, 3);
+                for _ in 0..n {
+                    let day = self.rng.range(0, self.total_days);
+                    let topic = self.cluster_topic(cluster);
+                    let text = match self.tpl(3) {
+                        0 => format!("{e_name} texted while I was busy with {topic}. Small world."),
+                        1 => format!("Mentioned {topic} to {e_name} in passing; we moved on quickly."),
+                        _ => format!("{e_name} was around again today; mostly small talk while I dealt with {topic}."),
+                    };
+                    let k = self.kind();
+                    self.push(day, k, text, Some(Tag::NegativeBridge(plan)));
+                }
             }
         }
     }
@@ -602,6 +861,7 @@ impl Generator {
         let mut con_before: Vec<Option<EntryId>> = vec![None; self.contradiction_params.len()];
         let mut con_after: Vec<Option<EntryId>> = vec![None; self.contradiction_params.len()];
         let mut ins_entries: Vec<Vec<EntryId>> = vec![Vec::new(); self.insight_params.len()];
+        let mut neg_entries: Vec<Vec<EntryId>> = vec![Vec::new(); self.negative_params.len()];
 
         // Consume `raw` so entry text is moved, not cloned (matters at scale).
         let raw = std::mem::take(&mut self.raw);
@@ -617,6 +877,7 @@ impl Generator {
                     Tag::ContradictionBefore(p) => con_before[p] = Some(id),
                     Tag::ContradictionAfter(p) => con_after[p] = Some(id),
                     Tag::Insight(p) => ins_entries[p].push(id),
+                    Tag::NegativeBridge(p) => neg_entries[p].push(id),
                 }
             }
             entries.push(Entry {
@@ -707,12 +968,24 @@ impl Generator {
             }
         }
 
+        for (p, params) in self.negative_params.iter().enumerate() {
+            if neg_entries[p].len() >= 2 {
+                gt.negative_bridges.push(NegativeBridge {
+                    id: p,
+                    entity: params.e,
+                    clusters: params.clusters.clone(),
+                    entries: neg_entries[p].clone(),
+                });
+            }
+        }
+
         let num_entries = entries.len();
         Corpus {
             meta: CorpusMeta {
                 seed: 0, // filled by caller
                 years: self.total_days / 365,
                 num_entries,
+                difficulty: self.difficulty,
             },
             entries,
             ground_truth: gt,
@@ -727,6 +1000,7 @@ pub fn generate(config: &GenConfig) -> Corpus {
         rng: Rng::new(config.seed),
         total_days,
         entries_per_day: config.entries_per_day,
+        difficulty: config.difficulty,
         raw: Vec::new(),
         entities: Vec::new(),
         interner: HashMap::new(),
@@ -735,6 +1009,9 @@ pub fn generate(config: &GenConfig) -> Corpus {
         temporal_params: Vec::new(),
         contradiction_params: Vec::new(),
         insight_params: Vec::new(),
+        negative_params: Vec::new(),
+        bridge_names: Vec::new(),
+        year_weights: Vec::new(),
     };
 
     // Plant phenomena first (counts scale with corpus length).
@@ -744,6 +1021,24 @@ pub fn generate(config: &GenConfig) -> Corpus {
     g.plan_temporal(years.max(1));
     g.plan_contradictions(years * 2);
     g.plan_insights(years.max(1));
+    if config.difficulty == Difficulty::V2 {
+        g.plan_negative_bridges(years.max(1));
+
+        // Non-stationary topic drift: each year mutates the previous year's
+        // cluster weights. Year 0 is uniform.
+        let mut w = vec![4u32; CLUSTERS.len()];
+        g.year_weights.push(w.clone());
+        for _ in 1..config.years.max(1) {
+            for wi in w.iter_mut() {
+                if g.rng.chance(0.5) {
+                    let delta = g.rng.range(1, 4) as i64;
+                    let sign = if g.rng.chance(0.5) { 1 } else { -1 };
+                    *wi = (*wi as i64 + sign * delta).clamp(1, 9) as u32;
+                }
+            }
+            g.year_weights.push(w.clone());
+        }
+    }
 
     // Fill in routine background entries day by day.
     for day in 0..total_days {
@@ -758,6 +1053,116 @@ pub fn generate(config: &GenConfig) -> Corpus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fnv1a64(bytes: &[u8]) -> u64 {
+        let mut h: u64 = 0xCBF2_9CE4_8422_2325;
+        for &b in bytes {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100_0000_01B3);
+        }
+        h
+    }
+
+    /// V1 must reproduce the original (pre-V2) generator byte-for-byte. The
+    /// hashes below were captured from the legacy code before the V2 changes;
+    /// if this test breaks, a V1 code path consumed an RNG draw it must not.
+    #[test]
+    fn v1_entries_match_legacy_golden() {
+        for (seed, years, want_count, want_hash) in [
+            (42u64, 2u32, 1538usize, 0x3e08_004b_4da7_57d5u64),
+            (7, 3, 2314, 0x9aae_f0c5_b6e2_7c8cu64),
+        ] {
+            let c = generate(&GenConfig {
+                seed,
+                years,
+                entries_per_day: 2,
+                difficulty: Difficulty::V1,
+            });
+            assert_eq!(c.entries.len(), want_count, "seed {seed}: entry count");
+            let json = serde_json::to_string(&c.entries).unwrap();
+            assert_eq!(
+                fnv1a64(json.as_bytes()),
+                want_hash,
+                "seed {seed}: V1 entries diverged from the legacy generator"
+            );
+            assert!(c.ground_truth.negative_bridges.is_empty());
+        }
+    }
+
+    #[test]
+    fn v2_plants_negative_bridges_v1_does_not() {
+        let v2 = generate(&GenConfig {
+            seed: 11,
+            years: 3,
+            ..Default::default()
+        });
+        assert!(!v2.ground_truth.negative_bridges.is_empty());
+        for nb in &v2.ground_truth.negative_bridges {
+            assert!(nb.clusters.len() >= 3, "hub must span many clusters");
+            assert!(nb.entries.len() >= 2);
+            let n = v2.entries.len() as u64;
+            for &e in &nb.entries {
+                assert!(e < n);
+            }
+            // A negative entity must not double as a positive bridge entity.
+            for ins in &v2.ground_truth.insights {
+                assert_ne!(
+                    nb.entity, ins.bridge_entity,
+                    "negative bridge entity collides with a planted insight"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn v2_recall_uses_paraphrases() {
+        let c = generate(&GenConfig {
+            seed: 5,
+            years: 4,
+            ..Default::default()
+        });
+        let legacy_form = c
+            .ground_truth
+            .recall
+            .iter()
+            .filter(|q| {
+                c.entry_text(q.relevant_entries[0])
+                    .unwrap()
+                    .contains("recommended the book")
+            })
+            .count();
+        let total = c.ground_truth.recall.len();
+        assert!(total >= 8);
+        assert!(
+            legacy_form < total,
+            "all {total} recall entries use the legacy template — paraphrasing inactive"
+        );
+    }
+
+    #[test]
+    fn v2_multihop_has_coreference_hops() {
+        let c = generate(&GenConfig {
+            seed: 9,
+            years: 5,
+            ..Default::default()
+        });
+        // At least one hop-B entry must not name any person — the join must go
+        // through the venue anchor instead of string matching.
+        let coref_hops = c
+            .ground_truth
+            .multi_hop
+            .iter()
+            .filter(|q| {
+                let txt = c.entry_text(q.hop_entries[1]).unwrap();
+                !PEOPLE.iter().any(|p| txt.contains(p))
+            })
+            .count();
+        assert!(
+            coref_hops > 0,
+            "expected some coreference hops among {} multi-hop chains",
+            c.ground_truth.multi_hop.len()
+        );
+    }
 
     #[test]
     fn deterministic_across_runs() {
@@ -837,6 +1242,12 @@ mod tests {
                 check(e);
             }
         }
+        for nb in &c.ground_truth.negative_bridges {
+            assert!(nb.entries.len() >= 2);
+            for &e in &nb.entries {
+                check(e);
+            }
+        }
     }
 
     #[test]
@@ -851,5 +1262,6 @@ mod tests {
         assert!(!c.ground_truth.temporal.is_empty());
         assert!(!c.ground_truth.contradictions.is_empty());
         assert!(!c.ground_truth.insights.is_empty());
+        assert!(!c.ground_truth.negative_bridges.is_empty());
     }
 }

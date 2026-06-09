@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use kortex_baseline::Bm25;
-use kortex_corpus::{generate, Corpus, EntryId, GenConfig};
+use kortex_corpus::{generate, Corpus, Difficulty, EntryId, GenConfig};
 use kortex_eval::{
     answer_in_entries, ndcg_at_k, precision_at_k, recall_at_k, score_insights, Latency, Report,
     RetrievalScores, RetrievalSystem,
@@ -47,6 +47,9 @@ enum Cmd {
         /// Average routine entries per day (crank to stress scale).
         #[arg(long, default_value_t = 2)]
         entries_per_day: u32,
+        /// Corpus hardness: v2 (default) or v1 (legacy single-template).
+        #[arg(long, default_value = "v2")]
+        difficulty: String,
         #[arg(long)]
         out: PathBuf,
     },
@@ -68,6 +71,9 @@ enum Cmd {
         /// Average routine entries per day (crank to stress scale).
         #[arg(long, default_value_t = 2)]
         entries_per_day: u32,
+        /// Corpus hardness: v2 (default) or v1 (legacy single-template).
+        #[arg(long, default_value = "v2")]
+        difficulty: String,
         #[arg(long, default_value_t = 10)]
         k: usize,
     },
@@ -79,6 +85,9 @@ enum Cmd {
         years: u32,
         #[arg(long, default_value_t = 2)]
         entries_per_day: u32,
+        /// Corpus hardness: v2 (default) or v1 (legacy single-template).
+        #[arg(long, default_value = "v2")]
+        difficulty: String,
         #[arg(long)]
         report_out: Option<PathBuf>,
         /// Exit non-zero if budgets miss (for CI).
@@ -96,6 +105,9 @@ enum Cmd {
         years: u32,
         #[arg(long, default_value_t = 2)]
         entries_per_day: u32,
+        /// Corpus hardness: v2 (default) or v1 (legacy single-template).
+        #[arg(long, default_value = "v2")]
+        difficulty: String,
         /// Full embedding dimensionality (also benched truncated to 256).
         #[arg(long, default_value_t = 768)]
         dim: usize,
@@ -183,7 +195,11 @@ fn run_eval(corpus: &Corpus, k: usize) -> Report {
     let multi_hop = score_set(&system, corpus, &multihop_items, k, &mut durations);
 
     let discovered = system.discover_insights();
-    let insight = score_insights(&discovered, &corpus.ground_truth.insights);
+    let insight = score_insights(
+        &discovered,
+        &corpus.ground_truth.insights,
+        &corpus.ground_truth.negative_bridges,
+    );
 
     let summary = LatencySummary::from_durations(&durations);
     let latency = Latency {
@@ -212,6 +228,14 @@ fn load_corpus(path: &PathBuf) -> Result<Corpus> {
     Ok(corpus)
 }
 
+fn parse_difficulty(s: &str) -> Result<Difficulty> {
+    match s.to_ascii_lowercase().as_str() {
+        "v1" => Ok(Difficulty::V1),
+        "v2" => Ok(Difficulty::V2),
+        other => anyhow::bail!("unknown difficulty '{other}' (expected v1 or v2)"),
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
@@ -219,12 +243,14 @@ fn main() -> Result<()> {
             seed,
             years,
             entries_per_day,
+            difficulty,
             out,
         } => {
             let corpus = generate(&GenConfig {
                 seed,
                 years,
                 entries_per_day,
+                difficulty: parse_difficulty(&difficulty)?,
             });
             let file = std::fs::File::create(&out)
                 .with_context(|| format!("creating {}", out.display()))?;
@@ -257,12 +283,14 @@ fn main() -> Result<()> {
             seed,
             years,
             entries_per_day,
+            difficulty,
             k,
         } => {
             let corpus = generate(&GenConfig {
                 seed,
                 years,
                 entries_per_day,
+                difficulty: parse_difficulty(&difficulty)?,
             });
             print_ground_truth_summary(&corpus);
             let report = run_eval(&corpus, k);
@@ -277,10 +305,12 @@ fn main() -> Result<()> {
             seed,
             years,
             entries_per_day,
+            difficulty,
             report_out,
             assert_gate,
         } => {
-            let report = run_store_bench(seed, years, entries_per_day)?;
+            let report =
+                run_store_bench(seed, years, entries_per_day, parse_difficulty(&difficulty)?)?;
             print_store_bench(&report);
             if let Some(path) = report_out {
                 let file = std::fs::File::create(&path)
@@ -312,6 +342,7 @@ fn main() -> Result<()> {
             seed,
             years,
             entries_per_day,
+            difficulty,
             dim,
             vectors,
             queries,
@@ -319,8 +350,16 @@ fn main() -> Result<()> {
             report_out,
             assert_gate,
         } => {
-            let (base, qset, label) =
-                build_vectors(&source, seed, years, entries_per_day, dim, vectors, queries);
+            let (base, qset, label) = build_vectors(
+                &source,
+                seed,
+                years,
+                entries_per_day,
+                parse_difficulty(&difficulty)?,
+                dim,
+                vectors,
+                queries,
+            );
             println!(
                 "Stage 1 compression bench | source: {label} | {} base vecs, {} queries, dim {}",
                 base.count(),
@@ -372,11 +411,13 @@ fn rss_mb() -> f64 {
 }
 
 /// Build a base vector set + a held-out query set from the chosen source.
+#[allow(clippy::too_many_arguments)]
 fn build_vectors(
     source: &str,
     seed: u64,
     years: u32,
     entries_per_day: u32,
+    difficulty: Difficulty,
     dim: usize,
     cap: usize,
     queries: usize,
@@ -394,6 +435,7 @@ fn build_vectors(
                 seed,
                 years,
                 entries_per_day,
+                difficulty,
             });
             let embedder = StaticHashEmbedder::new(dim);
             let mut all = embedder.embed_corpus(&corpus);
@@ -500,11 +542,17 @@ fn shuffle_det(seed: u64, items: &mut [kortex_store::UnitId]) {
     }
 }
 
-fn run_store_bench(seed: u64, years: u32, entries_per_day: u32) -> Result<StoreBenchReport> {
+fn run_store_bench(
+    seed: u64,
+    years: u32,
+    entries_per_day: u32,
+    difficulty: Difficulty,
+) -> Result<StoreBenchReport> {
     let corpus = generate(&GenConfig {
         seed,
         years,
         entries_per_day,
+        difficulty,
     });
 
     let dir = std::env::temp_dir().join(format!("kortex_store_bench_{}", std::process::id()));

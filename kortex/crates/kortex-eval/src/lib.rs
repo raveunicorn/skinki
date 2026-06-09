@@ -9,7 +9,7 @@
 //! Metric primitives are pure functions; orchestration (timing, iterating
 //! queries) lives in the harness so this crate stays dependency-light.
 
-use kortex_corpus::{Corpus, EntityId, EntryId, InsightBridge};
+use kortex_corpus::{Corpus, EntityId, EntryId, InsightBridge, NegativeBridge};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -138,12 +138,29 @@ fn insight_matches(d: &DiscoveredInsight, planted: &InsightBridge) -> bool {
     jaccard(&d.supporting_entries, &planted.supporting_entries) >= 0.3
 }
 
+/// Does a discovered insight fall into a planted apophenia trap? Same matching
+/// rule as for positives, against the trap's entity/entries.
+fn negative_matches(d: &DiscoveredInsight, neg: &NegativeBridge) -> bool {
+    if let Some(be) = d.bridge_entity {
+        if be == neg.entity {
+            return true;
+        }
+    }
+    jaccard(&d.supporting_entries, &neg.entries) >= 0.3
+}
+
 /// Score surfaced insights against the planted ground truth. This is the
 /// keystone anti-hallucination metric: we want high recall of real insights
 /// AND a low false-insight rate (no apophenia).
+///
+/// `negatives` are V2 apophenia traps (hub entities spanning many clusters).
+/// A surfaced insight that matches a trap — and no positive — is a *certified*
+/// false insight (`negative_hits`); unlike generic false positives, these are
+/// links a naive co-occurrence detector is guaranteed to fire on.
 pub fn score_insights(
     discovered: &[DiscoveredInsight],
     planted: &[InsightBridge],
+    negatives: &[NegativeBridge],
 ) -> InsightScores {
     let surfaced = discovered.len();
     let true_positives = discovered
@@ -153,6 +170,13 @@ pub fn score_insights(
     let matched_planted = planted
         .iter()
         .filter(|p| discovered.iter().any(|d| insight_matches(d, p)))
+        .count();
+    let negative_hits = discovered
+        .iter()
+        .filter(|d| {
+            !planted.iter().any(|p| insight_matches(d, p))
+                && negatives.iter().any(|n| negative_matches(d, n))
+        })
         .count();
 
     let precision = if surfaced == 0 {
@@ -178,6 +202,7 @@ pub fn score_insights(
         precision,
         recall,
         false_insight_rate,
+        negative_hits,
     }
 }
 
@@ -203,6 +228,9 @@ pub struct InsightScores {
     pub precision: Option<f64>,
     pub recall: f64,
     pub false_insight_rate: Option<f64>,
+    /// Surfaced insights that hit a planted apophenia trap (V2 corpora).
+    #[serde(default)]
+    pub negative_hits: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -259,10 +287,11 @@ impl fmt::Display for Report {
         )?;
         writeln!(
             f,
-            "insight          : recall={:.3}  precision={}  false-rate={}  (planted={}, surfaced={}, matched={})",
+            "insight          : recall={:.3}  precision={}  false-rate={}  neg-hits={}  (planted={}, surfaced={}, matched={})",
             self.insight.recall,
             opt(self.insight.precision),
             opt(self.insight.false_insight_rate),
+            self.insight.negative_hits,
             self.insight.planted,
             self.insight.surfaced,
             self.insight.matched
@@ -305,9 +334,59 @@ mod tests {
 
     #[test]
     fn insight_scoring_handles_empty() {
-        let scores = score_insights(&[], &[]);
+        let scores = score_insights(&[], &[], &[]);
         assert_eq!(scores.surfaced, 0);
         assert_eq!(scores.recall, 0.0);
         assert!(scores.precision.is_none());
+        assert_eq!(scores.negative_hits, 0);
+    }
+
+    #[test]
+    fn insight_scoring_counts_apophenia_traps() {
+        let planted = vec![InsightBridge {
+            id: 0,
+            bridge_entity: 1,
+            cluster_a: "work".into(),
+            cluster_b: "music".into(),
+            description: String::new(),
+            supporting_entries: vec![10, 11, 12],
+            surprise: 0.8,
+        }];
+        let negatives = vec![NegativeBridge {
+            id: 0,
+            entity: 7,
+            clusters: vec![
+                "work".into(),
+                "health".into(),
+                "travel".into(),
+                "music".into(),
+            ],
+            entries: vec![20, 21, 22],
+        }];
+        let discovered = vec![
+            // A real hit: matches the planted bridge entity.
+            DiscoveredInsight {
+                description: String::new(),
+                supporting_entries: vec![10, 11],
+                bridge_entity: Some(1),
+            },
+            // Apophenia: fires on the hub entity — certified false.
+            DiscoveredInsight {
+                description: String::new(),
+                supporting_entries: vec![20, 21],
+                bridge_entity: Some(7),
+            },
+            // Generic false positive: matches neither positives nor traps.
+            DiscoveredInsight {
+                description: String::new(),
+                supporting_entries: vec![900],
+                bridge_entity: None,
+            },
+        ];
+        let s = score_insights(&discovered, &planted, &negatives);
+        assert_eq!(s.matched, 1);
+        assert_eq!(s.negative_hits, 1);
+        assert_eq!(s.surfaced, 3);
+        assert!((s.false_insight_rate.unwrap() - 2.0 / 3.0).abs() < 1e-9);
     }
 }

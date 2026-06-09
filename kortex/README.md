@@ -34,9 +34,33 @@ insight discovery we must *know* the answers in advance. The generator plants:
 | Temporal patterns| Does entity A lead event B by a fixed lag?     | `TemporalPattern` |
 | Contradictions   | A belief stated, then reversed over time       | `Contradiction` |
 | Insight bridges  | A rare entity secretly linking two clusters    | `InsightBridge` |
+| Apophenia traps  | Does the system *avoid* false insights?        | `NegativeBridge` (V2) |
 
 Generation uses a hand-rolled SplitMix64 PRNG, so the same `--seed` yields a
 **byte-identical** corpus on any machine (no `rand` drift, CI-safe).
+
+### Difficulty: V2 (default) vs V1 (legacy)
+
+The original corpus (`--difficulty v1`) rendered every phenomenon through a
+single template — lexically so easy that BM25 scored recall 1.000 and a regex
+could find every planted insight. A measuring stick a regex can max out cannot
+measure Stages 3-5, so the default is the hardened **V2**:
+
+- **Paraphrase banks** — each phenomenon has 6-10 surface forms; entries share
+  only partial vocabulary with the questions.
+- **Coreference** — ~40% of multi-hop second hops drop the person's name
+  ("That new acquaintance from the climbing gym told me to read..."); the join
+  must go through the venue anchor, not string matching.
+- **Negative bridges** — hub entities casually spanning 4+ clusters. A naive
+  co-occurrence detector fires on every pair; each such hit is a *certified*
+  false insight (`neg-hits` in the report).
+- **Distractors** — entries lexically near the needles (same person, different
+  book, no recommendation semantics) that pull lexical rankers off target.
+- **Topic drift** — cluster weights mutate per year, so the background
+  distribution is non-stationary.
+
+V1 remains available behind `--difficulty v1` and is pinned by a golden-hash
+test (`v1_entries_match_legacy_golden`) so the legacy numbers stay reproducible.
 
 ## Crate map
 
@@ -120,37 +144,47 @@ cargo run --release -p kortex-harness -- eval --corpus corpus.json --k 10 --repo
 cargo test   # determinism, ground-truth integrity, metric correctness
 ```
 
-## Example report (~1M entries, BM25 baseline)
+## Example report (~1M entries, V2 corpus, BM25 baseline)
 
 ```
 === Kortex Stage 0 — Eval Report ===
 system           : bm25-lexical
-corpus entries   : 984052
-recall@10        : R=1.000  P=0.100  nDCG=0.373  answer-in-topk=1.000  (n=80)
-multi-hop@10     : R=0.000  P=0.000  nDCG=0.000  answer-in-topk=0.475  (n=40)
-insight          : recall=0.000  precision=n/a  false-rate=n/a  (planted=10, surfaced=0, matched=0)
-query latency    : p50=0.839ms  p95=24.982ms  mean=8.701ms  max=25.476ms  (n=120)
-peak RSS         : 526.8 MB
+corpus entries   : 987380
+recall@10        : R=0.138  P=0.014  nDCG=0.080  answer-in-topk=0.588  (n=80)
+multi-hop@10     : R=0.075  P=0.015  nDCG=0.048  answer-in-topk=0.300  (n=40)
+insight          : recall=0.000  precision=n/a  false-rate=n/a  neg-hits=0  (planted=10, surfaced=0, matched=0)
+query latency    : p50=0.758ms  p95=24.804ms  mean=8.610ms  max=25.798ms  (n=120)
+peak RSS         : 502.6 MB
 ```
+
+For contrast, the same run on the legacy corpus (`--difficulty v1`) gives
+recall@10 R=1.000 — the V1 facts are lexically findable by construction.
 
 ### How to read it (this is the whole point)
 
-- **Recall stays perfect** even at ~1M entries — single-entry facts are lexically
-  findable. A good engine must not regress here.
-- **Multi-hop collapses to ~0** at scale — BM25 can't join two distant entries.
-  (`answer-in-topk` is non-zero only because the answer word coincidentally
-  appears in unrelated entries — a reminder that lexical overlap is a weak proxy
-  for reasoning.) This is the target for **Stage 3 (GraphRAG)**.
+- **Recall no longer saturates** on V2 (R=0.138 at ~1M vs 1.000 on V1):
+  paraphrases and distractors break pure lexical overlap. The facts are still
+  findable *in principle* — every entry names the person and the book — so this
+  gap is exactly the headroom that semantic retrieval (Stage 1 embeddings and
+  beyond) must capture. A good engine must push this back toward 1.0 without
+  the V1 crutch of shared template words.
+- **Multi-hop collapses at scale** (R=0.075) — BM25 can't join two distant
+  entries, and on V2 ~40% of chains additionally require coreference through a
+  venue anchor. This is the target for **Stage 3 (GraphRAG)**.
 - **Zero insights surfaced** — BM25 has no notion of bridges. This is the target
-  for **Stage 5 (Insight Engine)**, where the keystone metric is a low
-  *false-insight rate* (no apophenia) alongside high insight recall.
-- **~527 MB RSS for ~1M raw entries** is the naive, uncompressed cost. This is
+  for **Stage 5 (Insight Engine)**. On V2 the report also tracks `neg-hits`:
+  surfaced "insights" that fall into planted apophenia traps (hub entities
+  spanning many clusters). The keystone metric is high insight recall with a
+  low false-insight rate **and zero trap hits** — a naive co-occurrence
+  detector maxes recall but lights up `neg-hits`, and the harness will catch it.
+- **~503 MB RSS for ~1M raw entries** is the naive, uncompressed cost. This is
   the number **Stage 1 (RaBitQ + Model2Vec compression)** must crush so memory
   fits comfortably on 8 GB *next to* a local LLM.
 
-The fact that the harness cleanly separates recall (solved) from multi-hop
-(unsolved) from insight (unsolved) is the evidence that it measures the right
-things. These gaps are the explicit, quantified targets for Stages 1-5.
+The harness now separates four regimes: lexically solved (V1 recall), semantic
+retrieval (V2 recall — open), relational reasoning (multi-hop — open), and
+grounded discovery (insight vs apophenia — open). These gaps are the explicit,
+quantified targets for Stages 1-5.
 
 ## License
 
