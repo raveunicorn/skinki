@@ -166,9 +166,11 @@ layered design and budgets.
 ## Open questions / risks
 
 - Exact insight-precision / false-insight thresholds (set on Stage 0 synthetic).
-- Embedding dimensionality vs quality vs RAM (co-designed in Stage 1); the
-  required two-stage `refine` depends on real-embedding cluster geometry —
-  validate on EmbeddingGemma vectors before locking Stage 3 index design.
+- ~~Embedding dimensionality vs quality vs RAM~~ **resolved on real vectors**
+  (nomic-embed-text-v1.5, an MRL stand-in for EmbeddingGemma): Matryoshka-256
+  keeps the fidelity gate green (recall 0.987-1.000) within the RAM budget;
+  real geometry needs only `refine ≈ 1%` of n (vs 16%+ on adversarial
+  synthetic). Re-confirm on EmbeddingGemma when the product embedder lands.
 - IVF-style partitioning (per-list centroids) vs flat scan at 5M — the Stage 1
   at-scale verdict makes this the default candidate for the Stage 3 index.
 - STT choice for Russian (Whisper large/distil vs Parakeet vs Apple Speech).

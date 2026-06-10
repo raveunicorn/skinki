@@ -163,11 +163,49 @@ taught us — none of which the projection could have shown:
 
 Caveats, stated plainly: numbers are from a dev machine, not the 8 GB M1 Air;
 rerank and cold-open ran against a warm page cache (lower bounds — a true cold
-start pays SSD reads for the touched candidate pages); vectors are synthetic
-("Model2Vec-lite" hash embeddings / Gaussian clusters — real EmbeddingGemma
-validation is planned follow-up work). The codec-fidelity conclusion (the
-codec preserves float-search geometry) is independent of embedding quality;
-the *required refine* is not — it depends on the real data's cluster structure.
+start pays SSD reads for the touched candidate pages). The codec-fidelity
+conclusion (the codec preserves float-search geometry) is independent of
+embedding quality; the *required refine* is not — which is why part 3 exists.
+
+### Result, part 3 — real-embedding validation
+
+Same pipeline, real vectors: V2 corpus texts embedded with
+**nomic-ai/nomic-embed-text-v1.5** (a non-gated, Matryoshka-trained text
+embedder; see `tools/export-embeddings.py`), 200 held-out queries.
+
+Codec matrix at 21.5k vectors:
+
+| config | recall@10 | resident @5M | verdict |
+| --- | --- | --- | --- |
+| two-stage 1-bit -> float, dim 768 (native) | 0.998 | 648.5 MB | over RAM budget |
+| **two-stage 1-bit -> float, dim 256 (Matryoshka)** | **0.987** | **190.7 MB** | **PASS** |
+
+Refine sweep at 101.6k vectors (dim 256, `scale-bench --vectors-file`):
+
+| refine | recall@10 | p95 |
+| --- | --- | --- |
+| 160 | 0.928 | 2.5 ms |
+| **1024** | **1.000** | **2.9 ms** |
+| 4096 | 1.000 | 4.2 ms |
+
+What this settles:
+
+1. **Matryoshka-256 is confirmed on a real MRL model** — truncation to 256
+   dims keeps the two-stage fidelity gate green (0.987-1.000), and native 768
+   stays over the RAM budget, exactly as the synthetic runs predicted.
+2. **Real geometry is far milder than the adversarial synthetic**: recall
+   1.000 needs `refine ≈ 1k at 100k vectors (~1%)`, vs 16-65k (16%+) on the
+   78k-point synthetic clusters. The adversarial set remains the stress
+   ceiling, not the expectation.
+3. **IVF is still the earned next move**, but for a different reason than
+   recall: the flat coarse scan is O(n) and eats ~120 ms of the 150 ms budget
+   at 5M *regardless of geometry* — partitioning is about scan cost first,
+   adversarial robustness second.
+
+Caveat: nomic-embed is a stand-in for EmbeddingGemma (the product target,
+gated on Hugging Face) — same model class (multilingual-capable MRL text
+embedder), so the geometry conclusion should transfer; re-confirm when the
+product embedder is wired in.
 
 ## Usage
 
