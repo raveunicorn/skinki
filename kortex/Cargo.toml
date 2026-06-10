@@ -7,6 +7,7 @@ members = [
     "crates/kortex-baseline",
     "crates/kortex-vector",
     "crates/kortex-store",
+    "crates/kortex-sleep",
     "crates/kortex-harness",
 ]
 
@@ -34,6 +35,7 @@ kortex-telemetry = { path = "crates/kortex-telemetry" }
 kortex-baseline = { path = "crates/kortex-baseline" }
 kortex-vector = { path = "crates/kortex-vector" }
 kortex-store = { path = "crates/kortex-store" }
+kortex-sleep = { path = "crates/kortex-sleep" }
 
 [profile.release]
 opt-level = 3
