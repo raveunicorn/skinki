@@ -61,7 +61,10 @@ decisions pre-made and isolated as frontier-only tickets):
 **Keep on a frontier model** (algorithm cores / anti-hallucination / UX):
 
 - Stage 3 (GraphRAG extraction + PPR) and Stage 5 (Insight Engine) — the "soul";
-  no spec hand-off, built with heavy review.
+  no spec hand-off, built with heavy review. The compute-budget arithmetic that
+  constrains the Stage 3 design is already done:
+  [`STAGE_3_BUDGET.md`](STAGE_3_BUDGET.md) (extraction must be two-tier; LLM
+  outputs replayable per AGENTS.md rule 3).
 - Stage 7 (macOS app) — parked; interaction design is human, boilerplate can be
   delegated later.
 

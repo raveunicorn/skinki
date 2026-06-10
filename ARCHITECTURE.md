@@ -74,8 +74,12 @@ graph TD
   only when idle and on power, interruptible and resumable.
 - **L4 Insight Engine** — the keystone, designed to be non-hallucinating by
   *separating discovery from narration* (see below).
-- **L5 Agent/Query** — hybrid vector + graph retrieval feeding grounded
-  synthesis; the surface the app and bindings talk to.
+- **L5 Agent/Query** — hybrid vector + graph retrieval feeding a **context
+  assembler**: a budgeted, structured package (cited facts with dates,
+  pre-joined multi-hop chains, community summaries, flagged contradictions)
+  rather than top-k chunks — on an M1 Air prefill speed makes every context
+  token expensive, so the substrate does the joins and the small model only
+  verbalizes. This is the surface the app and bindings talk to.
 
 ## Insight Engine without hallucinations
 

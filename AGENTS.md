@@ -24,17 +24,28 @@ stays green*.
    (SplitMix64), never `rand`, wall-clock, thread timing, or `HashMap` iteration
    order for anything that affects results. The same seed must reproduce
    byte-identical output. (Timing is fine for *telemetry only*, never for logic.)
-3. **No `unsafe`** except in the two quarantined modules that already use it
-   (`kortex-telemetry`, `kortex-vector::store` for mmap). Safe crates keep
+3. **LLM-derived artifacts are replayable, not bit-deterministic.** Stage 3+
+   introduces outputs produced by a local LLM (entity/relation extraction,
+   summaries). Inference on Metal is not bit-reproducible, so the determinism
+   rule is *adapted*, not waived: every LLM output that feeds the engine MUST
+   be recorded in an append-only artifact log (same durability discipline as
+   L0), and every downstream structure (graph, summaries, PPR) MUST be
+   rebuildable byte-identically from that log alone — `rebuild(log)` is
+   deterministic even though `produce(log)` is not. Gates evaluate replayed
+   artifacts; never re-run inference inside a gate. Code that *selects* which
+   units go to the LLM stays fully deterministic under rule 2.
+4. **No `unsafe`** except in the quarantined modules that already use it
+   (`kortex-telemetry` for getrusage; `kortex-vector::store` and the
+   `kortex-store` mmap section for mmap/statvfs). Safe crates keep
    `#![forbid(unsafe_code)]` (or the `cfg(not(unix))` variant). Do not add
    `unsafe` elsewhere.
-4. **Minimal dependencies.** Allowed crates: `serde`, `serde_json`, `clap`,
+5. **Minimal dependencies.** Allowed crates: `serde`, `serde_json`, `clap`,
    `libc`, `anyhow`, and the internal `kortex-*` crates. Adding any new
    third-party dependency requires explicit human approval and a one-line
    justification in the PR.
-5. **Interface-first.** Implement against the trait/spec defined for the stage.
+6. **Interface-first.** Implement against the trait/spec defined for the stage.
    Keep public APIs small; don't reach across crate boundaries.
-6. **Tests with every change.** New behavior ships with unit/property/golden
+7. **Tests with every change.** New behavior ships with unit/property/golden
    tests. Prefer property tests for math (invariants) and golden tests for
    anything with a fixed expected output.
 
@@ -63,7 +74,8 @@ runs exactly these and will reject a regression.
 | `kortex-telemetry` | Latency percentiles + peak RSS. (`unsafe`: getrusage.) |
 | `kortex-baseline` | BM25 lexical baseline (the yardstick). |
 | `kortex-vector` | Stage 1: embeddings, quantizers, two-stage, mmap store. (`unsafe`: mmap.) |
-| `kortex-harness` | `kortex` CLI: generate / eval / demo / compress-bench. |
+| `kortex-store` | Stage 2/2B: append-only L0 + unit store, rotation, dedup runs. (`unsafe`: mmap.) |
+| `kortex-harness` | `kortex` CLI: generate / eval / demo / compress-bench / scale-bench / store-bench. |
 
 ## Workflow for a delegated stage
 

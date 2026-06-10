@@ -1,5 +1,13 @@
 # Skinki — Long-Term Memory & RAG
 
+> **SUPERSEDED (do not build from this document).** The memory architecture
+> described below (SQLite + sqlite-vec inside the macOS app) predates the
+> Exocortex pivot. Memory is now owned by the headless Rust engine
+> [`kortex`](../../../kortex/) — see the top-level
+> [`ARCHITECTURE.md`](../../../ARCHITECTURE.md) and
+> [`ROADMAP.md`](../../../ROADMAP.md). The app consumes the engine via FFI at
+> Stage 7. This file is kept only as historical context for the app wrapper.
+
 Pillar 4: Skinki should *grow* with the user — remembering preferences, tone of voice, frequent filesystem paths, and coding style (reference: Vellum.ai-style evolving context). This document specifies the local memory architecture.
 
 All memory is **local, private, and inspectable/erasable** by the user.

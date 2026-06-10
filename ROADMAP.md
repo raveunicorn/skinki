@@ -99,11 +99,25 @@ layered design and budgets.
 - **Hypothesis:** a local incremental GraphRAG (LightRAG extraction + HippoRAG 2
   PPR) on **Gemma 4B** gives multi-hop quality close to big-model RAG within the
   cost budget.
-- **Tests:** 4B entity/relation extraction (quality + speed); incremental
-  updates without rebuild; PPR vs traversal vs PathRAG-pruning; hybrid
-  vector+graph; RAPTOR summaries.
+- **Pre-design constraint (do the math first):** full-LLM extraction of a 5M-unit
+  backfill is infeasible by ~100x on the M1 Air — extraction is **two-tier by
+  construction** (deterministic tier over everything; LLM tier only for a
+  selected ≤~5% on backfill), and all LLM outputs go to an append-only artifact
+  log (replayable; AGENTS.md rule 3). Arithmetic and ticket implications:
+  [`kortex/specs/STAGE_3_BUDGET.md`](kortex/specs/STAGE_3_BUDGET.md).
+- **Tests:** 4B entity/relation extraction (quality + speed, both tiers);
+  incremental updates without rebuild; PPR vs traversal vs PathRAG-pruning;
+  hybrid vector+graph; RAPTOR summaries; **salience/reconsolidation** (use
+  counts + recency feed retrieval ranking; reinforced-on-use links); the
+  **context assembler** — a budgeted package (cited facts with dates,
+  pre-joined multi-hop chains, community summary, flagged contradictions)
+  measured by a **context-sufficiency** metric: can the answer be produced
+  from the assembled package alone within a 1-2k-token budget (on an M1 Air,
+  prefill speed makes every context token expensive — small dense packages
+  beat top-k chunk dumps).
 - **Gate:** target multi-hop accuracy on synthetic + LongMemEval/LoCoMo; cost
-  per MB within the battery budget.
+  per MB within the battery budget; context-sufficiency above threshold at the
+  token budget.
 
 ## Stage 4 — "Sleep" engine (consolidation)
 
@@ -132,7 +146,11 @@ layered design and budgets.
   stable C-ABI/FFI + CLI, headless and embeddable anywhere; `no_std`-friendly in
   hot paths where possible.
 - **Tests:** Swift bindings (for Skinki) and Python bindings (for CI/eval);
-  third-party embedding; reproducible benchmarks.
+  third-party embedding; reproducible benchmarks; an **MCP server** over the
+  query/insight surface — the cheapest distribution channel ("memory for
+  agents": Claude Code, Cursor, any MCP host) and a forcing function for a
+  clean headless API. (The Stage 1 `RaBitQ::save/load` index format is the
+  seed of what `kx_open` consumes.)
 - **Gate:** documented, benchmarked, embeddable by a third party.
 
 ## Stage 7 — Skinki product integration (secondary)
@@ -148,7 +166,17 @@ layered design and budgets.
 ## Open questions / risks
 
 - Exact insight-precision / false-insight thresholds (set on Stage 0 synthetic).
-- Embedding dimensionality vs quality vs RAM (co-designed in Stage 1).
+- Embedding dimensionality vs quality vs RAM (co-designed in Stage 1); the
+  required two-stage `refine` depends on real-embedding cluster geometry —
+  validate on EmbeddingGemma vectors before locking Stage 3 index design.
+- IVF-style partitioning (per-list centroids) vs flat scan at 5M — the Stage 1
+  at-scale verdict makes this the default candidate for the Stage 3 index.
 - STT choice for Russian (Whisper large/distil vs Parakeet vs Apple Speech).
 - The "invent a format vs use Lance/Cozo" line is decided by Stage 2 data, not
   in advance.
+- External validation of the architecture's core pattern: DeepSeek V4's
+  CSA/HCA attention (query-dependent selection over compressed entries +
+  heavily-compressed global context) is the same "compress + select" shape we
+  build *outside* the model — RAPTOR summaries ≈ the compressed global view,
+  two-stage retrieval + context assembler ≈ the query-dependent selection.
+  Inspiration for the assembler's structure; not a component to adopt.
