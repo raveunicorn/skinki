@@ -16,7 +16,7 @@ layered design and budgets.
 | Stage | Focus | Status |
 | --- | --- | --- |
 | 0 | Eval harness + synthetic corpus (the measuring stick) | **Done** |
-| 1 | Memory compression PoC (RaBitQ + Model2Vec, two-stage, mmap) | **Done** |
+| 1 | Memory compression PoC (RaBitQ + Model2Vec, two-stage, mmap) | **Done** (re-validated at scale; flat-scan limit mapped) |
 | 2 | Storage substrate (Lance/Cozo) + append-only L0; maybe a `.kx` codec | **Done** |
 | 3 | Incremental local GraphRAG (LightRAG + HippoRAG 2 PPR + RAPTOR) | Next |
 | 4 | "Sleep" consolidation engine (idle + on-power background jobs) | Planned |
@@ -54,16 +54,23 @@ layered design and budgets.
   rotation via sign-flip + Walsh-Hadamard, then 1-bit/multi-bit codes with the
   unbiased estimator) — plus a two-stage retriever, an mmap-backed code store,
   and an exact float32 baseline. Benchmarked via `kortex compress-bench`.
-- **Gate (met):** the winning config — **Matryoshka-truncation to 256 dims +
-  two-stage (1-bit RaBitQ coarse scan -> float rerank of candidates from mmap)**
-  — reaches **recall@10 = 1.000 at ~172 MB resident per 5M vectors** (budget 250
-  MB), p95 ~2.5 ms (budget 150 ms). At 768 dims the same pipeline hits recall
-  1.000 but 629 MB resident, so dimensionality is the decisive lever. A harder
-  synthetic set reproduces the verdict (recall 0.999 at 172 MB).
-- **Invent? No.** Existing building blocks clear the budget, so "beat-or-invent"
-  resolves to *beat* — no custom quantizer needed at this stage. (Vectors come
-  from a deterministic static hash embedder; real EmbeddingGemma vectors can be
-  swapped in without changing the compression-fidelity conclusion.)
+- **Gate (met at small N, then re-validated at scale):** the winning config —
+  **Matryoshka-truncation to 256 dims + two-stage (1-bit RaBitQ popcount scan
+  -> float rerank of candidates from mmap)** — measured by `kortex scale-bench`
+  on real streamed indexes (not projections): **1M: recall@10 = 1.000, p95
+  32.9 ms, 38 MB resident. 5M: recall 1.000 at p95 119 ms / 190.7 MB resident
+  on mild cluster geometry; on adversarial geometry (78k-point clusters) recall
+  1.000 costs p95 157.7 ms — ~5% over the 150 ms budget.** Cold open + first
+  query < 300 ms. The re-validation surfaced and fixed a real latency bug (a
+  full per-query sort of all candidates) and corrected the resident accounting
+  to 40 B/vec (was 36).
+- **Invent? Not yet — iterate.** Existing blocks clear the budget except on
+  adversarial geometry at 5M, where 1-bit codes against a *global* centroid
+  can't rank within a dense cluster. The earned next move is **IVF-style
+  partitioning with per-list centroids** (standard RaBitQ deployment): it fixes
+  within-cluster discrimination and cuts scan cost 10-50x — co-designed with
+  Stage 3's index work. Real-EmbeddingGemma validation is the other open
+  follow-up.
 
 ## Stage 2 — Storage substrate (pure-Rust, gate passed) — Done
 

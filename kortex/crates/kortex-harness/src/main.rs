@@ -22,9 +22,12 @@ use kortex_eval::{
 use kortex_store::{derive_units, RawEvent, Source, Store};
 use kortex_telemetry::{peak_rss_bytes, LatencySummary};
 use kortex_vector::bench::{passes_gate, run_matrix, verdict, BenchReport, Budgets};
-use kortex_vector::embed::{synthetic_clusters, StaticHashEmbedder};
+use kortex_vector::embed::{synthetic_clusters, ClusterSampler, StaticHashEmbedder};
+use kortex_vector::quant::{RaBitQ, RaBitQBuilder};
+use kortex_vector::search::{recall as recall_overlap, two_stage_search};
+use kortex_vector::store::{available_disk_bytes, FloatMmapStore};
 
-use kortex_vector::VectorSet;
+use kortex_vector::{dot, VectorSet};
 
 #[derive(Parser)]
 #[command(
@@ -122,6 +125,40 @@ enum Cmd {
         #[arg(long)]
         report_out: Option<PathBuf>,
         /// Exit non-zero if no config meets the Stage 1 gate (for CI).
+        #[arg(long, default_value_t = false)]
+        assert_gate: bool,
+    },
+    /// Stage 1 at real scale: stream-build a 1M-5M vector index on disk and
+    /// measure actual two-stage latency, recall, resident RAM and cold open —
+    /// no projections.
+    ScaleBench {
+        /// Base vector count: "1m", "5m", "500k", or a raw integer.
+        #[arg(long, default_value = "1m")]
+        scale: String,
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long, default_value_t = 256)]
+        dim: usize,
+        #[arg(long, default_value_t = 64)]
+        clusters: usize,
+        /// Held-out queries (also the sample for exact ground truth).
+        #[arg(long, default_value_t = 50)]
+        queries: usize,
+        #[arg(long, default_value_t = 10)]
+        k: usize,
+        /// Coarse-stage shortlist size(s) fed to the float rerank; a comma
+        /// list reuses one build/truth pass across all settings.
+        #[arg(long, default_value = "1024,4096,16384,65536")]
+        refine: String,
+        /// Working directory for the multi-GB float file (default: temp dir).
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Keep the working directory after the run.
+        #[arg(long, default_value_t = false)]
+        keep: bool,
+        #[arg(long)]
+        report_out: Option<PathBuf>,
+        /// Exit non-zero unless recall/latency/RAM budgets hold at this scale.
         #[arg(long, default_value_t = false)]
         assert_gate: bool,
     },
@@ -402,8 +439,374 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Cmd::ScaleBench {
+            scale,
+            seed,
+            dim,
+            clusters,
+            queries,
+            k,
+            refine,
+            dir,
+            keep,
+            report_out,
+            assert_gate,
+        } => {
+            let n = parse_scale(&scale)?;
+            let refines: Vec<usize> = refine
+                .split(',')
+                .map(|s| s.trim().parse::<usize>().context("bad --refine entry"))
+                .collect::<Result<_>>()?;
+            anyhow::ensure!(!refines.is_empty(), "--refine must list at least one size");
+            let report = run_scale_bench(n, seed, dim, clusters, queries, k, &refines, dir, keep)?;
+            print_scale_report(&report);
+            if let Some(path) = report_out {
+                let file = std::fs::File::create(&path)
+                    .with_context(|| format!("creating {}", path.display()))?;
+                serde_json::to_writer_pretty(file, &report).context("writing report")?;
+                println!("Report written to {}", path.display());
+            }
+            if assert_gate {
+                let budgets = Budgets::default();
+                let pass = report.runs.iter().find(|r| {
+                    r.recall_at_k >= budgets.recall_at_k
+                        && r.latency.p95_ms <= budgets.p95_ms
+                        && report.resident_mb_at_5m <= budgets.idle_ram_mb_at_5m
+                });
+                if let Some(r) = pass {
+                    println!(
+                        "\nGATE: PASS at n={} via refine={} (recall {:.3}, p95 {:.1}ms, resident@5M {:.1}MB)",
+                        report.vectors,
+                        r.refine,
+                        r.recall_at_k,
+                        r.latency.p95_ms,
+                        report.resident_mb_at_5m
+                    );
+                } else {
+                    anyhow::bail!(
+                        "Stage 1 scale gate FAILED at n={}: no refine in {:?} met recall>={:.2} with p95<={:.0}ms and resident@5M<={:.0}MB",
+                        report.vectors,
+                        refines,
+                        budgets.recall_at_k,
+                        budgets.p95_ms,
+                        budgets.idle_ram_mb_at_5m
+                    );
+                }
+            }
+        }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Stage 1 scale bench — measured, not projected
+// ---------------------------------------------------------------------------
+
+fn parse_scale(s: &str) -> Result<usize> {
+    let t = s.to_ascii_lowercase();
+    let parsed = if let Some(m) = t.strip_suffix('m') {
+        m.parse::<usize>().map(|v| v * 1_000_000)
+    } else if let Some(kk) = t.strip_suffix('k') {
+        kk.parse::<usize>().map(|v| v * 1_000)
+    } else {
+        t.parse::<usize>()
+    };
+    let n = parsed.with_context(|| format!("cannot parse scale '{s}' (try 1m, 5m, 500k)"))?;
+    anyhow::ensure!(n >= 1_000, "scale {n} too small to be meaningful");
+    Ok(n)
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ScaleRefineRun {
+    refine: usize,
+    recall_at_k: f64,
+    latency: LatencySummary,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ScaleBenchReport {
+    vectors: usize,
+    dim: usize,
+    queries: usize,
+    k: usize,
+    float_file_bytes: u64,
+    gen_secs: f64,
+    build_secs: f64,
+    truth_secs: f64,
+    /// One timed run per --refine setting, sharing the same build/truth.
+    runs: Vec<ScaleRefineRun>,
+    cold_open_first_query_ms: f64,
+    resident_index_bytes: u64,
+    resident_index_mb: f64,
+    /// Linear extrapolation to 5M vectors — sound for RAM because the index
+    /// is strictly per-vector (codes + factor + popcount), unlike latency,
+    /// which is only ever reported as measured.
+    resident_mb_at_5m: f64,
+    peak_rss_mb: f64,
+}
+
+/// Stream rows of a raw little-endian f32 file through a callback.
+fn stream_rows(path: &std::path::Path, dim: usize, mut f: impl FnMut(u32, &[f32])) -> Result<()> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut reader = std::io::BufReader::with_capacity(1 << 22, file);
+    let row_bytes = dim * 4;
+    let mut buf = vec![0u8; row_bytes];
+    let mut row = vec![0f32; dim];
+    let mut id: u32 = 0;
+    loop {
+        match reader.read_exact(&mut buf) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
+        }
+        for (d, r) in row.iter_mut().enumerate() {
+            *r = f32::from_le_bytes(buf[d * 4..d * 4 + 4].try_into().unwrap());
+        }
+        f(id, &row);
+        id += 1;
+    }
+    Ok(())
+}
+
+/// Maintain a top-k set with `top[0]` always the current worst entry, using
+/// the same ordering as `select_top_k` (score desc, then id asc).
+fn top_push(top: &mut Vec<(f32, u32)>, k: usize, s: f32, id: u32) {
+    let worse = |a: (f32, u32), b: (f32, u32)| a.0 < b.0 || (a.0 == b.0 && a.1 > b.1);
+    if top.len() < k {
+        top.push((s, id));
+        if top.len() == k {
+            // Establish the invariant: worst at index 0.
+            let mut mi = 0;
+            for i in 1..top.len() {
+                if worse(top[i], top[mi]) {
+                    mi = i;
+                }
+            }
+            top.swap(0, mi);
+        }
+        return;
+    }
+    if worse(top[0], (s, id)) {
+        top[0] = (s, id);
+        let mut mi = 0;
+        for i in 1..top.len() {
+            if worse(top[i], top[mi]) {
+                mi = i;
+            }
+        }
+        top.swap(0, mi);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_scale_bench(
+    n: usize,
+    seed: u64,
+    dim: usize,
+    clusters: usize,
+    num_queries: usize,
+    k: usize,
+    refines: &[usize],
+    dir: Option<PathBuf>,
+    keep: bool,
+) -> Result<ScaleBenchReport> {
+    use std::io::Write;
+
+    let dir = dir.unwrap_or_else(|| {
+        std::env::temp_dir().join(format!("kortex_scale_{}", std::process::id()))
+    });
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let float_file_bytes = (n * dim * 4) as u64;
+    if let Some(avail) = available_disk_bytes(&dir) {
+        let need = float_file_bytes + float_file_bytes / 10;
+        anyhow::ensure!(
+            avail > need,
+            "scale-bench needs ~{:.1} GB free at {}, only {:.1} GB available",
+            need as f64 / 1e9,
+            dir.display(),
+            avail as f64 / 1e9
+        );
+    }
+    let fpath = dir.join("base.f32");
+    println!(
+        "scale-bench: n={n}, dim={dim}, float file {:.2} GB at {}",
+        float_file_bytes as f64 / 1e9,
+        fpath.display()
+    );
+
+    // Pass 0 — stream-generate base vectors to disk; accumulate the centroid
+    // in f64 so 5M additions don't lose precision.
+    let t0 = Instant::now();
+    let mut sampler = ClusterSampler::new(seed, dim, clusters, 0.45);
+    let mut centroid_sum = vec![0f64; dim];
+    {
+        let file = std::fs::File::create(&fpath)
+            .with_context(|| format!("creating {}", fpath.display()))?;
+        let mut w = std::io::BufWriter::with_capacity(1 << 20, file);
+        let mut v = vec![0f32; dim];
+        for _ in 0..n {
+            sampler.fill(&mut v);
+            for (d, x) in v.iter().enumerate() {
+                centroid_sum[d] += *x as f64;
+            }
+            for x in &v {
+                w.write_all(&x.to_le_bytes())?;
+            }
+        }
+        w.flush()?;
+    }
+    // Held-out queries: the next draws from the same distribution.
+    let mut queries = VectorSet::new(dim);
+    {
+        let mut v = vec![0f32; dim];
+        for _ in 0..num_queries {
+            sampler.fill(&mut v);
+            queries.push(&v);
+        }
+    }
+    let centroid: Vec<f32> = centroid_sum.iter().map(|s| (s / n as f64) as f32).collect();
+    let gen_secs = t0.elapsed().as_secs_f64();
+    println!("pass 0 (generate -> disk): {gen_secs:.1}s");
+
+    // Pass 1 — stream the file into the incremental index builder.
+    let t1 = Instant::now();
+    let mut builder = RaBitQBuilder::new(dim, 1, seed, centroid);
+    stream_rows(&fpath, dim, |_, row| builder.push(row))?;
+    let rq = builder.finish();
+    let resident_index_bytes = rq.resident_bytes() as u64;
+    rq.save(&dir)?;
+    drop(rq);
+    let build_secs = t1.elapsed().as_secs_f64();
+    println!("pass 1 (build 1-bit index): {build_secs:.1}s");
+
+    // Pass 2 — exact ground truth by streaming the float file once.
+    let t2 = Instant::now();
+    let mut tops: Vec<Vec<(f32, u32)>> = vec![Vec::with_capacity(k); num_queries];
+    stream_rows(&fpath, dim, |id, row| {
+        for (qi, top) in tops.iter_mut().enumerate() {
+            top_push(top, k, dot(queries.get(qi), row), id);
+        }
+    })?;
+    let truth: Vec<Vec<u32>> = tops
+        .into_iter()
+        .map(|mut t| {
+            t.sort_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(a.1.cmp(&b.1))
+            });
+            t.into_iter().map(|(_, id)| id).collect()
+        })
+        .collect();
+    let truth_secs = t2.elapsed().as_secs_f64();
+    println!("pass 2 (exact ground truth): {truth_secs:.1}s");
+
+    // Cold-ish open: load the saved index from disk, mmap the float file, run
+    // the first query end-to-end. (Page cache is warm from the build — a true
+    // cold start needs a reboot/purge — so treat this as a lower bound.)
+    let t3 = Instant::now();
+    let rq = RaBitQ::load(&dir).context("loading saved index")?;
+    let fmm = FloatMmapStore::open(&fpath, dim).context("mmap of float file")?;
+    let _ = two_stage_search(&rq, &fmm, queries.get(0), k, refines[0]);
+    let cold_open_first_query_ms = t3.elapsed().as_secs_f64() * 1000.0;
+
+    // Timed queries: full coarse scan over n + float rerank from mmap, once
+    // per refine setting (the expensive passes above are shared).
+    let mut runs = Vec::with_capacity(refines.len());
+    for &refine in refines {
+        let mut durations: Vec<Duration> = Vec::with_capacity(num_queries);
+        let mut racc = 0.0;
+        for (qi, t) in truth.iter().enumerate() {
+            let q = queries.get(qi);
+            let start = Instant::now();
+            let got = two_stage_search(&rq, &fmm, q, k, refine);
+            durations.push(start.elapsed());
+            racc += recall_overlap(&got, t);
+        }
+        let recall_at_k = racc / num_queries.max(1) as f64;
+        let latency = LatencySummary::from_durations(&durations);
+        println!(
+            "refine {refine:>6}: recall@{k}={recall_at_k:.3}  p50={:.1}ms p95={:.1}ms",
+            latency.p50_ms, latency.p95_ms
+        );
+        runs.push(ScaleRefineRun {
+            refine,
+            recall_at_k,
+            latency,
+        });
+    }
+
+    if !keep {
+        let _ = std::fs::remove_dir_all(&dir);
+    } else {
+        println!("kept working dir: {}", dir.display());
+    }
+
+    let resident_index_mb = resident_index_bytes as f64 / 1_048_576.0;
+    Ok(ScaleBenchReport {
+        vectors: n,
+        dim,
+        queries: num_queries,
+        k,
+        float_file_bytes,
+        gen_secs,
+        build_secs,
+        truth_secs,
+        runs,
+        cold_open_first_query_ms,
+        resident_index_bytes,
+        resident_index_mb,
+        resident_mb_at_5m: resident_index_mb * (5_000_000.0 / n as f64),
+        peak_rss_mb: rss_mb(),
+    })
+}
+
+fn print_scale_report(r: &ScaleBenchReport) {
+    println!("\n=== Kortex Stage 1 — Scale Benchmark (measured) ===");
+    println!("vectors            : {} (dim {})", r.vectors, r.dim);
+    println!(
+        "pipeline           : 1-bit RaBitQ popcount scan -> float32 rerank from mmap; {} held-out queries",
+        r.queries
+    );
+    println!(
+        "{:<10} {:>10} {:>9} {:>9} {:>9} {:>9}",
+        "refine", "recall@k", "p50_ms", "p95_ms", "mean_ms", "max_ms"
+    );
+    for run in &r.runs {
+        println!(
+            "{:<10} {:>10.3} {:>9.2} {:>9.2} {:>9.2} {:>9.2}",
+            run.refine,
+            run.recall_at_k,
+            run.latency.p50_ms,
+            run.latency.p95_ms,
+            run.latency.mean_ms,
+            run.latency.max_ms
+        );
+    }
+    println!(
+        "cold open+query    : {:.1} ms (load index + mmap + first search; warm page cache -> lower bound)",
+        r.cold_open_first_query_ms
+    );
+    println!(
+        "resident index     : {:.1} MB measured at n={} ({:.1} B/vec) -> {:.1} MB at 5M (linear)",
+        r.resident_index_mb,
+        r.vectors,
+        r.resident_index_bytes as f64 / r.vectors as f64,
+        r.resident_mb_at_5m
+    );
+    println!(
+        "float file (disk)  : {:.2} GB, rerank served via mmap",
+        r.float_file_bytes as f64 / 1e9
+    );
+    println!(
+        "peak RSS (process) : {:.1} MB (includes build + truth passes; mmap-touched file pages are clean and reclaimable under memory pressure — the index keeps only {:.1} MB hot)",
+        r.peak_rss_mb, r.resident_index_mb
+    );
+    println!(
+        "timings            : generate {:.1}s, build {:.1}s, exact truth {:.1}s",
+        r.gen_secs, r.build_secs, r.truth_secs
+    );
 }
 
 fn rss_mb() -> f64 {

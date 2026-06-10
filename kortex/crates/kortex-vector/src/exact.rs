@@ -17,15 +17,28 @@ pub fn top_k(data: &VectorSet, query: &[f32], k: usize) -> Vec<u32> {
     select_top_k(&mut scored, k)
 }
 
-/// Sort `scored` (score, id) descending by score, then ascending by id, and
-/// return the first `k` ids. Shared by the quantizers' rerankers.
+/// Return the `k` best ids from `scored` (score desc, ties by id asc).
+///
+/// Uses an O(n) partition (`select_nth_unstable_by`) before sorting only the
+/// head — a full sort of millions of candidates per query was the dominant
+/// query cost at scale (~100 ms at 1M), not the scan itself.
 pub fn select_top_k(scored: &mut [(f32, u32)], k: usize) -> Vec<u32> {
-    scored.sort_by(|a, b| {
+    let n = scored.len();
+    if k == 0 || n == 0 {
+        return Vec::new();
+    }
+    let cmp = |a: &(f32, u32), b: &(f32, u32)| {
         b.0.partial_cmp(&a.0)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(a.1.cmp(&b.1))
-    });
-    scored.iter().take(k).map(|&(_, id)| id).collect()
+    };
+    let k = k.min(n);
+    if k < n {
+        scored.select_nth_unstable_by(k - 1, cmp);
+    }
+    let head = &mut scored[..k];
+    head.sort_by(cmp);
+    head.iter().map(|&(_, id)| id).collect()
 }
 
 #[cfg(test)]

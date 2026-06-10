@@ -82,6 +82,54 @@ impl StaticHashEmbedder {
     }
 }
 
+/// Streaming source of unit vectors drawn from Gaussian blobs on the sphere —
+/// the same distribution as [`synthetic_clusters`], but one vector at a time,
+/// so multi-million-vector sets can be written to disk without ever living in
+/// RAM. Deterministic: a given seed yields the same sequence regardless of
+/// how the draws are batched.
+pub struct ClusterSampler {
+    rng: Rng,
+    dim: usize,
+    centers: Vec<Vec<f32>>,
+    sigma: f32,
+}
+
+impl ClusterSampler {
+    pub fn new(seed: u64, dim: usize, clusters: usize, noise: f32) -> Self {
+        let mut rng = Rng::new(seed);
+        // Cluster centers on the sphere.
+        let mut centers: Vec<Vec<f32>> = Vec::with_capacity(clusters);
+        for _ in 0..clusters {
+            let mut c = vec![0.0f32; dim];
+            for x in c.iter_mut() {
+                *x = rng.normal();
+            }
+            normalize(&mut c);
+            centers.push(c);
+        }
+        // Per-coordinate noise std so the noise vector's L2 norm is ~`noise`.
+        let sigma = noise / (dim as f32).sqrt();
+        ClusterSampler {
+            rng,
+            dim,
+            centers,
+            sigma,
+        }
+    }
+
+    /// Fill `out` (length `dim`) with the next vector in the sequence.
+    pub fn fill(&mut self, out: &mut [f32]) {
+        debug_assert_eq!(out.len(), self.dim);
+        let idx = self.rng.below(self.centers.len());
+        // Draw order matches the original synthetic_clusters loop: one normal
+        // per coordinate, after the center pick.
+        for (i, x) in out.iter_mut().enumerate() {
+            *x = self.centers[idx][i] + self.rng.normal() * self.sigma;
+        }
+        normalize(out);
+    }
+}
+
 /// Generate `count` unit vectors drawn from `clusters` Gaussian blobs on the
 /// sphere. `noise` is the (dimension-independent) relative magnitude of the
 /// perturbation around a unit cluster center: smaller `noise` = tighter
@@ -94,28 +142,12 @@ pub fn synthetic_clusters(
     clusters: usize,
     noise: f32,
 ) -> VectorSet {
-    let mut r = Rng::new(seed);
-    // Cluster centers on the sphere.
-    let mut centers: Vec<Vec<f32>> = Vec::with_capacity(clusters);
-    for _ in 0..clusters {
-        let mut c = vec![0.0f32; dim];
-        for x in c.iter_mut() {
-            *x = r.normal();
-        }
-        normalize(&mut c);
-        centers.push(c);
-    }
-    // Per-coordinate noise std so the noise vector's L2 norm is ~`noise`.
-    let sigma = noise / (dim as f32).sqrt();
+    let mut sampler = ClusterSampler::new(seed, dim, clusters, noise);
     let mut vs = VectorSet::new(dim);
     vs.data.reserve(count * dim);
     let mut v = vec![0.0f32; dim];
     for _ in 0..count {
-        let c = &centers[r.below(clusters)];
-        for i in 0..dim {
-            v[i] = c[i] + r.normal() * sigma;
-        }
-        normalize(&mut v);
+        sampler.fill(&mut v);
         vs.push(&v);
     }
     vs

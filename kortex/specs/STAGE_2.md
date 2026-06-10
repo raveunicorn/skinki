@@ -127,7 +127,7 @@ Unit record: `event_id (u64 LE) | byte_start (u32 LE) | byte_end (u32 LE)`.
 
 - [x] `store-bench --assert-gate` green; content overhead 1.21x, index 20.0 B/unit, p95 0.3 us, ingest 2.5M/s.
 - [x] `cargo test`, `clippy -D warnings`, `cargo fmt --check` clean.
-- [ ] CI: add a `store gate` step mirroring Stage 1's gate job.
+- [x] CI: `store gate` step in `.github/workflows/ci.yml` (gate job).
 - [x] ROADMAP Stage 2 row → done; this spec Status → done.
 - [x] D1 decision: kept pure Rust (Lance/Cozo not needed).
 

@@ -398,26 +398,178 @@ impl Quantizer for ProductQuantizer {
 
 const RABITQ_RANGE_SIGMA: f32 = 3.5;
 
+/// Bit width of the quantized query used by the 1-bit fast scan.
+const QUERY_BITS: usize = 4;
+
+/// Magic + version for the on-disk index format (see [`RaBitQ::save`]).
+const RABITQ_MAGIC: &[u8; 8] = b"KXRABQ01";
+
 pub struct RaBitQ {
     count: usize,
+    in_dim: usize,
     padded: usize,
     bits: u8,
+    seed: u64,
     rotator: Rotator,
     factors: Vec<f32>, // per-vector ranking factor
-    codes: Vec<u8>,    // packed: 1-bit sign codes, or B-bit uniform codes
+    /// Popcount of each vector's 1-bit code (empty for multi-bit codecs).
+    pc: Vec<u32>,
+    codes: Vec<u8>, // packed: 1-bit sign codes, or B-bit uniform codes
     bytes_per_vec_codes: usize,
     // multi-bit dequant params
     lo: f32,
     step: f32,
+    /// Use the popcount fast path for 1-bit scans (default true).
+    fast_scan: bool,
+}
+
+/// Incremental RaBitQ encoder: feeds vectors one at a time so an index over
+/// millions of vectors can be built from a disk stream without ever holding
+/// the float set in RAM. `RaBitQ::build` is a thin wrapper over this.
+///
+/// The caller supplies the dataset centroid (RaBitQ centers residuals before
+/// quantizing), which therefore needs one prior streaming pass.
+pub struct RaBitQBuilder {
+    bits: u8,
+    seed: u64,
+    in_dim: usize,
+    padded: usize,
+    rotator: Rotator,
+    centroid: Vec<f32>,
+    lo: f32,
+    step: f32,
+    levels: u32,
+    factors: Vec<f32>,
+    pc: Vec<u32>,
+    writer: BitWriter,
+    bytes_per_vec_codes: usize,
+    count: usize,
+    residual: Vec<f32>,
+}
+
+impl RaBitQBuilder {
+    pub fn new(in_dim: usize, bits: u8, seed: u64, centroid: Vec<f32>) -> Self {
+        assert!(bits >= 1, "bits must be >= 1");
+        assert_eq!(centroid.len(), in_dim, "centroid dim mismatch");
+        let rotator = Rotator::new(seed ^ 0x2B17, in_dim, 2);
+        let padded = rotator.out_dim();
+        // The word-wise scan paths assume whole u64 words per vector.
+        assert!(padded >= 64, "RaBitQ requires dim > 32 (padded >= 64)");
+
+        let r = RABITQ_RANGE_SIGMA / (padded as f32).sqrt();
+        let levels = 1u32 << bits;
+        let step = if bits == 1 {
+            0.0
+        } else {
+            2.0 * r / levels as f32
+        };
+        let lo = -r;
+        let bytes_per_vec_codes = (padded * bits as usize).div_ceil(8);
+
+        RaBitQBuilder {
+            bits,
+            seed,
+            in_dim,
+            padded,
+            rotator,
+            centroid,
+            lo,
+            step,
+            levels,
+            factors: Vec::new(),
+            pc: Vec::new(),
+            writer: BitWriter::with_capacity(0),
+            bytes_per_vec_codes,
+            count: 0,
+            residual: vec![0.0f32; in_dim],
+        }
+    }
+
+    pub fn push(&mut self, v: &[f32]) {
+        debug_assert_eq!(v.len(), self.in_dim);
+        for d in 0..self.in_dim {
+            self.residual[d] = v[d] - self.centroid[d];
+        }
+        let norm_r = l2_norm(&self.residual).max(1e-9);
+        for x in self.residual.iter_mut() {
+            *x /= norm_r;
+        }
+        let x = self.rotator.apply(&self.residual); // unit, length padded
+
+        if self.bits == 1 {
+            // Sign codes; factor = norm_r / ||x||_1.
+            let mut l1 = 0.0f32;
+            let mut ones = 0u32;
+            for d in 0..self.padded {
+                let bit = if x[d] >= 0.0 { 1u32 } else { 0u32 };
+                ones += bit;
+                l1 += x[d].abs();
+                self.writer.write(bit, 1);
+            }
+            self.factors.push(norm_r / l1.max(1e-9));
+            self.pc.push(ones);
+        } else {
+            // Uniform B-bit codes; factor = norm_r / ||x_hat||.
+            let mut xhat_norm_sq = 0.0f32;
+            for d in 0..self.padded {
+                let clamped = x[d].clamp(self.lo, -self.lo);
+                let mut level = ((clamped - self.lo) / self.step).floor() as i64;
+                if level < 0 {
+                    level = 0;
+                }
+                if level as u32 >= self.levels {
+                    level = self.levels as i64 - 1;
+                }
+                let val = self.lo + (level as f32 + 0.5) * self.step;
+                xhat_norm_sq += val * val;
+                self.writer.write(level as u32, self.bits);
+            }
+            self.factors.push(norm_r / xhat_norm_sq.sqrt().max(1e-9));
+        }
+        self.count += 1;
+    }
+
+    pub fn finish(self) -> RaBitQ {
+        RaBitQ {
+            count: self.count,
+            in_dim: self.in_dim,
+            padded: self.padded,
+            bits: self.bits,
+            seed: self.seed,
+            rotator: self.rotator,
+            factors: self.factors,
+            pc: self.pc,
+            codes: self.writer.finish(),
+            bytes_per_vec_codes: self.bytes_per_vec_codes,
+            lo: self.lo,
+            step: self.step,
+            fast_scan: true,
+        }
+    }
+}
+
+/// A query pre-quantized to `QUERY_BITS`-bit codes laid out as bit-planes, so
+/// a 1-bit data scan reduces to AND + popcount per u64 word.
+///
+/// Math: data stores sign bits b_d (signed value s_d = 2*b_d - 1) and the
+/// reference score is `factor * (2*pos - total)` with `pos = Σ_{b_d=1} y_d`.
+/// Quantize y_d ≈ lo + step*q_d (q_d in [0, 2^B-1]); then
+/// `pos ≈ lo*popcnt(code) + step * Σ_j 2^j * popcnt(code AND plane_j)`,
+/// where plane_j holds bit j of every q_d. popcnt(code) is precomputed per
+/// vector at build time, `total` stays exact (f32), so the only work per
+/// vector is B AND+popcounts per word.
+pub struct QuantizedQuery {
+    planes: Vec<u64>, // QUERY_BITS * words, plane-major
+    words: usize,
+    lo: f32,
+    step: f32,
+    total: f32,
 }
 
 impl RaBitQ {
     pub fn build(vs: &VectorSet, bits: u8, seed: u64) -> Self {
-        assert!(bits >= 1, "bits must be >= 1");
         let dim = vs.dim;
         let n = vs.count();
-        let rotator = Rotator::new(seed ^ 0x2B17, dim, 2);
-        let padded = rotator.out_dim();
 
         // Dataset centroid (RaBitQ centers residuals before quantizing).
         let mut centroid = vec![0.0f32; dim];
@@ -433,77 +585,118 @@ impl RaBitQ {
             }
         }
 
-        let r = RABITQ_RANGE_SIGMA / (padded as f32).sqrt();
-        let levels = 1u32 << bits;
-        let step = if bits == 1 {
-            0.0
-        } else {
-            2.0 * r / levels as f32
-        };
-        let lo = -r;
-
-        let mut factors = vec![0.0f32; n];
-        let bytes_per_vec_codes = (padded * bits as usize).div_ceil(8);
-        let mut writer = BitWriter::with_capacity(n * bytes_per_vec_codes);
-
-        let mut residual = vec![0.0f32; dim];
+        let mut b = RaBitQBuilder::new(dim, bits, seed, centroid);
         for i in 0..n {
-            let v = vs.get(i);
-            for d in 0..dim {
-                residual[d] = v[d] - centroid[d];
-            }
-            let norm_r = l2_norm(&residual).max(1e-9);
-            for x in residual.iter_mut() {
-                *x /= norm_r;
-            }
-            let x = rotator.apply(&residual); // unit, length padded
-
-            if bits == 1 {
-                // Sign codes; factor = norm_r / ||x||_1.
-                let mut l1 = 0.0f32;
-                for d in 0..padded {
-                    let bit = if x[d] >= 0.0 { 1u32 } else { 0u32 };
-                    l1 += x[d].abs();
-                    writer.write(bit, 1);
-                }
-                factors[i] = norm_r / l1.max(1e-9);
-            } else {
-                // Uniform B-bit codes; factor = norm_r / ||x_hat||.
-                let mut xhat_norm_sq = 0.0f32;
-                for d in 0..padded {
-                    let clamped = x[d].clamp(lo, -lo);
-                    let mut level = ((clamped - lo) / step).floor() as i64;
-                    if level < 0 {
-                        level = 0;
-                    }
-                    if level as u32 >= levels {
-                        level = levels as i64 - 1;
-                    }
-                    let val = lo + (level as f32 + 0.5) * step;
-                    xhat_norm_sq += val * val;
-                    writer.write(level as u32, bits);
-                }
-                factors[i] = norm_r / xhat_norm_sq.sqrt().max(1e-9);
-            }
+            b.push(vs.get(i));
         }
+        b.finish()
+    }
 
-        RaBitQ {
-            count: n,
-            padded,
-            bits,
-            rotator,
-            factors,
-            codes: writer.finish(),
-            bytes_per_vec_codes,
-            lo,
-            step,
-        }
+    /// Disable/enable the popcount fast path (reference scoring when off).
+    pub fn with_fast_scan(mut self, on: bool) -> Self {
+        self.fast_scan = on;
+        self
     }
 
     /// The packed code bytes (without the per-vector ranking factors). Used by
     /// the bench to exercise the mmap store on the bulk of the index.
     pub fn code_bytes(&self) -> &[u8] {
         &self.codes
+    }
+
+    /// Bytes that must stay resident in RAM at query time: packed codes plus
+    /// the per-vector ranking factor and (1-bit only) precomputed popcount.
+    pub fn resident_bytes(&self) -> usize {
+        self.codes.len() + self.factors.len() * 4 + self.pc.len() * 4
+    }
+
+    /// Persist the index to `dir/rabitq.idx` (little-endian, versioned). The
+    /// rotation is reconstructed from (seed, dim) on load, so only codes,
+    /// factors and popcounts are stored. This is also the v0 on-disk index
+    /// format the Stage 6 FFI `kx_open` will consume.
+    pub fn save(&self, dir: &std::path::Path) -> std::io::Result<()> {
+        let mut buf: Vec<u8> = Vec::with_capacity(
+            8 + 1
+                + 4
+                + 8
+                + 4
+                + 4
+                + 4
+                + 4
+                + self.factors.len() * 4
+                + self.pc.len() * 4
+                + self.codes.len(),
+        );
+        buf.extend_from_slice(RABITQ_MAGIC);
+        buf.push(self.bits);
+        buf.extend_from_slice(&(self.in_dim as u32).to_le_bytes());
+        buf.extend_from_slice(&self.seed.to_le_bytes());
+        buf.extend_from_slice(&(self.count as u32).to_le_bytes());
+        buf.extend_from_slice(&self.lo.to_le_bytes());
+        buf.extend_from_slice(&self.step.to_le_bytes());
+        buf.extend_from_slice(&(self.pc.len() as u32).to_le_bytes());
+        for f in &self.factors {
+            buf.extend_from_slice(&f.to_le_bytes());
+        }
+        for p in &self.pc {
+            buf.extend_from_slice(&p.to_le_bytes());
+        }
+        buf.extend_from_slice(&self.codes);
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(dir.join("rabitq.idx"), buf)
+    }
+
+    pub fn load(dir: &std::path::Path) -> std::io::Result<Self> {
+        let bad = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, m.to_string());
+        let buf = std::fs::read(dir.join("rabitq.idx"))?;
+        if buf.len() < 37 || &buf[0..8] != RABITQ_MAGIC {
+            return Err(bad("not a kortex rabitq index"));
+        }
+        let bits = buf[8];
+        let rd_u32 = |o: usize| u32::from_le_bytes(buf[o..o + 4].try_into().unwrap());
+        let in_dim = rd_u32(9) as usize;
+        let seed = u64::from_le_bytes(buf[13..21].try_into().unwrap());
+        let count = rd_u32(21) as usize;
+        let lo = f32::from_le_bytes(buf[25..29].try_into().unwrap());
+        let step = f32::from_le_bytes(buf[29..33].try_into().unwrap());
+        let pc_len = rd_u32(33) as usize;
+
+        let rotator = Rotator::new(seed ^ 0x2B17, in_dim, 2);
+        let padded = rotator.out_dim();
+        let bytes_per_vec_codes = (padded * bits as usize).div_ceil(8);
+
+        let mut off = 37;
+        let need = off + count * 4 + pc_len * 4 + count * bytes_per_vec_codes;
+        if buf.len() != need {
+            return Err(bad("rabitq index truncated or corrupt"));
+        }
+        let mut factors = Vec::with_capacity(count);
+        for _ in 0..count {
+            factors.push(f32::from_le_bytes(buf[off..off + 4].try_into().unwrap()));
+            off += 4;
+        }
+        let mut pc = Vec::with_capacity(pc_len);
+        for _ in 0..pc_len {
+            pc.push(rd_u32(off));
+            off += 4;
+        }
+        let codes = buf[off..].to_vec();
+
+        Ok(RaBitQ {
+            count,
+            in_dim,
+            padded,
+            bits,
+            seed,
+            rotator,
+            factors,
+            pc,
+            codes,
+            bytes_per_vec_codes,
+            lo,
+            step,
+            fast_scan: true,
+        })
     }
 
     /// Rotate the raw query into the code basis (orthonormal, so inner products
@@ -513,6 +706,66 @@ impl RaBitQ {
         // We rotate the query directly; <residual, query> = <R residual, R query>,
         // and the dataset-centroid offset is a per-query constant we can ignore.
         self.rotator.apply(query)
+    }
+
+    /// Quantize a rotated query into bit-planes for the popcount fast scan.
+    pub fn quantize_query(&self, y: &[f32]) -> QuantizedQuery {
+        debug_assert_eq!(y.len(), self.padded);
+        let words = self.padded / 64;
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        let mut total = 0.0f32;
+        for &v in y {
+            lo = lo.min(v);
+            hi = hi.max(v);
+            total += v;
+        }
+        let levels = (1u32 << QUERY_BITS) - 1; // 15
+        let range = hi - lo;
+        let (step, inv_step) = if range > 1e-12 {
+            let s = range / levels as f32;
+            (s, 1.0 / s)
+        } else {
+            (0.0, 0.0) // degenerate: all coords equal; every q_d = 0
+        };
+        let mut planes = vec![0u64; QUERY_BITS * words];
+        for (d, &v) in y.iter().enumerate() {
+            let q = (((v - lo) * inv_step).round() as u32).min(levels);
+            let w = d / 64;
+            let bit = (d % 64) as u32;
+            for (j, plane) in planes.chunks_exact_mut(words).enumerate() {
+                if (q >> j) & 1 == 1 {
+                    plane[w] |= 1u64 << bit;
+                }
+            }
+        }
+        QuantizedQuery {
+            planes,
+            words,
+            lo,
+            step,
+            total,
+        }
+    }
+
+    #[inline]
+    fn score_one_bit1_fast(&self, qq: &QuantizedQuery, id: usize) -> f32 {
+        let words = qq.words;
+        let base = id * self.bytes_per_vec_codes;
+        let mut t = [0u32; QUERY_BITS];
+        for w in 0..words {
+            let b0 = base + w * 8;
+            let code = u64::from_le_bytes(self.codes[b0..b0 + 8].try_into().unwrap());
+            for (j, tj) in t.iter_mut().enumerate() {
+                *tj += (code & qq.planes[j * words + w]).count_ones();
+            }
+        }
+        let mut weighted = 0.0f32;
+        for (j, &tj) in t.iter().enumerate() {
+            weighted += ((1u32 << j) * tj) as f32;
+        }
+        let pos = qq.lo * self.pc[id] as f32 + qq.step * weighted;
+        self.factors[id] * (2.0 * pos - qq.total)
     }
 
     #[inline]
@@ -556,16 +809,24 @@ impl Quantizer for RaBitQ {
         self.count
     }
     fn bytes_per_vector(&self) -> f64 {
-        // codes + a 4-byte ranking factor per vector.
-        self.bytes_per_vec_codes as f64 + 4.0
+        // codes + 4-byte factor (+ 4-byte popcount for the 1-bit fast scan).
+        let pc = if self.bits == 1 { 4.0 } else { 0.0 };
+        self.bytes_per_vec_codes as f64 + 4.0 + pc
     }
     fn scores(&self, query: &[f32]) -> Vec<f32> {
         let y = self.prep(query);
         if self.bits == 1 {
-            let total: f32 = y.iter().sum();
-            (0..self.count)
-                .map(|i| self.score_one_bit1(&y, total, i))
-                .collect()
+            if self.fast_scan {
+                let qq = self.quantize_query(&y);
+                (0..self.count)
+                    .map(|i| self.score_one_bit1_fast(&qq, i))
+                    .collect()
+            } else {
+                let total: f32 = y.iter().sum();
+                (0..self.count)
+                    .map(|i| self.score_one_bit1(&y, total, i))
+                    .collect()
+            }
         } else {
             (0..self.count)
                 .map(|i| self.score_one_multibit(&y, i))
@@ -575,10 +836,17 @@ impl Quantizer for RaBitQ {
     fn scores_subset(&self, query: &[f32], ids: &[u32]) -> Vec<f32> {
         let y = self.prep(query);
         if self.bits == 1 {
-            let total: f32 = y.iter().sum();
-            ids.iter()
-                .map(|&i| self.score_one_bit1(&y, total, i as usize))
-                .collect()
+            if self.fast_scan {
+                let qq = self.quantize_query(&y);
+                ids.iter()
+                    .map(|&i| self.score_one_bit1_fast(&qq, i as usize))
+                    .collect()
+            } else {
+                let total: f32 = y.iter().sum();
+                ids.iter()
+                    .map(|&i| self.score_one_bit1(&y, total, i as usize))
+                    .collect()
+            }
         } else {
             ids.iter()
                 .map(|&i| self.score_one_multibit(&y, i as usize))
@@ -657,5 +925,103 @@ mod tests {
         let f = FloatStore::build(&vs).bytes_per_vector();
         let one = RaBitQ::build(&vs, 1, 1).bytes_per_vector();
         assert!(one < f / 8.0, "1-bit should be far smaller: {one} vs {f}");
+    }
+
+    /// The popcount fast scan approximates the f32 reference scan with a
+    /// 4-bit-quantized query; after the float rerank of the two-stage pipeline
+    /// the end-to-end recall must be indistinguishable from the reference.
+    #[test]
+    fn fast_scan_matches_reference_after_rerank() {
+        use crate::search::mean_recall_two_stage;
+        let all = synthetic_clusters(21, 256, 2050, 16, 0.45);
+        let vs = all.slice_rows(0, 2000);
+        let queries = all.slice_rows(2000, 50);
+        let precise = FloatStore::build(&vs);
+
+        let fast = RaBitQ::build(&vs, 1, 9); // fast_scan defaults to true
+        let refr = RaBitQ::build(&vs, 1, 9).with_fast_scan(false);
+
+        let r_fast = mean_recall_two_stage(&fast, &precise, &vs, &queries, 10, 100);
+        let r_ref = mean_recall_two_stage(&refr, &precise, &vs, &queries, 10, 100);
+        assert!(
+            (r_fast - r_ref).abs() <= 0.005,
+            "fast {r_fast} vs reference {r_ref}: query quantization too lossy"
+        );
+        assert!(r_fast > 0.95, "two-stage recall regressed: {r_fast}");
+    }
+
+    /// The coarse stage's actual job is producing a shortlist; the fast scan's
+    /// shortlist must overlap the reference scan's heavily. (Raw per-vector
+    /// score deltas are allowed to drift a few percent from the 4-bit query —
+    /// the binding end-to-end guarantee is the rerank parity test above.)
+    #[test]
+    fn fast_scan_shortlist_overlaps_reference() {
+        let vs = synthetic_clusters(22, 128, 300, 8, 0.4);
+        let queries = synthetic_clusters(23, 128, 5, 8, 0.4);
+        let fast = RaBitQ::build(&vs, 1, 3);
+        let refr = RaBitQ::build(&vs, 1, 3).with_fast_scan(false);
+        for qi in 0..queries.count() {
+            let q = queries.get(qi);
+            let shortlist = 64;
+            let sf = fast.search(q, shortlist);
+            let sr = refr.search(q, shortlist);
+            let overlap = sr.iter().filter(|id| sf.contains(id)).count();
+            assert!(
+                overlap as f64 / shortlist as f64 >= 0.7,
+                "fast-scan shortlist diverged: {overlap}/{shortlist} overlap"
+            );
+        }
+    }
+
+    /// Streaming builder must produce byte-identical codes to the batch build.
+    #[test]
+    fn builder_matches_batch_build() {
+        let vs = synthetic_clusters(24, 256, 400, 8, 0.4);
+        let batch = RaBitQ::build(&vs, 1, 5);
+
+        let dim = vs.dim;
+        let n = vs.count();
+        let mut centroid = vec![0.0f32; dim];
+        for i in 0..n {
+            for d in 0..dim {
+                centroid[d] += vs.get(i)[d];
+            }
+        }
+        for x in centroid.iter_mut() {
+            *x /= n as f32;
+        }
+        let mut b = RaBitQBuilder::new(dim, 1, 5, centroid);
+        for i in 0..n {
+            b.push(vs.get(i));
+        }
+        let streamed = b.finish();
+
+        assert_eq!(batch.code_bytes(), streamed.code_bytes());
+        assert_eq!(batch.resident_bytes(), streamed.resident_bytes());
+        let q = vs.get(0);
+        assert_eq!(batch.search(q, 10), streamed.search(q, 10));
+    }
+
+    /// save -> load round-trip reproduces identical search results (the
+    /// rotation is reconstructed from (seed, dim), everything else is stored).
+    #[test]
+    fn save_load_roundtrip_is_exact() {
+        let all = synthetic_clusters(25, 256, 520, 8, 0.4);
+        let vs = all.slice_rows(0, 500);
+        let queries = all.slice_rows(500, 20);
+        let rq = RaBitQ::build(&vs, 1, 7);
+
+        let dir = std::env::temp_dir().join(format!("kortex_rabitq_io_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        rq.save(&dir).unwrap();
+        let loaded = RaBitQ::load(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(rq.count(), loaded.count());
+        assert_eq!(rq.code_bytes(), loaded.code_bytes());
+        for qi in 0..queries.count() {
+            let q = queries.get(qi);
+            assert_eq!(rq.search(q, 10), loaded.search(q, 10));
+        }
     }
 }

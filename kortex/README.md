@@ -95,38 +95,74 @@ against an exact float32 baseline:
   (demand-paged), not in RAM.
 
 ```bash
+# Codec fidelity matrix (small-N, fast):
 cargo run --release -p kortex-harness -- compress-bench --source corpus --years 5 --entries-per-day 6
 cargo run --release -p kortex-harness -- compress-bench --source synthetic --dim 256 --vectors 4000
+
+# At-scale validation (1M: ~1 GB disk, ~1 min; 5M: ~5 GB disk, ~3 min):
+cargo run --release -p kortex-harness -- scale-bench --scale 1m --assert-gate
+cargo run --release -p kortex-harness -- scale-bench --scale 5m --clusters 1024
 ```
 
-### Result: GATE PASSED
+### Result, part 1 — codec fidelity (small-N matrix, dim 256)
 
-The winning configuration is **Matryoshka-truncation to 256 dims + two-stage
-(1-bit RaBitQ coarse scan -> float rerank of candidates fetched from mmap)**:
+The winning family is **Matryoshka-truncation to 256 dims + two-stage
+(1-bit RaBitQ popcount scan -> float rerank of candidates fetched from mmap)**:
 
-| config (dim 256) | bytes/vec | recall@10 | p95 | resident RAM @5M |
-| --- | --- | --- | --- | --- |
-| float32 (reference) | 1024 | 1.000 | 2.3 ms | 4883 MB |
-| int8 scalar | 256 | 0.995 | 3.1 ms | 1221 MB |
-| RaBitQ 1-bit | 36 | 0.78 | 2.9 ms | 172 MB |
-| RaBitQ 7-bit | 228 | 0.98 | 13.7 ms | 1087 MB |
-| **two-stage 1-bit -> float** | **36 resident** | **1.000** | **2.5 ms** | **172 MB** |
+| config (dim 256) | bytes/vec | recall@10 | resident RAM @5M |
+| --- | --- | --- | --- |
+| float32 (reference) | 1024 | 1.000 | 4883 MB |
+| int8 scalar | 256 | 0.988 | 1221 MB |
+| RaBitQ 1-bit | 40 | 0.80 | 191 MB |
+| RaBitQ 7-bit | 228 | 0.98 | 1087 MB |
+| **two-stage 1-bit -> float** | **40 resident** | **1.000** | **190.7 MB** |
 
-172 MB resident at 5M vectors is **under the 250 MB budget**, with recall 1.000
-and p95 well under 150 ms. The same pipeline at dim 768 hits recall 1.000 but
-629 MB resident (over budget) — so **dimensionality is the decisive lever**, as
-hypothesized. A harder synthetic set (overlapping clusters) reproduces the
-verdict (recall 0.999 at 172 MB), confirming it isn't an artifact of easy data.
+(40 B/vec = 32 B of sign codes + 4 B ranking factor + 4 B precomputed popcount
+for the fast scan.) At dim 768 the same pipeline also reaches recall 1.000 but
+breaks the RAM budget — **dimensionality is the decisive lever**, as
+hypothesized.
 
-Because existing building blocks (RaBitQ + Matryoshka + two-stage) clear the
-budget, **we did not need to invent a custom quantizer** — the "beat-or-invent"
-gate resolves to *beat*. The mmap store is verified to serve byte-identical codes
-from disk, the foundation for the cold-start and idle-RAM budgets.
+### Result, part 2 — at scale, measured instead of projected
 
-> Caveat: vectors here come from a deterministic static "Model2Vec-lite" hash
-> embedder over the corpus (no model download). The harness is built to swap in
-> real EmbeddingGemma vectors later; the compression-fidelity conclusion (codec
-> preserves geometry) is independent of embedding quality.
+The original gate was declared on 4k-20k vectors with RAM *projected* to 5M and
+latency not projected at all. `kortex scale-bench` now builds real 1M-5M-vector
+indexes (streamed to disk, never resident) and measures end to end. On an
+Apple-silicon dev machine (not yet the M1 Air target):
+
+| n | geometry | config | recall@10 | p95 | resident | cold open + 1st query |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1M | 64 clusters | refine=16384 | 1.000 | 32.9 ms | 38.1 MB | 55 ms |
+| 5M | 1024 clusters (mild) | refine=4096 | 1.000 | 119.1 ms | 190.7 MB | 281 ms |
+| 5M | 64 clusters (adversarial) | refine=65536 | 1.000 | **157.7 ms** | 190.7 MB | 290 ms |
+
+**Verdict: PASS at 1M; PASS at 5M on mild geometry; FAIL by ~5% at 5M on
+adversarial geometry** (recall 1.000 only at p95 157.7 ms vs the 150 ms budget;
+within-budget latency tops out at recall 0.898). What the honest measurement
+taught us — none of which the projection could have shown:
+
+1. **The original "p95 ~2.5 ms" hid a real bug.** At 1M vectors p95 was 103 ms
+   — dominated not by the scan but by a full `sort` of all n candidates per
+   query inside `select_top_k`. An O(n) selection plus a popcount fast scan
+   (the query quantized into 4-bit planes; per-vector work = 4 AND+popcounts
+   per u64 word) brought the 1M scan to ~25 ms.
+2. **`refine` does not transfer across scale.** 160 candidates suffice at 20k
+   vectors; 5M needs 4k-64k, growing with cluster size — 1-bit codes built
+   against a *global* centroid cannot rank neighbors inside a dense cluster,
+   so the shortlist must cover the cluster.
+3. **The earned next move is IVF-style partitioning** (per-list centroids):
+   it restores within-cluster discrimination — the standard deployment of
+   RaBitQ — and cuts the scan cost by 10-50x at the same time, which would
+   retire both the recall and the latency risk with margin. Tactical
+   alternatives (SIMD popcount, a threaded scan) buy 2-8x latency but don't
+   fix the geometry problem. To be co-designed with the Stage 3 index work.
+
+Caveats, stated plainly: numbers are from a dev machine, not the 8 GB M1 Air;
+rerank and cold-open ran against a warm page cache (lower bounds — a true cold
+start pays SSD reads for the touched candidate pages); vectors are synthetic
+("Model2Vec-lite" hash embeddings / Gaussian clusters — real EmbeddingGemma
+validation is planned follow-up work). The codec-fidelity conclusion (the
+codec preserves float-search geometry) is independent of embedding quality;
+the *required refine* is not — it depends on the real data's cluster structure.
 
 ## Usage
 

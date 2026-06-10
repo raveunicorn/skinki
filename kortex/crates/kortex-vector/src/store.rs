@@ -120,6 +120,104 @@ unsafe impl Send for MmapBytes {}
 #[cfg(unix)]
 unsafe impl Sync for MmapBytes {}
 
+// ---------------------------------------------------------------------------
+// FloatMmapStore — full-precision vectors served from disk for the rerank stage
+// ---------------------------------------------------------------------------
+
+/// Read-only float32 vectors backed by a memory-mapped file (little-endian,
+/// row-major, no header). This is the "precise" stage of the two-stage
+/// pipeline at scale: only the shortlisted candidates' pages are touched, so
+/// resident memory stays a tiny working set while the full-precision set —
+/// gigabytes at 5M vectors — lives on disk.
+pub struct FloatMmapStore {
+    view: CodeStore,
+    dim: usize,
+    count: usize,
+}
+
+impl FloatMmapStore {
+    /// mmap an existing raw f32 file. The file length must be a whole number
+    /// of `dim`-sized rows.
+    pub fn open(path: &std::path::Path, dim: usize) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        let view = CodeStore::Mmap(MmapBytes::open(path)?);
+        #[cfg(not(unix))]
+        let view = CodeStore::Ram(std::fs::read(path)?);
+        let len = view.as_slice().len();
+        let row = dim * 4;
+        if dim == 0 || !len.is_multiple_of(row) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("float file length {len} is not a multiple of row size {row}"),
+            ));
+        }
+        let count = len / row;
+        Ok(FloatMmapStore { view, dim, count })
+    }
+
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
+    /// Inner product of `query` with stored vector `id`, decoded on the fly
+    /// from the mapped bytes (no copy, no alignment assumptions).
+    pub fn dot_with(&self, id: usize, query: &[f32]) -> f32 {
+        debug_assert_eq!(query.len(), self.dim);
+        let bytes = self.view.as_slice();
+        let base = id * self.dim * 4;
+        let mut acc = 0.0f32;
+        for (d, q) in query.iter().enumerate() {
+            let p = base + d * 4;
+            acc += q * f32::from_le_bytes(bytes[p..p + 4].try_into().unwrap());
+        }
+        acc
+    }
+}
+
+impl crate::quant::Quantizer for FloatMmapStore {
+    fn name(&self) -> String {
+        "float32-mmap".into()
+    }
+    fn count(&self) -> usize {
+        self.count
+    }
+    fn bytes_per_vector(&self) -> f64 {
+        // On-disk footprint; resident is only the demand-paged working set.
+        (self.dim * 4) as f64
+    }
+    fn scores(&self, query: &[f32]) -> Vec<f32> {
+        (0..self.count).map(|i| self.dot_with(i, query)).collect()
+    }
+    fn scores_subset(&self, query: &[f32], ids: &[u32]) -> Vec<f32> {
+        ids.iter()
+            .map(|&i| self.dot_with(i as usize, query))
+            .collect()
+    }
+}
+
+/// Best-effort free disk space at `path` (used by the scale bench to refuse
+/// writing a multi-GB vector file onto a nearly-full disk).
+#[cfg(unix)]
+pub fn available_disk_bytes(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut cpath: Vec<u8> = path.as_os_str().as_bytes().to_vec();
+    cpath.push(0);
+    // SAFETY: statvfs writes into the zeroed struct we own; we check the rc.
+    unsafe {
+        let mut st: libc::statvfs = std::mem::zeroed();
+        if libc::statvfs(cpath.as_ptr() as *const libc::c_char, &mut st) == 0 {
+            Some(st.f_bavail as u64 * st.f_frsize as u64)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub fn available_disk_bytes(_path: &std::path::Path) -> Option<u64> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +240,50 @@ mod tests {
         assert_eq!(s.as_slice(), bytes.as_slice());
         drop(s);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn float_mmap_store_matches_in_ram_dots() {
+        use crate::quant::Quantizer;
+        let dim = 8;
+        let rows: Vec<Vec<f32>> = (0..5)
+            .map(|i| (0..dim).map(|d| (i * dim + d) as f32 * 0.25).collect())
+            .collect();
+        let mut bytes = Vec::new();
+        for r in &rows {
+            for v in r {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let path = std::env::temp_dir().join(format!("kortex_fmm_{}.f32", std::process::id()));
+        std::fs::write(&path, &bytes).unwrap();
+        let store = FloatMmapStore::open(&path, dim).unwrap();
+        assert_eq!(store.count(), 5);
+        let query: Vec<f32> = (0..dim).map(|d| 1.0 - d as f32 * 0.1).collect();
+        for (i, r) in rows.iter().enumerate() {
+            let expect: f32 = r.iter().zip(&query).map(|(a, b)| a * b).sum();
+            assert!((store.dot_with(i, &query) - expect).abs() < 1e-4);
+        }
+        let sub = store.scores_subset(&query, &[4, 0]);
+        assert_eq!(sub.len(), 2);
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn float_mmap_store_rejects_ragged_files() {
+        let path = std::env::temp_dir().join(format!("kortex_fmm_bad_{}.f32", std::process::id()));
+        std::fs::write(&path, [0u8; 10]).unwrap();
+        assert!(FloatMmapStore::open(&path, 4).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn disk_space_probe_returns_something_on_unix() {
+        let avail = available_disk_bytes(&std::env::temp_dir());
+        #[cfg(unix)]
+        assert!(avail.unwrap_or(0) > 0);
+        #[cfg(not(unix))]
+        assert!(avail.is_none());
     }
 }

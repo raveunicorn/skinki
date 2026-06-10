@@ -78,17 +78,23 @@ distractors, and topic drift, so lexical overlap no longer saturates any metric
 benchmark now discriminates semantic retrieval, relational reasoning, and
 grounded discovery instead of rewarding grep.
 
-**Stage 1 — memory compression (done, gate passed).** From-scratch codecs
-(int8/PQ/RaBitQ) benchmarked against exact float32. The winning config —
-Matryoshka-256 + two-stage (1-bit RaBitQ scan -> float rerank from mmap) —
-hits **recall@10 = 1.000 at ~172 MB resident per 5M vectors** (budget 250 MB),
-p95 ~2.5 ms. Existing building blocks clear the budget, so no custom quantizer
-was needed yet. See [`kortex/README.md`](kortex/README.md#stage-1--memory-compression-the-first-impossible-task).
+**Stage 1 — memory compression (done; re-validated at real scale).**
+From-scratch codecs (int8/PQ/RaBitQ) benchmarked against exact float32, then
+re-validated on real 1M-5M-vector indexes streamed to disk (`scale-bench`) —
+measured numbers, not projections. The winning config — Matryoshka-256 +
+two-stage (1-bit RaBitQ popcount scan -> float rerank from mmap) — delivers
+**1M: recall@10 = 1.000 / p95 32.9 ms / 38 MB resident; 5M: recall 1.000 /
+p95 119 ms / 190.7 MB resident** (budget 250 MB) on mild geometry. On
+adversarial geometry (huge dense clusters) recall 1.000 at 5M costs p95
+157.7 ms — ~5% over the 150 ms budget — which maps the flat scan's limit and
+makes IVF-style partitioning the earned next move (with Stage 3). See
+[`kortex/README.md`](kortex/README.md#stage-1--memory-compression-the-first-impossible-task).
 
 ```bash
 cd kortex
 cargo run --release -p kortex-harness -- demo --years 10 --entries-per-day 270   # Stage 0
 cargo run --release -p kortex-harness -- compress-bench --source corpus          # Stage 1
+cargo run --release -p kortex-harness -- scale-bench --scale 1m --assert-gate    # Stage 1 at scale
 cargo test
 ```
 
