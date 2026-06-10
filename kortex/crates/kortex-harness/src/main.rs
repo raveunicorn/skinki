@@ -127,6 +127,11 @@ enum Cmd {
         /// Exit non-zero if no config meets the Stage 1 gate (for CI).
         #[arg(long, default_value_t = false)]
         assert_gate: bool,
+        /// Raw little-endian f32 file, row-major, row length = --dim;
+        /// overrides --source. The last --queries rows are held out as
+        /// queries; --vectors caps the base set (no subsampling).
+        #[arg(long)]
+        vectors_file: Option<PathBuf>,
     },
     /// Stage 1 at real scale: stream-build a 1M-5M vector index on disk and
     /// measure actual two-stage latency, recall, resident RAM and cold open —
@@ -161,6 +166,11 @@ enum Cmd {
         /// Exit non-zero unless recall/latency/RAM budgets hold at this scale.
         #[arg(long, default_value_t = false)]
         assert_gate: bool,
+        /// Raw little-endian f32 file, row-major, row length = --dim;
+        /// overrides --scale (no synthetic generation, no disk-space check).
+        /// The last --queries rows are held out as queries.
+        #[arg(long)]
+        vectors_file: Option<PathBuf>,
     },
 }
 
@@ -390,17 +400,21 @@ fn main() -> Result<()> {
             k,
             report_out,
             assert_gate,
+            vectors_file,
         } => {
-            let (base, qset, label) = build_vectors(
-                &source,
-                seed,
-                years,
-                entries_per_day,
-                parse_difficulty(&difficulty)?,
-                dim,
-                vectors,
-                queries,
-            );
+            let (base, qset, label) = match &vectors_file {
+                Some(path) => load_vectors_file(path, dim, vectors, queries)?,
+                None => build_vectors(
+                    &source,
+                    seed,
+                    years,
+                    entries_per_day,
+                    parse_difficulty(&difficulty)?,
+                    dim,
+                    vectors,
+                    queries,
+                ),
+            };
             println!(
                 "Stage 1 compression bench | source: {label} | {} base vecs, {} queries, dim {}",
                 base.count(),
@@ -455,6 +469,7 @@ fn main() -> Result<()> {
             keep,
             report_out,
             assert_gate,
+            vectors_file,
         } => {
             let n = parse_scale(&scale)?;
             let refines: Vec<usize> = refine
@@ -462,7 +477,18 @@ fn main() -> Result<()> {
                 .map(|s| s.trim().parse::<usize>().context("bad --refine entry"))
                 .collect::<Result<_>>()?;
             anyhow::ensure!(!refines.is_empty(), "--refine must list at least one size");
-            let report = run_scale_bench(n, seed, dim, clusters, queries, k, &refines, dir, keep)?;
+            let report = run_scale_bench(
+                n,
+                seed,
+                dim,
+                clusters,
+                queries,
+                k,
+                &refines,
+                dir,
+                keep,
+                vectors_file,
+            )?;
             print_scale_report(&report);
             if let Some(path) = report_out {
                 let file = std::fs::File::create(&path)
@@ -549,8 +575,15 @@ struct ScaleBenchReport {
     peak_rss_mb: f64,
 }
 
-/// Stream rows of a raw little-endian f32 file through a callback.
-fn stream_rows(path: &std::path::Path, dim: usize, mut f: impl FnMut(u32, &[f32])) -> Result<()> {
+/// Stream rows of a raw little-endian f32 file through a callback. Stops
+/// after `limit` rows when `Some` (used to exclude held-out query rows that
+/// live at the tail of a user-supplied vectors file).
+fn stream_rows(
+    path: &std::path::Path,
+    dim: usize,
+    limit: Option<u32>,
+    mut f: impl FnMut(u32, &[f32]),
+) -> Result<()> {
     use std::io::Read;
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut reader = std::io::BufReader::with_capacity(1 << 22, file);
@@ -559,6 +592,11 @@ fn stream_rows(path: &std::path::Path, dim: usize, mut f: impl FnMut(u32, &[f32]
     let mut row = vec![0f32; dim];
     let mut id: u32 = 0;
     loop {
+        if let Some(limit) = limit {
+            if id >= limit {
+                break;
+            }
+        }
         match reader.read_exact(&mut buf) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
@@ -614,69 +652,147 @@ fn run_scale_bench(
     refines: &[usize],
     dir: Option<PathBuf>,
     keep: bool,
+    vectors_file: Option<PathBuf>,
 ) -> Result<ScaleBenchReport> {
     use std::io::Write;
 
-    let dir = dir.unwrap_or_else(|| {
-        std::env::temp_dir().join(format!("kortex_scale_{}", std::process::id()))
-    });
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let float_file_bytes = (n * dim * 4) as u64;
-    if let Some(avail) = available_disk_bytes(&dir) {
-        let need = float_file_bytes + float_file_bytes / 10;
-        anyhow::ensure!(
-            avail > need,
-            "scale-bench needs ~{:.1} GB free at {}, only {:.1} GB available",
-            need as f64 / 1e9,
-            dir.display(),
-            avail as f64 / 1e9
-        );
-    }
-    let fpath = dir.join("base.f32");
-    println!(
-        "scale-bench: n={n}, dim={dim}, float file {:.2} GB at {}",
-        float_file_bytes as f64 / 1e9,
-        fpath.display()
-    );
-
-    // Pass 0 — stream-generate base vectors to disk; accumulate the centroid
-    // in f64 so 5M additions don't lose precision.
-    let t0 = Instant::now();
-    let mut sampler = ClusterSampler::new(seed, dim, clusters, 0.45);
-    let mut centroid_sum = vec![0f64; dim];
+    // When a real-embedding file is supplied: it already lives on disk (so no
+    // synthetic generation, no disk-space check), and it's the user's file
+    // (so we never delete it). `n`, `fpath`, `centroid` and `queries` are all
+    // derived from it instead of from the synthetic sampler.
+    let (dir, created_dir, fpath, n, centroid, queries, gen_secs) = if let Some(vfile) =
+        vectors_file
     {
-        let file = std::fs::File::create(&fpath)
-            .with_context(|| format!("creating {}", fpath.display()))?;
-        let mut w = std::io::BufWriter::with_capacity(1 << 20, file);
-        let mut v = vec![0f32; dim];
-        for _ in 0..n {
-            sampler.fill(&mut v);
-            for (d, x) in v.iter().enumerate() {
+        println!(
+            "scale-bench: --vectors-file given ({}), ignoring --scale; dim={dim}",
+            vfile.display()
+        );
+        let row_bytes = dim * 4;
+        let file_len = std::fs::metadata(&vfile)
+            .with_context(|| format!("stat {}", vfile.display()))?
+            .len();
+        anyhow::ensure!(
+            row_bytes > 0 && file_len % row_bytes as u64 == 0,
+            "vectors file {} has {file_len} bytes, not a multiple of dim*4={row_bytes}",
+            vfile.display()
+        );
+        let total = (file_len / row_bytes as u64) as usize;
+        anyhow::ensure!(
+            total > num_queries,
+            "vectors file {} has only {total} rows, need more than --queries={num_queries}",
+            vfile.display()
+        );
+        let n = total - num_queries;
+        anyhow::ensure!(
+                n >= 1000,
+                "vectors file {} yields only n={n} base rows after holding out {num_queries} queries (need >= 1000)",
+                vfile.display()
+            );
+
+        let (dir, created_dir) = match dir {
+            Some(d) => (d, false),
+            None => (
+                std::env::temp_dir().join(format!("kortex_scale_{}", std::process::id())),
+                true,
+            ),
+        };
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+
+        let t0 = Instant::now();
+        // Held-out queries: the LAST num_queries rows. One full pass over
+        // the file, keeping only rows with id >= n — simple and correct,
+        // and the file is read again in passes 1/2 anyway.
+        let mut queries = VectorSet::new(dim);
+        stream_rows(&vfile, dim, None, |id, row| {
+            if id as usize >= n {
+                queries.push(row);
+            }
+        })?;
+        anyhow::ensure!(
+            queries.count() == num_queries,
+            "expected {num_queries} held-out query rows, got {}",
+            queries.count()
+        );
+
+        // Centroid over the first n rows, accumulated in f64 (matches the
+        // synthetic path's precision discipline).
+        let mut centroid_sum = vec![0f64; dim];
+        stream_rows(&vfile, dim, Some(n as u32), |_, row| {
+            for (d, x) in row.iter().enumerate() {
                 centroid_sum[d] += *x as f64;
             }
-            for x in &v {
-                w.write_all(&x.to_le_bytes())?;
+        })?;
+        let centroid: Vec<f32> = centroid_sum.iter().map(|s| (s / n as f64) as f32).collect();
+        let gen_secs = t0.elapsed().as_secs_f64();
+        println!("pass 0 (read centroid + queries from file): {gen_secs:.1}s");
+
+        (dir, created_dir, vfile, n, centroid, queries, gen_secs)
+    } else {
+        let dir = dir.unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("kortex_scale_{}", std::process::id()))
+        });
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let float_file_bytes = (n * dim * 4) as u64;
+        if let Some(avail) = available_disk_bytes(&dir) {
+            let need = float_file_bytes + float_file_bytes / 10;
+            anyhow::ensure!(
+                avail > need,
+                "scale-bench needs ~{:.1} GB free at {}, only {:.1} GB available",
+                need as f64 / 1e9,
+                dir.display(),
+                avail as f64 / 1e9
+            );
+        }
+        let fpath = dir.join("base.f32");
+        println!(
+            "scale-bench: n={n}, dim={dim}, float file {:.2} GB at {}",
+            float_file_bytes as f64 / 1e9,
+            fpath.display()
+        );
+
+        // Pass 0 — stream-generate base vectors to disk; accumulate the
+        // centroid in f64 so 5M additions don't lose precision.
+        let t0 = Instant::now();
+        let mut sampler = ClusterSampler::new(seed, dim, clusters, 0.45);
+        let mut centroid_sum = vec![0f64; dim];
+        {
+            let file = std::fs::File::create(&fpath)
+                .with_context(|| format!("creating {}", fpath.display()))?;
+            let mut w = std::io::BufWriter::with_capacity(1 << 20, file);
+            let mut v = vec![0f32; dim];
+            for _ in 0..n {
+                sampler.fill(&mut v);
+                for (d, x) in v.iter().enumerate() {
+                    centroid_sum[d] += *x as f64;
+                }
+                for x in &v {
+                    w.write_all(&x.to_le_bytes())?;
+                }
+            }
+            w.flush()?;
+        }
+        // Held-out queries: the next draws from the same distribution.
+        let mut queries = VectorSet::new(dim);
+        {
+            let mut v = vec![0f32; dim];
+            for _ in 0..num_queries {
+                sampler.fill(&mut v);
+                queries.push(&v);
             }
         }
-        w.flush()?;
-    }
-    // Held-out queries: the next draws from the same distribution.
-    let mut queries = VectorSet::new(dim);
-    {
-        let mut v = vec![0f32; dim];
-        for _ in 0..num_queries {
-            sampler.fill(&mut v);
-            queries.push(&v);
-        }
-    }
-    let centroid: Vec<f32> = centroid_sum.iter().map(|s| (s / n as f64) as f32).collect();
-    let gen_secs = t0.elapsed().as_secs_f64();
-    println!("pass 0 (generate -> disk): {gen_secs:.1}s");
+        let centroid: Vec<f32> = centroid_sum.iter().map(|s| (s / n as f64) as f32).collect();
+        let gen_secs = t0.elapsed().as_secs_f64();
+        println!("pass 0 (generate -> disk): {gen_secs:.1}s");
 
-    // Pass 1 — stream the file into the incremental index builder.
+        (dir, true, fpath, n, centroid, queries, gen_secs)
+    };
+    let float_file_bytes = (n * dim * 4) as u64;
+
+    // Pass 1 — stream the file into the incremental index builder. Excludes
+    // held-out query rows (which live past index n in a user file).
     let t1 = Instant::now();
     let mut builder = RaBitQBuilder::new(dim, 1, seed, centroid);
-    stream_rows(&fpath, dim, |_, row| builder.push(row))?;
+    stream_rows(&fpath, dim, Some(n as u32), |_, row| builder.push(row))?;
     let rq = builder.finish();
     let resident_index_bytes = rq.resident_bytes() as u64;
     rq.save(&dir)?;
@@ -684,10 +800,10 @@ fn run_scale_bench(
     let build_secs = t1.elapsed().as_secs_f64();
     println!("pass 1 (build 1-bit index): {build_secs:.1}s");
 
-    // Pass 2 — exact ground truth by streaming the float file once.
+    // Pass 2 — exact ground truth by streaming the base portion once.
     let t2 = Instant::now();
     let mut tops: Vec<Vec<(f32, u32)>> = vec![Vec::with_capacity(k); num_queries];
-    stream_rows(&fpath, dim, |id, row| {
+    stream_rows(&fpath, dim, Some(n as u32), |id, row| {
         for (qi, top) in tops.iter_mut().enumerate() {
             top_push(top, k, dot(queries.get(qi), row), id);
         }
@@ -741,9 +857,16 @@ fn run_scale_bench(
         });
     }
 
-    if !keep {
+    // Drop the mmap and index handles before any cleanup that might remove
+    // files under them.
+    drop(fmm);
+    drop(rq);
+
+    // Only remove the working dir if we created it (never the user's
+    // --vectors-file, which lives elsewhere and is never copied here).
+    if !keep && created_dir {
         let _ = std::fs::remove_dir_all(&dir);
-    } else {
+    } else if keep {
         println!("kept working dir: {}", dir.display());
     }
 
@@ -861,6 +984,63 @@ fn build_vectors(
             )
         }
     }
+}
+
+/// Load base + held-out query vectors from a raw little-endian f32 file
+/// (row-major, row length = `dim`). The last `queries` rows are held out;
+/// `cap` bounds the base set from the front (no subsampling — real-embedding
+/// runs want the actual rows, not a stride sample).
+fn load_vectors_file(
+    path: &std::path::Path,
+    dim: usize,
+    cap: usize,
+    queries: usize,
+) -> Result<(VectorSet, VectorSet, String)> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("reading vectors file {}", path.display()))?;
+    let row_bytes = dim * 4;
+    anyhow::ensure!(
+        row_bytes > 0 && bytes.len() % row_bytes == 0,
+        "vectors file {} has {} bytes, not a multiple of dim*4={row_bytes}",
+        path.display(),
+        bytes.len()
+    );
+    let total = bytes.len() / row_bytes;
+    anyhow::ensure!(
+        total >= queries + 10,
+        "vectors file {} has only {total} rows, need at least queries+10={}",
+        path.display(),
+        queries + 10
+    );
+
+    let read_row = |i: usize, out: &mut [f32]| {
+        let start = i * row_bytes;
+        for (d, x) in out.iter_mut().enumerate() {
+            let off = start + d * 4;
+            *x = f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
+        }
+    };
+
+    let n_base_rows = total - queries;
+    let n_base = n_base_rows.min(cap);
+    let mut base = VectorSet::new(dim);
+    let mut row = vec![0f32; dim];
+    for i in 0..n_base {
+        read_row(i, &mut row);
+        base.push(&row);
+    }
+
+    let mut qset = VectorSet::new(dim);
+    for i in n_base_rows..total {
+        read_row(i, &mut row);
+        qset.push(&row);
+    }
+
+    Ok((
+        base,
+        qset,
+        format!("vectors-file {} (dim {dim})", path.display()),
+    ))
 }
 
 fn stride_subsample(vs: &VectorSet, target: usize) -> VectorSet {

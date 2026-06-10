@@ -102,6 +102,11 @@ cargo run --release -p kortex-harness -- compress-bench --source synthetic --dim
 # At-scale validation (1M: ~1 GB disk, ~1 min; 5M: ~5 GB disk, ~3 min):
 cargo run --release -p kortex-harness -- scale-bench --scale 1m --assert-gate
 cargo run --release -p kortex-harness -- scale-bench --scale 5m --clusters 1024
+
+# Real-embedding validation (dev-only script; see tools/export-embeddings.py):
+#   kortex generate --years 5 --entries-per-day 6 --out /tmp/corpus.json
+#   python3 tools/export-embeddings.py --corpus /tmp/corpus.json --out /tmp/real.f32 --dim 256
+cargo run --release -p kortex-harness -- compress-bench --vectors-file /tmp/real.f32 --dim 256
 ```
 
 ### Result, part 1 — codec fidelity (small-N matrix, dim 256)
