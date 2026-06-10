@@ -360,16 +360,20 @@ fn main() -> Result<()> {
                     && report.index_bytes_per_unit <= 24.0
                     && report.p95_us >= 0.0
                     && report.p95_us < 1_000.0
-                    && report.ingest_units_per_sec >= 50_000.0;
+                    && report.ingest_units_per_sec >= 50_000.0
+                    && report.durable_events_per_sec >= 100.0
+                    && report.reopen_ms < 1_000.0;
                 if pass {
                     println!("\nGATE: PASS (store-bench --assert-gate satisfied)");
                 } else {
                     anyhow::bail!(
-                        "Stage 2 gate FAILED: content_overhead={:.3}x (budget 1.25x), index={:.1} B/unit (budget 24), p95={:.0}us (budget <1000us), ingest={:.0} units/s (budget >=50k)",
+                        "Stage 2 gate FAILED: content_overhead={:.3}x (budget 1.25x), index={:.1} B/unit (budget 24), p95={:.0}us (budget <1000us), ingest={:.0} units/s (budget >=50k), durable={:.0} events/s (budget >=100), reopen={:.1}ms (budget <1000ms)",
                         report.content_overhead,
                         report.index_bytes_per_unit,
                         report.p95_us,
-                        report.ingest_units_per_sec
+                        report.ingest_units_per_sec,
+                        report.durable_events_per_sec,
+                        report.reopen_ms
                     );
                 }
             }
@@ -928,7 +932,13 @@ struct StoreBenchReport {
     p50_us: f64,
     p95_us: f64,
     ingest_elapsed_secs: f64,
+    /// Buffered ingest: appends with a single sync() at the end.
     ingest_units_per_sec: f64,
+    /// Durable ingest: fsync after every event (the worst-case capture mode).
+    durable_events_per_sec: f64,
+    /// Cold reopen of the full store + one random read (Stage 2B headline:
+    /// must not scan the whole history).
+    reopen_ms: f64,
 }
 
 // FIX 5: deterministic shuffle using the same SplitMix64 as the project.
@@ -1018,22 +1028,70 @@ fn run_store_bench(
     let p50_us = if n > 0 { pct(0.50) } else { 0.0 };
     let p95_us = if n > 0 { pct(0.95) } else { 0.0 };
 
+    // Snapshot accounting, then measure a cold reopen of the same store: the
+    // Stage 2B contract is that open() scans at most one segment tail (dedup
+    // runs + counts meta carry the rest), so this must stay fast no matter
+    // how much history accumulated.
+    let event_count = store.event_count();
+    let raw_text_bytes = store.raw_text_bytes();
+    let event_store_bytes = store.event_store_bytes();
+    let unit_store_bytes = store.unit_store_bytes();
+    let store_bytes = store.store_bytes();
+    let probe_uid = uids.first().copied();
+    drop(store);
+    let reopen_start = Instant::now();
+    let reopened = Store::open(&dir).context("reopening store")?;
+    if let Some(uid) = probe_uid {
+        let _ = reopened.unit_text(uid);
+    }
+    let reopen_ms = reopen_start.elapsed().as_secs_f64() * 1000.0;
+    anyhow::ensure!(
+        reopened.event_count() == event_count && reopened.unit_count() == unit_count,
+        "reopen lost data: events {} -> {}, units {} -> {}",
+        event_count,
+        reopened.event_count(),
+        unit_count,
+        reopened.unit_count()
+    );
+    drop(reopened);
     let _ = std::fs::remove_dir_all(&dir);
+
+    // Durable ingest: a separate small store, fsync after every event. This
+    // is the worst-case capture mode; human capture is a few events/minute,
+    // so triple-digit events/sec leaves orders of magnitude of margin.
+    let ddir = std::env::temp_dir().join(format!("kortex_store_bench_d_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ddir);
+    let mut dstore = Store::open(&ddir).context("opening durable store")?;
+    let durable_n = 200usize;
+    let durable_start = Instant::now();
+    for i in 0..durable_n {
+        dstore.append_event(&RawEvent {
+            source: Source::Text,
+            created_utc_secs: i as i64,
+            text: format!("durable capture event {i}"),
+        })?;
+        dstore.sync()?;
+    }
+    let durable_events_per_sec = durable_n as f64 / durable_start.elapsed().as_secs_f64().max(1e-9);
+    drop(dstore);
+    let _ = std::fs::remove_dir_all(&ddir);
 
     Ok(StoreBenchReport {
         corpus_entries: corpus.entries.len(),
-        event_count: store.event_count(),
+        event_count,
         unit_count,
-        raw_text_bytes: store.raw_text_bytes(),
-        event_store_bytes: store.event_store_bytes(),
-        unit_store_bytes: store.unit_store_bytes(),
-        store_bytes: store.store_bytes(),
+        raw_text_bytes,
+        event_store_bytes,
+        unit_store_bytes,
+        store_bytes,
         content_overhead,
         index_bytes_per_unit,
         p50_us,
         p95_us,
         ingest_elapsed_secs,
         ingest_units_per_sec,
+        durable_events_per_sec,
+        reopen_ms,
     })
 }
 
@@ -1071,20 +1129,32 @@ fn print_store_bench(r: &StoreBenchReport) {
         r.p95_us
     );
     println!(
-        "ingest throughput : {:.0} units/s  (budget: >= 50000 units/s, {:.3}s)",
+        "ingest (buffered) : {:.0} units/s  (budget: >= 50000 units/s, {:.3}s)",
         r.ingest_units_per_sec, r.ingest_elapsed_secs
+    );
+    println!(
+        "ingest (durable)  : {:.0} events/s, fsync per event  (budget: >= 100/s)",
+        r.durable_events_per_sec
+    );
+    println!(
+        "cold reopen       : {:.1} ms incl. one random read  (budget: < 1000 ms)",
+        r.reopen_ms
     );
     let ok_content = r.content_overhead <= 1.25;
     let ok_index = r.index_bytes_per_unit <= 24.0;
     let ok_p95 = r.p95_us >= 0.0 && r.p95_us < 1_000.0;
     let ok_ingest = r.ingest_units_per_sec >= 50_000.0;
+    let ok_durable = r.durable_events_per_sec >= 100.0;
+    let ok_reopen = r.reopen_ms < 1_000.0;
     println!();
     println!(
-        "gate check: content={} index={} p95={} ingest={}",
+        "gate check: content={} index={} p95={} ingest={} durable={} reopen={}",
         if ok_content { "PASS" } else { "FAIL" },
         if ok_index { "PASS" } else { "FAIL" },
         if ok_p95 { "PASS" } else { "FAIL" },
         if ok_ingest { "PASS" } else { "FAIL" },
+        if ok_durable { "PASS" } else { "FAIL" },
+        if ok_reopen { "PASS" } else { "FAIL" },
     );
 }
 

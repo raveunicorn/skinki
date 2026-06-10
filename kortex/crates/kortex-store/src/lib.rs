@@ -1,18 +1,38 @@
 #![cfg_attr(not(unix), forbid(unsafe_code))]
 //! Storage substrate: append-only L0 log + content-addressed unit store.
 //!
-//! Stage 2 of the Kortex engine. A pure-Rust, mmap-backed store for raw capture
-//! events and derived memory units, with lossless provenance and deduplication.
+//! Stage 2/2B of the Kortex engine. A pure-Rust, mmap-backed store for raw
+//! capture events and derived memory units, with lossless provenance,
+//! deduplication, and crash-safe durability.
 //!
 //! ## Encoding (manual, compact, lossless)
 //!
 //! Event record: created_utc_secs (i64 LE) | source (u8) | text bytes (UTF-8)
-//!   text_len = outer_len - 9 (derived from length prefix, no cap)
+//!   text_len = outer_len - 9 (derived from framing, no cap)
 //! Unit record:   event_id (u64 LE) | byte_start (u32 LE) | byte_end (u32 LE)
+//!
+//! ## Durability model (Stage 2B)
+//!
+//! - **Write-through append.** Records are written to the current segment file
+//!   as they arrive (buffered); `sync()` flushes and fsyncs. The window of loss
+//!   after a crash is exactly "appends since the last `sync()`".
+//! - **Size-based segment rotation** (default 64 MiB) instead of a segment per
+//!   sync: `open()` never validates more than one segment tail, and the
+//!   in-RAM tail mirror stays bounded.
+//! - **Torn-tail recovery.** On `open()`, the last segment of each stream is
+//!   framing-validated; a torn final record (crash mid-write) is physically
+//!   truncated away. Committed bytes are never rewritten.
+//! - **Persistent dedup index.** The content-hash index is persisted as sorted
+//!   runs (`dedup-NNNN.run`, written at event-segment rotation, compacted when
+//!   there are too many). Lookups binary-search the mmap'd runs; only the
+//!   since-last-rotation delta lives in a RAM map. `open()` therefore scans at
+//!   most one segment of events instead of the whole history — this is what
+//!   keeps cold start fast and idle RAM flat as the log grows to years.
 
 use anyhow::{bail, Context};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 pub type EventId = u64;
@@ -114,19 +134,13 @@ enum SegView {
 }
 
 impl SegView {
-    #[cfg(not(unix))]
-    #[allow(dead_code)]
-    fn ram(_bytes: Vec<u8>) -> Self {
-        SegView::Ram(_bytes)
-    }
-
     #[cfg(unix)]
-    fn mmap(path: &Path, _n: usize) -> anyhow::Result<Self> {
+    fn open(path: &Path) -> anyhow::Result<Self> {
         Ok(SegView::Mmap(MmapBytes::open(path)?))
     }
 
     #[cfg(not(unix))]
-    fn mmap(path: &Path, _n: usize) -> anyhow::Result<Self> {
+    fn open(path: &Path) -> anyhow::Result<Self> {
         Ok(SegView::Ram(std::fs::read(path)?))
     }
 
@@ -273,60 +287,547 @@ pub fn derive_units(event: EventId, text: &str) -> Vec<Unit> {
 }
 
 // ---------------------------------------------------------------------------
+// Options & constants
 // ---------------------------------------------------------------------------
+
+/// Default segment rotation threshold. Chosen so `open()` validates at most
+/// this much tail data and the per-stream RAM mirror stays bounded.
+pub const DEFAULT_SEGMENT_TARGET_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Compact dedup runs once more than this many accumulate.
+const MAX_DEDUP_RUNS: usize = 8;
+
+const DEDUP_RUN_MAGIC: &[u8; 8] = b"KXDDRUN1";
+const DEDUP_RUN_HEADER: usize = 8 + 8 + 8; // magic | count u64 | covered_max u64
+const DEDUP_RUN_ENTRY: usize = 16 + 8; // hash u128 | event id u64
+
+const COUNTS_META_FILE: &str = "counts.meta";
+
+const MIN_EVENT_RECORD: usize = 9;
+const MIN_UNIT_RECORD: usize = 16;
+
+#[derive(Clone, Copy, Debug)]
+pub struct StoreOptions {
+    /// Rotate a segment once it reaches this many bytes.
+    pub segment_target_bytes: u64,
+}
+
+impl Default for StoreOptions {
+    fn default() -> Self {
+        StoreOptions {
+            segment_target_bytes: DEFAULT_SEGMENT_TARGET_BYTES,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AppendStream — one segmented, write-through, crash-recovering record log
+// ---------------------------------------------------------------------------
+
+/// A segmented append-only record log. Records are length-prefixed
+/// (`len: u32 LE` + payload). Ids are `(segment << 32) | byte_offset`, stable
+/// across reopen. Finished segments are mmap'd read-only; the current segment
+/// is served from an mmap of its validated-at-open prefix plus an in-RAM
+/// mirror of bytes appended since open (records never straddle the boundary).
+struct AppendStream {
+    dir: PathBuf,
+    prefix: &'static str,
+    ext: &'static str,
+    target_bytes: u64,
+    seg_num: u32,
+    writer: std::io::BufWriter<std::fs::File>,
+    base: SegView,
+    base_len: u64,
+    tail: Vec<u8>,
+    /// Finished segments, ascending by segment number.
+    finished: Vec<(u32, SegView)>,
+    total_bytes: u64,
+    /// Torn bytes discarded from the last segment at open (crash recovery).
+    recovered_truncated_bytes: u64,
+}
+
+/// Length of the valid framing prefix of `data`: the scan stops at the first
+/// record that is incomplete (torn write) or implausibly small.
+fn validated_prefix_len(data: &[u8], min_record_bytes: usize) -> usize {
+    let mut pos = 0usize;
+    while pos + 4 <= data.len() {
+        let len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+        if len < min_record_bytes {
+            break;
+        }
+        let Some(end) = (pos + 4).checked_add(len) else {
+            break;
+        };
+        if end > data.len() {
+            break;
+        }
+        pos = end;
+    }
+    pos
+}
+
+fn seg_file_path(dir: &Path, prefix: &str, num: u32, ext: &str) -> PathBuf {
+    dir.join(format!("{prefix}-{num:03}.{ext}"))
+}
+
+/// Best-effort directory fsync so renames/creates survive power loss.
+fn fsync_dir(dir: &Path) {
+    if let Ok(f) = std::fs::File::open(dir) {
+        let _ = f.sync_all();
+    }
+}
+
+impl AppendStream {
+    fn open(
+        dir: &Path,
+        prefix: &'static str,
+        ext: &'static str,
+        min_record_bytes: usize,
+        target_bytes: u64,
+    ) -> anyhow::Result<AppendStream> {
+        // Discover existing segments, ascending.
+        let mut nums: Vec<u32> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if let Some(rest) = name
+                    .strip_prefix(&format!("{prefix}-"))
+                    .and_then(|s| s.strip_suffix(&format!(".{ext}")))
+                {
+                    if let Ok(n) = rest.parse::<u32>() {
+                        nums.push(n);
+                    }
+                }
+            }
+        }
+        nums.sort_unstable();
+
+        let mut finished = Vec::with_capacity(nums.len().saturating_sub(1));
+        let mut total_bytes = 0u64;
+        let (seg_num, base, base_len, recovered) = if let Some(&last) = nums.last() {
+            for &n in &nums[..nums.len() - 1] {
+                let view = SegView::open(&seg_file_path(dir, prefix, n, ext))?;
+                total_bytes += view.as_slice().len() as u64;
+                finished.push((n, view));
+            }
+            let path = seg_file_path(dir, prefix, last, ext);
+            let view = SegView::open(&path)?;
+            let raw_len = view.as_slice().len();
+            let valid = validated_prefix_len(view.as_slice(), min_record_bytes);
+            let recovered = (raw_len - valid) as u64;
+            let view = if recovered > 0 {
+                // Crash recovery: physically truncate the torn tail. Committed
+                // records are untouched; only garbage past the last complete
+                // record is discarded.
+                drop(view);
+                let f = std::fs::OpenOptions::new().write(true).open(&path)?;
+                f.set_len(valid as u64)?;
+                f.sync_all()?;
+                SegView::open(&path)?
+            } else {
+                view
+            };
+            total_bytes += valid as u64;
+            (last, view, valid as u64, recovered)
+        } else {
+            let path = seg_file_path(dir, prefix, 0, ext);
+            std::fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
+            fsync_dir(dir);
+            (0, SegView::open(&path)?, 0u64, 0u64)
+        };
+
+        let path = seg_file_path(dir, prefix, seg_num, ext);
+        let file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .with_context(|| format!("opening {} for append", path.display()))?;
+        Ok(AppendStream {
+            dir: dir.to_path_buf(),
+            prefix,
+            ext,
+            target_bytes,
+            seg_num,
+            writer: std::io::BufWriter::with_capacity(1 << 16, file),
+            base,
+            base_len,
+            tail: Vec::new(),
+            finished,
+            total_bytes,
+            recovered_truncated_bytes: recovered,
+        })
+    }
+
+    fn current_size(&self) -> u64 {
+        self.base_len + self.tail.len() as u64
+    }
+
+    /// Append one record. Returns `(id, rotated)`; `rotated` is true when a
+    /// segment was finished right before this record (the caller may want to
+    /// persist per-rotation metadata — dedup runs, counters).
+    fn append(&mut self, payload: &[u8]) -> anyhow::Result<(u64, bool)> {
+        let rec_len = 4 + payload.len() as u64;
+        let mut rotated = false;
+        if self.current_size() > 0 && self.current_size() + rec_len > self.target_bytes {
+            self.rotate()?;
+            rotated = true;
+        }
+        let offset = self.current_size();
+        anyhow::ensure!(
+            offset + rec_len <= u32::MAX as u64,
+            "record would overflow the 4 GiB segment offset space"
+        );
+        let len = payload.len() as u32;
+        self.tail.extend_from_slice(&len.to_le_bytes());
+        self.tail.extend_from_slice(payload);
+        self.writer.write_all(&len.to_le_bytes())?;
+        self.writer.write_all(payload)?;
+        self.total_bytes += rec_len;
+        Ok((((self.seg_num as u64) << 32) | offset, rotated))
+    }
+
+    /// Make everything appended so far durable (flush + fsync).
+    fn sync(&mut self) -> anyhow::Result<()> {
+        self.writer.flush()?;
+        self.writer.get_ref().sync_all()?;
+        Ok(())
+    }
+
+    /// Finish the current segment (flush, fsync, re-mmap read-only) and start
+    /// the next one.
+    fn rotate(&mut self) -> anyhow::Result<()> {
+        self.sync()?;
+        let old_path = seg_file_path(&self.dir, self.prefix, self.seg_num, self.ext);
+        let view = SegView::open(&old_path)?;
+        self.finished.push((self.seg_num, view));
+        self.seg_num += 1;
+        let new_path = seg_file_path(&self.dir, self.prefix, self.seg_num, self.ext);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&new_path)
+            .with_context(|| format!("creating {}", new_path.display()))?;
+        self.writer = std::io::BufWriter::with_capacity(1 << 16, file);
+        self.base = SegView::open(&new_path)?;
+        self.base_len = 0;
+        self.tail.clear();
+        fsync_dir(&self.dir);
+        Ok(())
+    }
+
+    /// Slice from a record's length prefix to the end of its storage region.
+    /// Records never straddle region boundaries, so the whole record is
+    /// contained in the returned slice.
+    fn slice_at(&self, id: u64) -> Option<&[u8]> {
+        let seg = (id >> 32) as u32;
+        let off = (id & 0xFFFF_FFFF) as usize;
+        if seg == self.seg_num {
+            if (off as u64) < self.base_len {
+                return Some(&self.base.as_slice()[off..]);
+            }
+            let rel = off - self.base_len as usize;
+            if rel < self.tail.len() {
+                return Some(&self.tail[rel..]);
+            }
+            return None;
+        }
+        let idx = self.finished.binary_search_by_key(&seg, |(n, _)| *n).ok()?;
+        let data = self.finished[idx].1.as_slice();
+        if off < data.len() {
+            Some(&data[off..])
+        } else {
+            None
+        }
+    }
+
+    /// Storage regions in id order: finished segments, then the current
+    /// segment's validated base, then its in-RAM tail. Each region is
+    /// `(first_record_id_base, bytes)`.
+    fn regions(&self) -> Vec<(u64, &[u8])> {
+        let mut out: Vec<(u64, &[u8])> = Vec::with_capacity(self.finished.len() + 2);
+        for (n, view) in &self.finished {
+            out.push(((*n as u64) << 32, view.as_slice()));
+        }
+        let cur = (self.seg_num as u64) << 32;
+        out.push((cur, &self.base.as_slice()[..self.base_len as usize]));
+        out.push((cur | self.base_len, &self.tail));
+        out
+    }
+
+    /// Visit `(id, payload)` of every record with `id > floor` (all records
+    /// when `floor` is None). Regions fully covered by `floor` are skipped
+    /// without being walked — this is what makes reopen O(one segment).
+    fn for_each_record(&self, floor: Option<u64>, mut f: impl FnMut(u64, &[u8])) {
+        for (base_id, data) in self.regions() {
+            if let Some(fl) = floor {
+                // All ids in this region are < base_id + data.len().
+                if data.is_empty() || base_id + data.len() as u64 - 1 <= fl {
+                    continue;
+                }
+            }
+            let mut pos = 0usize;
+            while pos + 4 <= data.len() {
+                let len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+                let start = pos + 4;
+                if start + len > data.len() {
+                    break;
+                }
+                let id = base_id + pos as u64;
+                if floor.is_none_or(|fl| id > fl) {
+                    f(id, &data[start..start + len]);
+                }
+                pos = start + len;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dedup runs — the persistent content-hash index
+// ---------------------------------------------------------------------------
+
+/// One immutable sorted run of `(content_hash, event_id)` entries, mmap'd.
+/// `covered_max` is the largest event id whose hash is guaranteed to be in
+/// the runs (collectively): everything newer is rebuilt into the RAM delta at
+/// open by scanning only the events past that watermark.
+struct DedupRun {
+    view: SegView,
+    count: usize,
+    covered_max: u64,
+}
+
+impl DedupRun {
+    fn open(path: &Path) -> Option<DedupRun> {
+        let view = SegView::open(path).ok()?;
+        let data = view.as_slice();
+        if data.len() < DEDUP_RUN_HEADER || &data[0..8] != DEDUP_RUN_MAGIC {
+            return None;
+        }
+        let count = u64::from_le_bytes(data[8..16].try_into().unwrap()) as usize;
+        let covered_max = u64::from_le_bytes(data[16..24].try_into().unwrap());
+        if data.len() != DEDUP_RUN_HEADER + count * DEDUP_RUN_ENTRY {
+            return None;
+        }
+        Some(DedupRun {
+            view,
+            count,
+            covered_max,
+        })
+    }
+
+    fn entry(&self, i: usize) -> (u128, EventId) {
+        let off = DEDUP_RUN_HEADER + i * DEDUP_RUN_ENTRY;
+        let data = self.view.as_slice();
+        let hash = u128::from_le_bytes(data[off..off + 16].try_into().unwrap());
+        let id = u64::from_le_bytes(data[off + 16..off + 24].try_into().unwrap());
+        (hash, id)
+    }
+
+    fn lookup(&self, hash: u128) -> Option<EventId> {
+        let (mut lo, mut hi) = (0usize, self.count);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let (h, id) = self.entry(mid);
+            match h.cmp(&hash) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => return Some(id),
+            }
+        }
+        None
+    }
+}
+
+fn dedup_run_path(dir: &Path, num: u32) -> PathBuf {
+    dir.join(format!("dedup-{num:04}.run"))
+}
+
+/// Write a sorted run atomically (tmp + fsync + rename + dir fsync).
+fn write_dedup_run(
+    dir: &Path,
+    num: u32,
+    entries: &[(u128, EventId)],
+    covered_max: u64,
+) -> anyhow::Result<DedupRun> {
+    let mut buf = Vec::with_capacity(DEDUP_RUN_HEADER + entries.len() * DEDUP_RUN_ENTRY);
+    buf.extend_from_slice(DEDUP_RUN_MAGIC);
+    buf.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+    buf.extend_from_slice(&covered_max.to_le_bytes());
+    for (hash, id) in entries {
+        buf.extend_from_slice(&hash.to_le_bytes());
+        buf.extend_from_slice(&id.to_le_bytes());
+    }
+    let path = dedup_run_path(dir, num);
+    let tmp = path.with_extension("run.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&buf)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, &path)?;
+    fsync_dir(dir);
+    DedupRun::open(&path).context("re-opening freshly written dedup run")
+}
+
+// ---------------------------------------------------------------------------
+// Unit-count metadata (so reopen doesn't walk the whole unit store)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Default)]
+struct CountsMeta {
+    version: u32,
+    units_counted: u64,
+    /// All unit records with id <= this watermark are included in
+    /// `units_counted`; None means nothing is counted (full scan on open).
+    units_high_water: Option<u64>,
+}
+
+fn read_counts_meta(dir: &Path) -> CountsMeta {
+    let path = dir.join(COUNTS_META_FILE);
+    std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<CountsMeta>(&bytes).ok())
+        .filter(|m| m.version == 1)
+        .unwrap_or_default()
+}
+
+fn write_counts_meta(dir: &Path, meta: &CountsMeta) -> anyhow::Result<()> {
+    let path = dir.join(COUNTS_META_FILE);
+    let tmp = path.with_extension("meta.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&serde_json::to_vec(meta)?)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, &path)?;
+    fsync_dir(dir);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
 
 pub struct Store {
     dir: PathBuf,
-    content_index: HashMap<u128, EventId>,
-    event_seg: Vec<u8>,
-    unit_seg: Vec<u8>,
-    event_seg_num: u32,
-    unit_seg_num: u32,
-    event_views: Vec<(u32, SegView)>,
-    unit_views: Vec<(u32, SegView)>,
+    events: AppendStream,
+    units: AppendStream,
+    runs: Vec<(u32, DedupRun)>,
+    next_run_num: u32,
+    /// Unique-event hashes appended since the last persisted run.
+    delta: HashMap<u128, EventId>,
+    event_unique: usize,
+    unit_count: usize,
+    /// Raw text bytes appended *this session* (bench accounting; not
+    /// recomputed on reopen — recomputing would require decoding the full
+    /// history, defeating fast open).
     stored_raw_bytes: u64,
-    stored_event_bytes: u64,
-    stored_unit_bytes: u64,
 }
 
 impl Store {
     pub fn open(dir: &Path) -> anyhow::Result<Store> {
+        Store::open_with(dir, StoreOptions::default())
+    }
+
+    pub fn open_with(dir: &Path, opts: StoreOptions) -> anyhow::Result<Store> {
         std::fs::create_dir_all(dir).context("creating store directory")?;
-        let (event_seg_num, unit_seg_num) = discover_max_seg(dir);
-        let mut store = Store {
+        let events = AppendStream::open(
+            dir,
+            "events",
+            "seg",
+            MIN_EVENT_RECORD,
+            opts.segment_target_bytes,
+        )?;
+        let units = AppendStream::open(
+            dir,
+            "units",
+            "idx",
+            MIN_UNIT_RECORD,
+            opts.segment_target_bytes,
+        )?;
+
+        // Load dedup runs; any unreadable/corrupt run invalidates them all and
+        // falls back to a full rebuild scan (correct, just slower).
+        let mut run_nums: Vec<u32> = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if let Some(rest) = name
+                    .strip_prefix("dedup-")
+                    .and_then(|s| s.strip_suffix(".run"))
+                {
+                    if let Ok(n) = rest.parse::<u32>() {
+                        run_nums.push(n);
+                    }
+                }
+            }
+        }
+        run_nums.sort_unstable();
+        let next_run_num = run_nums.last().map_or(0, |n| n + 1);
+        let mut runs: Vec<(u32, DedupRun)> = Vec::with_capacity(run_nums.len());
+        let mut runs_ok = true;
+        for n in &run_nums {
+            match DedupRun::open(&dedup_run_path(dir, *n)) {
+                Some(r) => runs.push((*n, r)),
+                None => {
+                    runs_ok = false;
+                    break;
+                }
+            }
+        }
+        if !runs_ok {
+            runs.clear();
+        }
+        let covered = runs.iter().map(|(_, r)| r.covered_max).max();
+
+        // Rebuild the RAM delta from events newer than the run watermark.
+        // Segments contain only unique events (duplicates are never appended),
+        // so this cannot double-insert a hash that lives in a run.
+        let mut delta: HashMap<u128, EventId> = HashMap::new();
+        events.for_each_record(covered, |id, payload| {
+            delta.entry(content_hash_128(payload)).or_insert(id);
+        });
+        let event_unique = runs.iter().map(|(_, r)| r.count).sum::<usize>() + delta.len();
+
+        // Unit count: persisted watermark + a scan of only what's newer.
+        let meta = read_counts_meta(dir);
+        let mut unit_count = meta.units_counted as usize;
+        units.for_each_record(meta.units_high_water, |_, _| unit_count += 1);
+
+        Ok(Store {
             dir: dir.to_path_buf(),
-            content_index: HashMap::new(),
-            event_seg: Vec::new(),
-            unit_seg: Vec::new(),
-            event_seg_num,
-            unit_seg_num,
-            event_views: Vec::new(),
-            unit_views: Vec::new(),
+            events,
+            units,
+            runs,
+            next_run_num,
+            delta,
+            event_unique,
+            unit_count,
             stored_raw_bytes: 0,
-            stored_event_bytes: 0,
-            stored_unit_bytes: 0,
-        };
-        store.load_existing()?;
-        Ok(store)
+        })
     }
 
     pub fn append_event(&mut self, ev: &RawEvent) -> anyhow::Result<EventId> {
         let encoded = encode_event(ev);
         let hash = content_hash_128(&encoded);
-        if let Some(&existing) = self.content_index.get(&hash) {
+        if let Some(&existing) = self.delta.get(&hash) {
             return Ok(existing);
         }
-        let offset = self.event_seg.len() as u64;
-        let len = encoded.len() as u32;
-        self.event_seg.extend_from_slice(&len.to_le_bytes());
-        self.event_seg.extend_from_slice(&encoded);
-        let id = (self.event_seg_num as u64) << 32 | offset;
-        self.content_index.insert(hash, id);
+        for (_, run) in &self.runs {
+            if let Some(existing) = run.lookup(hash) {
+                return Ok(existing);
+            }
+        }
+        let (id, rotated) = self.events.append(&encoded)?;
+        if rotated {
+            // The delta's ids all precede the new segment; persist them so
+            // reopen only ever scans the current segment.
+            self.persist_dedup_run()?;
+        }
+        self.delta.insert(hash, id);
+        self.event_unique += 1;
         self.stored_raw_bytes += ev.text.len() as u64;
-        self.stored_event_bytes += (4 + encoded.len()) as u64;
         Ok(id)
     }
 
@@ -343,29 +844,81 @@ impl Store {
                 event_text.len()
             );
         }
-        let _span = &event_text[u.byte_start as usize..u.byte_end as usize];
         let encoded = encode_unit(u);
-        let offset = self.unit_seg.len() as u64;
-        let len = encoded.len() as u32;
-        self.unit_seg.extend_from_slice(&len.to_le_bytes());
-        self.unit_seg.extend_from_slice(&encoded);
-        let id = (self.unit_seg_num as u64) << 32 | offset;
-        self.stored_unit_bytes += (4 + encoded.len()) as u64;
+        let (id, rotated) = self.units.append(&encoded)?;
+        if rotated {
+            // unit_count currently equals exactly the records in finished
+            // segments (the new record isn't counted yet) — the watermark
+            // covers everything below the fresh segment.
+            write_counts_meta(
+                &self.dir,
+                &CountsMeta {
+                    version: 1,
+                    units_counted: self.unit_count as u64,
+                    units_high_water: Some(((self.units.seg_num as u64) << 32) - 1),
+                },
+            )?;
+        }
+        self.unit_count += 1;
         Ok(id)
     }
 
-    /// Zero-copy read of the raw event text (FIX 7: no allocation).
+    fn persist_dedup_run(&mut self) -> anyhow::Result<()> {
+        if self.delta.is_empty() {
+            return Ok(());
+        }
+        // Everything in segments below the (already-incremented) current one.
+        let covered_max = ((self.events.seg_num as u64) << 32) - 1;
+        let mut entries: Vec<(u128, EventId)> = self.delta.drain().collect();
+        entries.sort_unstable_by_key(|e| e.0);
+        let run = write_dedup_run(&self.dir, self.next_run_num, &entries, covered_max)?;
+        self.runs.push((self.next_run_num, run));
+        self.next_run_num += 1;
+        if self.runs.len() > MAX_DEDUP_RUNS {
+            self.compact_runs()?;
+        }
+        Ok(())
+    }
+
+    fn compact_runs(&mut self) -> anyhow::Result<()> {
+        let mut all: Vec<(u128, EventId)> = Vec::new();
+        let mut covered_max = 0u64;
+        for (_, run) in &self.runs {
+            covered_max = covered_max.max(run.covered_max);
+            for i in 0..run.count {
+                all.push(run.entry(i));
+            }
+        }
+        all.sort_unstable_by_key(|e| e.0);
+        let merged = write_dedup_run(&self.dir, self.next_run_num, &all, covered_max)?;
+        let old: Vec<u32> = self.runs.iter().map(|(n, _)| *n).collect();
+        self.runs = vec![(self.next_run_num, merged)];
+        self.next_run_num += 1;
+        for n in old {
+            let _ = std::fs::remove_file(dedup_run_path(&self.dir, n));
+        }
+        fsync_dir(&self.dir);
+        Ok(())
+    }
+
+    /// Zero-copy read of the raw event text.
     pub fn event_text(&self, id: EventId) -> anyhow::Result<&str> {
-        let (seg_num, offset) = id_parts(id);
-        let data = self.find_event_seg(seg_num)?;
-        read_event_text_from_seg(data, offset as usize).context("event text read")
+        let data = self
+            .events
+            .slice_at(id)
+            .with_context(|| format!("event {id} not found"))?;
+        read_event_text_at(data).context("event text read")
     }
 
     /// The exact source slice a unit points at.
     pub fn unit_text(&self, id: UnitId) -> anyhow::Result<&str> {
-        let (seg_num, offset) = id_parts(id);
-        let data = self.find_unit_seg(seg_num)?;
-        let unit = read_unit_record(data, offset as usize).context("reading unit record")?;
+        let data = self
+            .units
+            .slice_at(id)
+            .with_context(|| format!("unit {id} not found"))?;
+        let unit = read_record_at(data)
+            .and_then(decode_unit)
+            .context("reading unit record")?;
         let event_text = self
             .event_text(unit.event)
             .context("unit references unknown event")?;
@@ -373,37 +926,31 @@ impl Store {
     }
 
     pub fn event_count(&self) -> usize {
-        self.content_index.len()
+        self.event_unique
     }
 
-    /// FIX 6: unit_count includes pending buffer, not only flushed segments.
     pub fn unit_count(&self) -> usize {
-        let flushed: usize = self
-            .unit_views
-            .iter()
-            .map(|(_, v)| count_records(v.as_slice(), 16))
-            .sum();
-        let pending: usize = count_records(&self.unit_seg, 16);
-        flushed + pending
+        self.unit_count
     }
 
     pub fn units(&self) -> impl Iterator<Item = (UnitId, Unit)> + '_ {
-        let mut iter: Box<dyn Iterator<Item = (UnitId, Unit)>> = Box::new(std::iter::empty());
-        for (seg_num, view) in &self.unit_views {
-            let data = view.as_slice();
-            let seg = *seg_num as u64;
-            iter = Box::new(iter.chain(iter_units_seg(seg, data)));
-        }
-        let seg = self.unit_seg_num as u64;
-        let pending: Vec<(UnitId, Unit)> = iter_units_seg(seg, &self.unit_seg).collect();
-        iter = Box::new(iter.chain(pending));
-        iter
+        self.units
+            .regions()
+            .into_iter()
+            .flat_map(|(base_id, data)| iter_units_region(base_id, data))
     }
 
+    /// Flush and fsync both streams. After this returns, everything appended
+    /// so far survives a crash or power loss.
     pub fn sync(&mut self) -> anyhow::Result<()> {
-        self.flush_events()?;
-        self.flush_units()?;
+        self.events.sync()?;
+        self.units.sync()?;
         Ok(())
+    }
+
+    /// Torn bytes discarded during crash recovery at open (0 = clean open).
+    pub fn recovered_truncated_bytes(&self) -> u64 {
+        self.events.recovered_truncated_bytes + self.units.recovered_truncated_bytes
     }
 
     pub fn raw_text_bytes(&self) -> u64 {
@@ -411,205 +958,45 @@ impl Store {
     }
 
     pub fn event_store_bytes(&self) -> u64 {
-        self.stored_event_bytes
+        self.events.total_bytes
     }
 
     pub fn unit_store_bytes(&self) -> u64 {
-        self.stored_unit_bytes
+        self.units.total_bytes
     }
 
     pub fn store_bytes(&self) -> u64 {
-        self.stored_event_bytes + self.stored_unit_bytes
-    }
-
-    // -- internals --
-
-    fn flush_events(&mut self) -> anyhow::Result<()> {
-        if self.event_seg.is_empty() {
-            return Ok(());
-        }
-        let path = seg_path(&self.dir, "events", self.event_seg_num);
-        std::fs::write(&path, &self.event_seg)
-            .with_context(|| format!("writing {}", path.display()))?;
-        #[cfg(unix)]
-        let view = SegView::mmap(&path, self.event_seg.len())?;
-        #[cfg(not(unix))]
-        let view = SegView::mmap(&path, self.event_seg.len())?;
-        self.event_views.push((self.event_seg_num, view));
-        self.event_seg.clear();
-        self.event_seg_num += 1;
-        Ok(())
-    }
-
-    fn flush_units(&mut self) -> anyhow::Result<()> {
-        if self.unit_seg.is_empty() {
-            return Ok(());
-        }
-        let path = seg_path(&self.dir, "units", self.unit_seg_num);
-        std::fs::write(&path, &self.unit_seg)
-            .with_context(|| format!("writing {}", path.display()))?;
-        #[cfg(unix)]
-        let view = SegView::mmap(&path, self.unit_seg.len())?;
-        #[cfg(not(unix))]
-        let view = SegView::mmap(&path, self.unit_seg.len())?;
-        self.unit_views.push((self.unit_seg_num, view));
-        self.unit_seg.clear();
-        self.unit_seg_num += 1;
-        Ok(())
-    }
-
-    fn load_existing(&mut self) -> anyhow::Result<()> {
-        for seg_num in 0..self.event_seg_num {
-            let path = seg_path(&self.dir, "events", seg_num);
-            if !path.exists() {
-                continue;
-            }
-            #[cfg(unix)]
-            let view = SegView::mmap(&path, 0)?;
-            #[cfg(not(unix))]
-            let view = SegView::mmap(&path, 0)?;
-            index_events_from_seg(&mut self.content_index, view.as_slice(), seg_num);
-            self.event_views.push((seg_num, view));
-        }
-        for seg_num in 0..self.unit_seg_num {
-            let path = seg_path(&self.dir, "units", seg_num);
-            if !path.exists() {
-                continue;
-            }
-            #[cfg(unix)]
-            let view = SegView::mmap(&path, 0)?;
-            #[cfg(not(unix))]
-            let view = SegView::mmap(&path, 0)?;
-            self.unit_views.push((seg_num, view));
-        }
-        for (_, v) in &self.event_views {
-            self.stored_event_bytes += v.as_slice().len() as u64;
-        }
-        for (_, v) in &self.unit_views {
-            self.stored_unit_bytes += v.as_slice().len() as u64;
-        }
-        Ok(())
-    }
-
-    fn find_event_seg(&self, seg_num: u32) -> anyhow::Result<&[u8]> {
-        if seg_num == self.event_seg_num && !self.event_seg.is_empty() {
-            return Ok(&self.event_seg);
-        }
-        for (sn, view) in &self.event_views {
-            if *sn == seg_num {
-                return Ok(view.as_slice());
-            }
-        }
-        bail!("event segment {seg_num} not found")
-    }
-
-    fn find_unit_seg(&self, seg_num: u32) -> anyhow::Result<&[u8]> {
-        if seg_num == self.unit_seg_num && !self.unit_seg.is_empty() {
-            return Ok(&self.unit_seg);
-        }
-        for (sn, view) in &self.unit_views {
-            if *sn == seg_num {
-                return Ok(view.as_slice());
-            }
-        }
-        bail!("unit segment {seg_num} not found")
+        self.event_store_bytes() + self.unit_store_bytes()
     }
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Record helpers
 // ---------------------------------------------------------------------------
 
-fn discover_max_seg(dir: &Path) -> (u32, u32) {
-    let mut max_ev = 0u32;
-    let mut max_un = 0u32;
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if let Some(rest) = name
-                .strip_prefix("events-")
-                .and_then(|s| s.strip_suffix(".seg"))
-            {
-                if let Ok(n) = rest.parse::<u32>() {
-                    max_ev = max_ev.max(n + 1);
-                }
-            }
-            if let Some(rest) = name
-                .strip_prefix("units-")
-                .and_then(|s| s.strip_suffix(".idx"))
-            {
-                if let Ok(n) = rest.parse::<u32>() {
-                    max_un = max_un.max(n + 1);
-                }
-            }
-        }
-    }
-    (max_ev, max_un)
-}
-
-fn seg_path(dir: &Path, prefix: &str, num: u32) -> PathBuf {
-    let ext = match prefix {
-        "events" => "seg",
-        "units" => "idx",
-        _ => "dat",
-    };
-    dir.join(format!("{prefix}-{num:03}.{ext}"))
-}
-
-fn id_parts(id: u64) -> (u32, u64) {
-    ((id >> 32) as u32, id & 0xFFFF_FFFF)
-}
-
-/// FIX 7: single-pass event text extraction — no allocation of RawEvent.
-fn read_event_text_from_seg(data: &[u8], offset: usize) -> Option<&str> {
-    // outer len prefix
-    if offset + 4 > data.len() {
+/// `data` starts at a record's length prefix; return the payload slice.
+fn read_record_at(data: &[u8]) -> Option<&[u8]> {
+    if data.len() < 4 {
         return None;
     }
-    let rec_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-    let rec_start = offset + 4;
-    if rec_start + rec_len > data.len() {
+    let len = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+    if 4 + len > data.len() {
         return None;
     }
-    let rec = &data[rec_start..rec_start + rec_len];
-    // header: 8 (i64) + 1 (source) = 9 bytes
-    if rec.len() < 9 {
-        return None;
-    }
-    let text_len = rec.len() - 9;
-    std::str::from_utf8(&rec[9..9 + text_len]).ok()
+    Some(&data[4..4 + len])
 }
 
-fn read_unit_record(data: &[u8], offset: usize) -> Option<Unit> {
-    if offset + 4 > data.len() {
+/// Single-pass event text extraction — no allocation of RawEvent.
+fn read_event_text_at(data: &[u8]) -> Option<&str> {
+    let rec = read_record_at(data)?;
+    if rec.len() < MIN_EVENT_RECORD {
         return None;
     }
-    let len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-    let rec_start = offset + 4;
-    if rec_start + len > data.len() {
-        return None;
-    }
-    decode_unit(&data[rec_start..rec_start + len])
+    std::str::from_utf8(&rec[9..]).ok()
 }
 
-fn count_records(data: &[u8], min_record_bytes: usize) -> usize {
-    let mut count = 0;
-    let mut pos = 0;
-    while pos + 4 <= data.len() {
-        let len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
-        let rec_start = pos + 4;
-        if rec_start + len > data.len() || len < min_record_bytes {
-            break;
-        }
-        count += 1;
-        pos = rec_start + len;
-    }
-    count
-}
-
-fn iter_units_seg(seg: u64, data: &[u8]) -> impl Iterator<Item = (UnitId, Unit)> + '_ {
-    let mut pos = 0;
+fn iter_units_region(base_id: u64, data: &[u8]) -> impl Iterator<Item = (UnitId, Unit)> + '_ {
+    let mut pos = 0usize;
     std::iter::from_fn(move || {
         if pos + 4 > data.len() {
             return None;
@@ -620,27 +1007,10 @@ fn iter_units_seg(seg: u64, data: &[u8]) -> impl Iterator<Item = (UnitId, Unit)>
             return None;
         }
         let unit = decode_unit(&data[rec_start..rec_start + len])?;
-        let id = seg << 32 | pos as u64;
+        let id = base_id + pos as u64;
         pos = rec_start + len;
         Some((id, unit))
     })
-}
-
-fn index_events_from_seg(index: &mut HashMap<u128, EventId>, data: &[u8], seg_num: u32) {
-    let seg = seg_num as u64;
-    let mut pos = 0;
-    while pos + 4 <= data.len() {
-        let len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
-        let rec_start = pos + 4;
-        if rec_start + len > data.len() {
-            break;
-        }
-        let id = seg << 32 | pos as u64;
-        let rec = &data[rec_start..rec_start + len];
-        let hash = content_hash_128(rec);
-        index.entry(hash).or_insert(id);
-        pos = rec_start + len;
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -651,7 +1021,7 @@ fn index_events_from_seg(index: &mut HashMap<u128, EventId>, data: &[u8], seg_nu
 mod tests {
     use super::*;
 
-    // --- FIX 2/3: lossless encode/decode ---
+    // --- lossless encode/decode ---
 
     #[test]
     fn event_encode_decode_roundtrip() {
@@ -669,7 +1039,6 @@ mod tests {
 
     #[test]
     fn event_encode_decode_preserves_time_of_day() {
-        // FIX 2: time-of-day must survive round-trip exactly.
         for ts in [0i64, 1_700_000_123, -86400, i64::MAX / 2] {
             let ev = RawEvent {
                 source: Source::Text,
@@ -684,7 +1053,6 @@ mod tests {
 
     #[test]
     fn event_long_text_no_panic() {
-        // FIX 3: text > 64 KB must not panic.
         let long = "A".repeat(200_000);
         let ev = RawEvent {
             source: Source::Voice,
@@ -772,32 +1140,42 @@ mod tests {
         assert_eq!(encoded.len(), 16);
     }
 
-    // --- T2: append-only log ---
+    // --- append-only log ---
+
+    fn ev(ts: i64, text: &str) -> RawEvent {
+        RawEvent {
+            source: Source::Text,
+            created_utc_secs: ts,
+            text: text.into(),
+        }
+    }
 
     #[test]
     fn append_and_read_event() {
         let dir = temp_dir("append_read_event");
         let mut store = Store::open(&dir).unwrap();
-        let ev = RawEvent {
-            source: Source::Text,
-            created_utc_secs: 1_700_000_000,
-            text: "Hello, world!".into(),
-        };
-        let id = store.append_event(&ev).unwrap();
+        let id = store
+            .append_event(&ev(1_700_000_000, "Hello, world!"))
+            .unwrap();
         store.sync().unwrap();
         assert_eq!(store.event_text(id).unwrap(), "Hello, world!");
+    }
+
+    #[test]
+    fn read_works_before_sync() {
+        let dir = temp_dir("read_before_sync");
+        let mut store = Store::open(&dir).unwrap();
+        let id = store.append_event(&ev(1, "unsynced")).unwrap();
+        assert_eq!(store.event_text(id).unwrap(), "unsynced");
     }
 
     #[test]
     fn append_and_read_unit() {
         let dir = temp_dir("append_read_unit");
         let mut store = Store::open(&dir).unwrap();
-        let ev = RawEvent {
-            source: Source::Text,
-            created_utc_secs: 1_700_000_000,
-            text: "Hello, world!".into(),
-        };
-        let event_id = store.append_event(&ev).unwrap();
+        let event_id = store
+            .append_event(&ev(1_700_000_000, "Hello, world!"))
+            .unwrap();
         store.sync().unwrap();
         let u = Unit {
             event: event_id,
@@ -815,12 +1193,9 @@ mod tests {
         let event_id;
         {
             let mut store = Store::open(&dir).unwrap();
-            let ev = RawEvent {
-                source: Source::Text,
-                created_utc_secs: 1_700_000_000,
-                text: "Persistent!".into(),
-            };
-            event_id = store.append_event(&ev).unwrap();
+            event_id = store
+                .append_event(&ev(1_700_000_000, "Persistent!"))
+                .unwrap();
             store.sync().unwrap();
         }
         {
@@ -835,26 +1210,14 @@ mod tests {
         let id1;
         {
             let mut store = Store::open(&dir).unwrap();
-            id1 = store
-                .append_event(&RawEvent {
-                    source: Source::Text,
-                    created_utc_secs: 86400,
-                    text: "First".into(),
-                })
-                .unwrap();
+            id1 = store.append_event(&ev(86400, "First")).unwrap();
             store.sync().unwrap();
         }
         let id2;
         {
             let mut store = Store::open(&dir).unwrap();
             assert_eq!(store.event_text(id1).unwrap(), "First");
-            id2 = store
-                .append_event(&RawEvent {
-                    source: Source::Text,
-                    created_utc_secs: 2 * 86400,
-                    text: "Second".into(),
-                })
-                .unwrap();
+            id2 = store.append_event(&ev(2 * 86400, "Second")).unwrap();
             store.sync().unwrap();
         }
         {
@@ -865,40 +1228,249 @@ mod tests {
     }
 
     #[test]
+    fn reopen_continues_same_segment_until_target() {
+        let dir = temp_dir("reopen_same_segment");
+        let id1;
+        {
+            let mut store = Store::open(&dir).unwrap();
+            id1 = store.append_event(&ev(1, "one")).unwrap();
+            store.sync().unwrap();
+        }
+        {
+            let mut store = Store::open(&dir).unwrap();
+            let id2 = store.append_event(&ev(2, "two")).unwrap();
+            store.sync().unwrap();
+            // Same segment (high 32 bits), later offset — no per-open segment churn.
+            assert_eq!(id1 >> 32, id2 >> 32, "reopen must continue the segment");
+            assert!(id2 > id1);
+        }
+        // Exactly one event segment file exists.
+        let segs = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".seg"))
+            .count();
+        assert_eq!(segs, 1);
+    }
+
+    #[test]
     fn event_count_tracks() {
         let dir = temp_dir("event_count");
         let mut store = Store::open(&dir).unwrap();
         assert_eq!(store.event_count(), 0);
-        store
-            .append_event(&RawEvent {
-                source: Source::Text,
-                created_utc_secs: 86400,
-                text: "A".into(),
-            })
-            .unwrap();
-        store
-            .append_event(&RawEvent {
-                source: Source::Text,
-                created_utc_secs: 2 * 86400,
-                text: "B".into(),
-            })
-            .unwrap();
+        store.append_event(&ev(86400, "A")).unwrap();
+        store.append_event(&ev(2 * 86400, "B")).unwrap();
         assert_eq!(store.event_count(), 2);
     }
 
-    // --- T3: dedup ---
+    // --- rotation ---
+
+    fn tiny_opts() -> StoreOptions {
+        StoreOptions {
+            segment_target_bytes: 256,
+        }
+    }
+
+    #[test]
+    fn rotation_creates_segments_and_ids_stay_readable() {
+        let dir = temp_dir("rotation_basic");
+        let mut store = Store::open_with(&dir, tiny_opts()).unwrap();
+        let mut ids = Vec::new();
+        for i in 0..50 {
+            ids.push(
+                store
+                    .append_event(&ev(i, &format!("event number {i} with some padding text")))
+                    .unwrap(),
+            );
+        }
+        store.sync().unwrap();
+        let max_seg = ids.iter().map(|id| id >> 32).max().unwrap();
+        assert!(max_seg >= 2, "expected multiple segments, got {max_seg}");
+        for (i, id) in ids.iter().enumerate() {
+            assert!(store
+                .event_text(*id)
+                .unwrap()
+                .contains(&format!("number {i} ")));
+        }
+        // And across a reopen.
+        let store = Store::open_with(&dir, tiny_opts()).unwrap();
+        for (i, id) in ids.iter().enumerate() {
+            assert!(store
+                .event_text(*id)
+                .unwrap()
+                .contains(&format!("number {i} ")));
+        }
+        assert_eq!(store.event_count(), 50);
+    }
+
+    #[test]
+    fn dedup_works_across_rotation_and_reopen() {
+        let dir = temp_dir("dedup_rotation");
+        let first_id;
+        {
+            let mut store = Store::open_with(&dir, tiny_opts()).unwrap();
+            first_id = store
+                .append_event(&ev(7, "the original event, long enough to matter"))
+                .unwrap();
+            for i in 0..50 {
+                store
+                    .append_event(&ev(1000 + i, &format!("filler event {i} aaaaaaaaaaaaaaaa")))
+                    .unwrap();
+            }
+            // Original is now in a rotated-away segment, covered by a run.
+            let dup = store
+                .append_event(&ev(7, "the original event, long enough to matter"))
+                .unwrap();
+            assert_eq!(dup, first_id, "dedup must hit the persisted run");
+            store.sync().unwrap();
+        }
+        {
+            let mut store = Store::open_with(&dir, tiny_opts()).unwrap();
+            let dup = store
+                .append_event(&ev(7, "the original event, long enough to matter"))
+                .unwrap();
+            assert_eq!(dup, first_id, "dedup must survive reopen via runs");
+        }
+    }
+
+    #[test]
+    fn dedup_falls_back_to_rebuild_when_runs_deleted() {
+        let dir = temp_dir("dedup_runs_deleted");
+        let first_id;
+        {
+            let mut store = Store::open_with(&dir, tiny_opts()).unwrap();
+            first_id = store
+                .append_event(&ev(7, "needle event with enough text to rotate"))
+                .unwrap();
+            for i in 0..50 {
+                store
+                    .append_event(&ev(1000 + i, &format!("filler event {i} bbbbbbbbbbbbbbbb")))
+                    .unwrap();
+            }
+            store.sync().unwrap();
+        }
+        // Sabotage: delete every dedup run.
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            if entry.file_name().to_string_lossy().ends_with(".run") {
+                std::fs::remove_file(entry.path()).unwrap();
+            }
+        }
+        let mut store = Store::open_with(&dir, tiny_opts()).unwrap();
+        let dup = store
+            .append_event(&ev(7, "needle event with enough text to rotate"))
+            .unwrap();
+        assert_eq!(dup, first_id, "full-rebuild fallback must still dedup");
+        assert_eq!(store.event_count(), 51);
+    }
+
+    #[test]
+    fn runs_get_compacted() {
+        let dir = temp_dir("run_compaction");
+        let mut store = Store::open_with(&dir, tiny_opts()).unwrap();
+        // Enough rotations to exceed MAX_DEDUP_RUNS and trigger compaction.
+        for i in 0..400 {
+            store
+                .append_event(&ev(i, &format!("event {i} cccccccccccccccccccccccc")))
+                .unwrap();
+        }
+        store.sync().unwrap();
+        let runs = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".run"))
+            .count();
+        assert!(
+            runs <= MAX_DEDUP_RUNS,
+            "compaction should bound run count, got {runs}"
+        );
+        // Dedup still resolves an early event.
+        let dup = store
+            .append_event(&ev(0, "event 0 cccccccccccccccccccccccc"))
+            .unwrap();
+        assert_eq!(dup >> 32, 0, "event 0 lives in segment 0");
+        assert_eq!(store.event_count(), 400);
+    }
+
+    // --- crash recovery ---
+
+    #[test]
+    fn torn_event_tail_is_recovered() {
+        let dir = temp_dir("torn_event_tail");
+        let (id1, id2);
+        {
+            let mut store = Store::open(&dir).unwrap();
+            id1 = store.append_event(&ev(1, "alpha")).unwrap();
+            id2 = store.append_event(&ev(2, "beta")).unwrap();
+            store.sync().unwrap();
+        }
+        // Simulate a crash mid-append: a length prefix promising more bytes
+        // than exist, plus some garbage.
+        {
+            use std::io::Write;
+            let path = dir.join("events-000.seg");
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(&999u32.to_le_bytes()).unwrap();
+            f.write_all(b"torn").unwrap();
+        }
+        let mut store = Store::open(&dir).unwrap();
+        assert!(store.recovered_truncated_bytes() > 0);
+        assert_eq!(store.event_text(id1).unwrap(), "alpha");
+        assert_eq!(store.event_text(id2).unwrap(), "beta");
+        assert_eq!(store.event_count(), 2);
+        // Appending after recovery lands cleanly where the garbage was.
+        let id3 = store.append_event(&ev(3, "gamma")).unwrap();
+        store.sync().unwrap();
+        assert_eq!(store.event_text(id3).unwrap(), "gamma");
+        let store = Store::open(&dir).unwrap();
+        assert_eq!(store.event_text(id3).unwrap(), "gamma");
+        assert_eq!(store.event_count(), 3);
+    }
+
+    #[test]
+    fn torn_unit_tail_is_recovered() {
+        let dir = temp_dir("torn_unit_tail");
+        let unit_id;
+        {
+            let mut store = Store::open(&dir).unwrap();
+            let event_id = store.append_event(&ev(1, "Hello there.")).unwrap();
+            unit_id = store
+                .append_unit(&Unit {
+                    event: event_id,
+                    byte_start: 0,
+                    byte_end: 5,
+                })
+                .unwrap();
+            store.sync().unwrap();
+        }
+        {
+            use std::io::Write;
+            let path = dir.join("units-000.idx");
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            f.write_all(&16u32.to_le_bytes()).unwrap();
+            f.write_all(b"short").unwrap(); // promised 16, delivered 5
+        }
+        let store = Store::open(&dir).unwrap();
+        assert!(store.recovered_truncated_bytes() > 0);
+        assert_eq!(store.unit_text(unit_id).unwrap(), "Hello");
+        assert_eq!(store.unit_count(), 1);
+        assert_eq!(store.units().count(), 1);
+    }
+
+    // --- dedup basics ---
 
     #[test]
     fn dedup_same_event_returns_same_id() {
         let dir = temp_dir("dedup");
         let mut store = Store::open(&dir).unwrap();
-        let ev = RawEvent {
-            source: Source::Text,
-            created_utc_secs: 1_700_000_000,
-            text: "Duplicate me".into(),
-        };
-        let id1 = store.append_event(&ev).unwrap();
-        let id2 = store.append_event(&ev).unwrap();
+        let e = ev(1_700_000_000, "Duplicate me");
+        let id1 = store.append_event(&e).unwrap();
+        let id2 = store.append_event(&e).unwrap();
         assert_eq!(id1, id2);
         assert_eq!(store.event_count(), 1);
     }
@@ -916,7 +1488,7 @@ mod tests {
         assert_ne!(h, 0);
     }
 
-    // --- T4: derive_units ---
+    // --- derive_units ---
 
     #[test]
     fn sentence_split_simple() {
@@ -975,20 +1547,14 @@ mod tests {
         );
     }
 
-    // --- T5: provenance ---
+    // --- provenance ---
 
     #[test]
     fn provenance_roundtrip_100_percent() {
         let dir = temp_dir("provenance");
         let mut store = Store::open(&dir).unwrap();
         let text = "First sentence. Second one! Third? End.";
-        let event_id = store
-            .append_event(&RawEvent {
-                source: Source::Text,
-                created_utc_secs: 86400,
-                text: text.into(),
-            })
-            .unwrap();
+        let event_id = store.append_event(&ev(86400, text)).unwrap();
         store.sync().unwrap();
         let units = derive_units(event_id, text);
         for u in &units {
@@ -1019,13 +1585,7 @@ mod tests {
     fn unit_bad_span_fails() {
         let dir = temp_dir("bad_unit_span");
         let mut store = Store::open(&dir).unwrap();
-        let event_id = store
-            .append_event(&RawEvent {
-                source: Source::Text,
-                created_utc_secs: 86400,
-                text: "Hi".into(),
-            })
-            .unwrap();
+        let event_id = store.append_event(&ev(86400, "Hi")).unwrap();
         store.sync().unwrap();
         assert!(store
             .append_unit(&Unit {
@@ -1043,20 +1603,14 @@ mod tests {
             .is_err());
     }
 
-    // --- T6: unit iter ---
+    // --- unit iter & counts ---
 
     #[test]
     fn unit_iter_produces_all_units() {
         let dir = temp_dir("unit_iter");
         let mut store = Store::open(&dir).unwrap();
         let text = "A. B. C.";
-        let event_id = store
-            .append_event(&RawEvent {
-                source: Source::Text,
-                created_utc_secs: 86400,
-                text: text.into(),
-            })
-            .unwrap();
+        let event_id = store.append_event(&ev(86400, text)).unwrap();
         store.sync().unwrap();
         let derived = derive_units(event_id, text);
         for u in &derived {
@@ -1067,18 +1621,11 @@ mod tests {
         assert_eq!(collected.len(), derived.len());
     }
 
-    /// FIX 6: unit_count must match units().count() even before sync.
     #[test]
     fn unit_count_matches_units_even_before_sync() {
         let dir = temp_dir("unit_count_pending");
         let mut store = Store::open(&dir).unwrap();
-        let event_id = store
-            .append_event(&RawEvent {
-                source: Source::Text,
-                created_utc_secs: 86400,
-                text: "A. B.".into(),
-            })
-            .unwrap();
+        let event_id = store.append_event(&ev(86400, "A. B.")).unwrap();
         store.sync().unwrap();
         let derived = derive_units(event_id, "A. B.");
         for u in &derived {
@@ -1092,7 +1639,42 @@ mod tests {
         );
     }
 
-    // --- Golden: overhead ---
+    #[test]
+    fn unit_count_survives_reopen_with_and_without_meta() {
+        let dir = temp_dir("unit_count_reopen");
+        {
+            let mut store = Store::open_with(&dir, tiny_opts()).unwrap();
+            let event_id = store
+                .append_event(&ev(1, "Some text. More text. Even more."))
+                .unwrap();
+            for u in derive_units(event_id, "Some text. More text. Even more.") {
+                store.append_unit(&u).unwrap();
+            }
+            // Many units to force unit-segment rotation (meta gets written).
+            for i in 0..100 {
+                store
+                    .append_unit(&Unit {
+                        event: event_id,
+                        byte_start: 0,
+                        byte_end: 4 + (i % 3),
+                    })
+                    .unwrap();
+            }
+            store.sync().unwrap();
+            assert_eq!(store.unit_count(), 103);
+        }
+        {
+            let store = Store::open_with(&dir, tiny_opts()).unwrap();
+            assert_eq!(store.unit_count(), 103, "count via meta + tail scan");
+            assert_eq!(store.units().count(), 103);
+        }
+        // Without meta: full-scan fallback must agree.
+        std::fs::remove_file(dir.join(COUNTS_META_FILE)).unwrap();
+        let store = Store::open_with(&dir, tiny_opts()).unwrap();
+        assert_eq!(store.unit_count(), 103, "full-scan fallback");
+    }
+
+    // --- overhead & determinism ---
 
     #[test]
     fn storage_overhead_within_budget() {
@@ -1108,11 +1690,7 @@ mod tests {
         for t in &texts {
             total_raw += t.len() as u64;
             store
-                .append_event(&RawEvent {
-                    source: Source::Text,
-                    created_utc_secs: 1_700_000_000 + (total_raw as i64),
-                    text: t.clone(),
-                })
+                .append_event(&ev(1_700_000_000 + total_raw as i64, t))
                 .unwrap();
         }
         store.sync().unwrap();
@@ -1126,8 +1704,6 @@ mod tests {
         );
     }
 
-    // --- FIX 4: byte-level determinism ---
-
     #[test]
     fn deterministic_store_files_byte_identical() {
         fn store_bytes(dir_name: &str) -> Vec<(String, Vec<u8>)> {
@@ -1135,13 +1711,7 @@ mod tests {
             let mut store = Store::open(&dir).unwrap();
             let texts = ["Alpha. Beta.", "Gamma. Delta.", "Epsilon."];
             for t in &texts {
-                store
-                    .append_event(&RawEvent {
-                        source: Source::Text,
-                        created_utc_secs: 1_700_000_000,
-                        text: t.to_string(),
-                    })
-                    .unwrap();
+                store.append_event(&ev(1_700_000_000, t)).unwrap();
             }
             store.sync().unwrap();
             let mut files = Vec::new();
@@ -1149,7 +1719,7 @@ mod tests {
                 let e = entry.unwrap();
                 let path = e.path();
                 let name = path.file_name().unwrap().to_string_lossy().to_string();
-                if name.ends_with(".seg") || name.ends_with(".idx") {
+                if name.ends_with(".seg") || name.ends_with(".idx") || name.ends_with(".run") {
                     files.push((name, std::fs::read(&path).unwrap()));
                 }
             }
@@ -1158,7 +1728,26 @@ mod tests {
         }
         let a = store_bytes("det_byte_a");
         let b = store_bytes("det_byte_b");
-        assert_eq!(a, b, "segment file bytes must be identical");
+        assert_eq!(a, b, "store file bytes must be identical");
+    }
+
+    #[test]
+    fn validated_prefix_handles_edge_cases() {
+        // Empty, short, exact record, torn length, torn payload, tiny record.
+        assert_eq!(validated_prefix_len(&[], 9), 0);
+        assert_eq!(validated_prefix_len(&[1, 0], 9), 0);
+        let mut good = Vec::new();
+        good.extend_from_slice(&10u32.to_le_bytes());
+        good.extend_from_slice(&[7u8; 10]);
+        assert_eq!(validated_prefix_len(&good, 9), 14);
+        let mut torn = good.clone();
+        torn.extend_from_slice(&100u32.to_le_bytes());
+        torn.extend_from_slice(&[1u8; 5]);
+        assert_eq!(validated_prefix_len(&torn, 9), 14);
+        let mut tiny = good.clone();
+        tiny.extend_from_slice(&3u32.to_le_bytes()); // < min record size
+        tiny.extend_from_slice(&[1u8; 3]);
+        assert_eq!(validated_prefix_len(&tiny, 9), 14);
     }
 
     fn temp_dir(name: &str) -> PathBuf {

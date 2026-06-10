@@ -48,6 +48,9 @@ decisions pre-made and isolated as frontier-only tickets):
 - [`STAGE_2.md`](STAGE_2.md) — storage substrate: append-only L0 log +
   content-addressed unit store (pure Rust, mmap). The Lance-vs-`.kx` call is a
   deferred design ticket; the delegatable slice produces the data for it.
+- [`STAGE_2B.md`](STAGE_2B.md) — **done**: store durability (size-based
+  rotation, write-through + fsync, torn-tail recovery, persistent dedup runs,
+  O(one-segment) reopen). Documents the locked design and the extended gate.
 - [`STAGE_4.md`](STAGE_4.md) — "sleep" scheduler: interruptible, resumable,
   signal-gated background jobs, proven in a deterministic simulator (jobs are
   stubs here; real ones come from Stage 3/5).

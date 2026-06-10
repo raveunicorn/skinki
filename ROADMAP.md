@@ -17,7 +17,7 @@ layered design and budgets.
 | --- | --- | --- |
 | 0 | Eval harness + synthetic corpus (the measuring stick) | **Done** |
 | 1 | Memory compression PoC (RaBitQ + Model2Vec, two-stage, mmap) | **Done** (re-validated at scale; flat-scan limit mapped) |
-| 2 | Storage substrate (Lance/Cozo) + append-only L0; maybe a `.kx` codec | **Done** |
+| 2 | Storage substrate (Lance/Cozo) + append-only L0; maybe a `.kx` codec | **Done** (+ 2B durability) |
 | 3 | Incremental local GraphRAG (LightRAG + HippoRAG 2 PPR + RAPTOR) | Next |
 | 4 | "Sleep" consolidation engine (idle + on-power background jobs) | Planned |
 | 5 | Insight Engine (deterministic discovery + FDR + cite-or-silence) | Planned |
@@ -87,6 +87,12 @@ layered design and budgets.
 - **Invent? No.** The pure-Rust substrate clears all budgets, so D1 (Lance/Cozo
   vs pure-Rust) resolves to *keep pure Rust*. D2 (`.kx` codec) stays deferred —
   no budget broke. All existing `cargo test`/clippy/fmt gates green.
+- **2B — durability (done, gate extended).** Size-based segment rotation
+  (64 MiB) + write-through appends with fsync on `sync()`, torn-tail crash
+  recovery, and a persisted sorted-run dedup index → reopen scans at most one
+  segment tail instead of the whole history. New budgets met: durable ingest
+  (fsync per event) ~240 events/s (budget ≥ 100); cold reopen 80 ms at ~894k
+  units (budget < 1 s). See [`kortex/specs/STAGE_2B.md`](kortex/specs/STAGE_2B.md).
 
 ## Stage 3 — Graph & retrieval quality
 
