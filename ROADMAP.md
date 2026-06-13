@@ -19,7 +19,7 @@ layered design and budgets.
 | 1 | Memory compression PoC (RaBitQ + Model2Vec, two-stage, mmap) | **Done** (re-validated at scale; flat-scan limit mapped) |
 | 2 | Storage substrate (Lance/Cozo) + append-only L0; maybe a `.kx` codec | **Done** (+ 2B durability) |
 | 3 | Incremental local GraphRAG (LightRAG + HippoRAG 2 PPR + RAPTOR) | Next |
-| 4 | "Sleep" consolidation engine (idle + on-power background jobs) | Planned |
+| 4 | "Sleep" consolidation engine (idle + on-power background jobs) | **Done** (policy proven in simulation; real jobs land at Stage 3/5) |
 | 5 | Insight Engine (deterministic discovery + FDR + cite-or-silence) | Planned |
 | 6 | Portable `kortex` crate (C-ABI/FFI + CLI, Swift/Python bindings) | Planned |
 | 7 | Skinki macOS product integration (the wrapper) | Planned |
@@ -127,6 +127,14 @@ layered design and budgets.
 - **Tests:** scheduler on macOS power/thermal/idle signals; incremental Leiden;
   resumable queue; latency during/after; drain over a simulated week.
 - **Gate:** zero perceptible realtime impact + within the battery budget.
+- **Result (policy, simulated):** `kortex-sleep` ships the scheduler — priority
+  queue, signal-gated `tick` (runs iff power ∧ idle ∧ thermal), crash-safe
+  checkpoint/restore, and a deterministic week-long simulator. `sleep-sim
+  --assert-gate` passes all six metrics; a locked golden-trace hash pins the
+  policy byte-for-byte and `resume_is_lossless` proves a mid-run crash resumes
+  draining the identical backlog with nothing lost. The real consolidation jobs
+  (Leiden / RAPTOR / PPR) plug in as `Job`s at Stage 3/5; on-hardware battery
+  draw is measured at Stage 7. (PR #1)
 
 ## Stage 5 — Insight Engine (keystone, anti-hallucination)
 

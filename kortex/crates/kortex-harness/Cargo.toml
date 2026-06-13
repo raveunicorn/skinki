@@ -20,3 +20,4 @@ kortex-telemetry.workspace = true
 kortex-baseline.workspace = true
 kortex-vector.workspace = true
 kortex-store.workspace = true
+kortex-sleep.workspace = true

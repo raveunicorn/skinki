@@ -155,9 +155,19 @@ dependencies = [
  "kortex-baseline",
  "kortex-corpus",
  "kortex-eval",
+ "kortex-sleep",
  "kortex-store",
  "kortex-telemetry",
  "kortex-vector",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kortex-sleep"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "serde",
  "serde_json",
 ]

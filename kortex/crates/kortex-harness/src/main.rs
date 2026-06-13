@@ -28,6 +28,7 @@ use kortex_vector::quant::{RaBitQ, RaBitQBuilder};
 use kortex_vector::search::{ivf_two_stage_search, recall as recall_overlap, two_stage_search};
 use kortex_vector::store::{available_disk_bytes, FloatMmapStore};
 
+use kortex_sleep::{check_gate, run_sim, SimConfig, SimResult, StubJob};
 use kortex_vector::{dot, VectorSet};
 
 #[derive(Parser)]
@@ -183,6 +184,17 @@ enum Cmd {
         /// IVF list count; 0 = auto heuristic (see `IvfBuilder::train`).
         #[arg(long, default_value_t = 0)]
         nlist: usize,
+    },
+    /// Stage 4: simulate the sleep consolidation scheduler over a scripted
+    /// timeline with stub jobs, verifying all six gate metrics.
+    SleepSim {
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long)]
+        report_out: Option<PathBuf>,
+        /// Exit non-zero if any gate metric fails (for CI).
+        #[arg(long, default_value_t = false)]
+        assert_gate: bool,
     },
 }
 
@@ -555,6 +567,28 @@ fn main() -> Result<()> {
                         budgets.p95_ms,
                         budgets.idle_ram_mb_at_5m
                     );
+                }
+            }
+        }
+        Cmd::SleepSim {
+            seed,
+            report_out,
+            assert_gate,
+        } => {
+            let result = run_sleep_sim(seed)?;
+            print_sleep_sim(&result);
+            if let Some(path) = report_out {
+                let file = std::fs::File::create(&path)
+                    .with_context(|| format!("creating {}", path.display()))?;
+                serde_json::to_writer_pretty(file, &result).context("writing report")?;
+                println!("Report written to {}", path.display());
+            }
+            if assert_gate {
+                let verdict = check_gate(&result);
+                if verdict.passed {
+                    println!("\nGATE: PASS (sleep-sim --assert-gate satisfied)");
+                } else {
+                    anyhow::bail!("Stage 4 gate FAILED: {}", verdict.failures.join("; "));
                 }
             }
         }
@@ -1489,4 +1523,161 @@ fn print_ground_truth_summary(corpus: &Corpus) {
         gt.insights.len(),
         gt.entities.len(),
     );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 4 — sleep consolidation simulation
+// ---------------------------------------------------------------------------
+
+/// Simple deterministic SplitMix64 PRNG — same constants as kortex-corpus.
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+fn run_sleep_sim(seed: u64) -> anyhow::Result<SimResult> {
+    use kortex_sleep::TimelineSegment;
+
+    let mut rng = seed;
+
+    // Build a scripted week timeline from the seed — deterministic pattern
+    // of alternating active and blocked windows.
+    let mut timeline: Vec<TimelineSegment> = Vec::new();
+    let mut tick = 1u64;
+    // A week of day cycles. Window sizes are chosen so a realistic backlog
+    // spans several days: the policy must pause through every mid-day blocked
+    // window and resume at night, so the headline gate exercises all six
+    // metrics — not just draining inside the first active window.
+    for _day in 0..7u64 {
+        // Morning: active (on power, user idle).
+        let dur = 400;
+        timeline.push(TimelineSegment {
+            tick_start: tick,
+            tick_end: tick + dur - 1,
+            on_power: true,
+            user_idle: true,
+            thermal_ok: true,
+        });
+        tick += dur;
+
+        // Mid-day: blocked (user active, on battery or throttling).
+        let dur = 300;
+        timeline.push(TimelineSegment {
+            tick_start: tick,
+            tick_end: tick + dur - 1,
+            on_power: false,
+            user_idle: false,
+            thermal_ok: false,
+        });
+        tick += dur;
+
+        // Night: active again (longer idle window).
+        let dur = 800;
+        timeline.push(TimelineSegment {
+            tick_start: tick,
+            tick_end: tick + dur - 1,
+            on_power: true,
+            user_idle: true,
+            thermal_ok: true,
+        });
+        tick += dur;
+    }
+    // Final drain window
+    timeline.push(TimelineSegment {
+        tick_start: tick,
+        tick_end: tick + 100000,
+        on_power: true,
+        user_idle: true,
+        thermal_ok: true,
+    });
+
+    // A backlog large enough to span multiple days of active windows, so the
+    // policy is forced to stop at every blocked window and resume afterwards.
+    let num_jobs = 15 + (splitmix64(&mut rng) % 11) as usize; // 15-25 jobs
+    let mut jobs: Vec<StubJob> = Vec::new();
+    for i in 0..num_jobs {
+        let priority = (splitmix64(&mut rng) % 10) as u8 + 1; // 1-10
+        let total_work = 2000 + splitmix64(&mut rng) % 3001; // 2000-5000
+        let items_per_step = 15 + splitmix64(&mut rng) % 11; // 15-25
+        jobs.push(StubJob::new(
+            format!("sim_job_{i}"),
+            priority,
+            total_work,
+            items_per_step,
+        ));
+    }
+
+    Ok(run_sim(SimConfig { timeline, jobs }))
+}
+
+fn print_sleep_sim(result: &SimResult) {
+    println!("\n=== Kortex Stage 4 — Sleep Simulation ===");
+    println!("total work         : {} items", result.total_work);
+    println!(
+        "completed          : {} ({:.1}%)",
+        result.completed_work,
+        result.completed_work as f64 / result.total_work.max(1) as f64 * 100.0
+    );
+    println!("work during blocked: {}", result.work_during_blocked);
+    println!("total ticks        : {}", result.total_ticks);
+
+    let ran_ticks = result.trace.iter().filter(|e| e.action == "ran").count();
+    let blocked_ticks = result
+        .trace
+        .iter()
+        .filter(|e| e.action == "blocked")
+        .count();
+    let drained_at = result
+        .trace
+        .iter()
+        .find(|e| e.action == "drained")
+        .map(|e| e.tick);
+    println!(
+        "trace              : {ran_ticks} ran, {blocked_ticks} blocked, drained at tick {:?}",
+        drained_at
+    );
+
+    // Print the first and last few trace entries for inspection.
+    println!();
+    println!(
+        "{:<8} {:<8} {:<10} {:>10} {:>10}",
+        "tick", "action", "job", "work_done", "pending"
+    );
+    for entry in result.trace.iter().take(5) {
+        println!(
+            "{:<8} {:<8} {:<10} {:>10} {:>10}",
+            entry.tick,
+            entry.action,
+            entry.job_id.as_deref().unwrap_or("-"),
+            entry.work_done.map(|w| w.to_string()).unwrap_or_default(),
+            entry.pending,
+        );
+    }
+    if result.trace.len() > 10 {
+        println!("  ...  ");
+    }
+    for entry in result.trace.iter().rev().take(5).rev() {
+        println!(
+            "{:<8} {:<8} {:<10} {:>10} {:>10}",
+            entry.tick,
+            entry.action,
+            entry.job_id.as_deref().unwrap_or("-"),
+            entry.work_done.map(|w| w.to_string()).unwrap_or_default(),
+            entry.pending,
+        );
+    }
+
+    // Gate summary
+    let verdict = check_gate(result);
+    if verdict.passed {
+        println!("\nGATE CHECK: PASS — all six metrics satisfied.");
+    } else {
+        println!("\nGATE CHECK: FAIL");
+        for f in &verdict.failures {
+            println!("  - {f}");
+        }
+    }
 }
