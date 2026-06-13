@@ -512,6 +512,30 @@ impl IvfRaBitQ {
             + self.offsets.len() * 4
     }
 
+    /// Resident bytes **per indexed vector** — the part of [`resident_bytes`]
+    /// that scales linearly with `n`: the 1-bit code plus its per-slot ranking
+    /// factor (4 B), popcount (4 B), and original-id (4 B). N-independent.
+    pub fn per_vec_resident_bytes(&self) -> usize {
+        self.encoder.bytes_per_vec() + 4 + 4 + 4
+    }
+
+    /// Honest projection of resident RAM to a target corpus size `n_target`.
+    ///
+    /// Projecting the *measured* total linearly (`total * n_target / n`) is
+    /// correct for the flat index — every byte there scales with `n` — but
+    /// **over-counts IVF at scale**: the per-slot arrays scale with `n`, yet the
+    /// centroid table and CSR offsets scale with `nlist ~ sqrt(n)`. Measured at
+    /// a small `n` the centroid table dominates (tens of B/vec), so a linear
+    /// projection invents RAM that the sqrt-growth never spends. This splits the
+    /// two terms: linear per-vector cost, plus the centroid/offset cost at the
+    /// `nlist` [`auto_nlist`] would pick for `n_target`.
+    pub fn resident_bytes_at(&self, n_target: usize) -> usize {
+        let nlist_target = auto_nlist(n_target, n_target);
+        self.per_vec_resident_bytes() * n_target
+            + nlist_target * self.dim * 4 // centroids
+            + (nlist_target + 1) * 4 // CSR offsets
+    }
+
     /// Coarse shortlist of original vector ids, best-first, scanning only the
     /// `nprobe` lists whose centroids best match `query`.
     ///
@@ -788,6 +812,35 @@ mod tests {
         assert!(
             r_partial >= 0.85,
             "nprobe={nprobe} recall too low: {r_partial}"
+        );
+    }
+
+    #[test]
+    fn resident_projection_is_sublinear_in_centroids() {
+        // Two indexes over the same per-vector cost but different n: the honest
+        // 5M projection must NOT scale the (sqrt-growing) centroid table
+        // linearly. A naive `total * 5M/n` from a small index over-counts; the
+        // split projection lands close to the true per-vec-dominated cost.
+        let vs = synthetic_clusters(106, 256, 4000, 16, 0.4);
+        let ivf = build_ivf(&vs, 0, 23); // auto nlist
+
+        let per_vec = ivf.per_vec_resident_bytes();
+        let proj_5m = ivf.resident_bytes_at(5_000_000);
+        let naive_linear = (ivf.resident_bytes() as f64 * 5_000_000.0 / vs.count() as f64) as usize;
+
+        // The honest projection is dominated by the linear per-vec term...
+        assert!(proj_5m >= per_vec * 5_000_000);
+        // ...and the centroid overhead at 5M is small (< 5 B/vec here), so the
+        // honest projection is well under the naive linear blow-up that drags
+        // the small-N centroid table across all 5M vectors.
+        assert!(
+            proj_5m < per_vec * 5_000_000 + 5 * 5_000_000,
+            "centroid overhead at 5M unexpectedly large: {proj_5m} vs {}",
+            per_vec * 5_000_000
+        );
+        assert!(
+            (proj_5m as f64) < 0.5 * naive_linear as f64,
+            "split projection {proj_5m} should be far below naive linear {naive_linear}"
         );
     }
 

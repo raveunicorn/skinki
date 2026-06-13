@@ -50,7 +50,7 @@ L3 sleep consolidation → L4 insight engine → L5 agent/query) is in
 | Stage | Focus | Status |
 | --- | --- | --- |
 | 0 | Eval harness + synthetic corpus (V2) | **Done** |
-| 1 | Memory compression (Matryoshka-256 + two-stage 1-bit RaBitQ → float rerank) | **Done**; flat-scan latency limit at 5M mapped → **IVF in progress** |
+| 1 | Memory compression (Matryoshka-256 + two-stage 1-bit RaBitQ → float rerank; IVF) | **Done**; IVF closes the scan-cost gap (1M mild: recall 1.000 @ p95 2.6 ms), gated |
 | 2 / 2B | Storage substrate + durability (pure Rust, mmap, append-only) | **Done** |
 | 3 | Incremental local GraphRAG (two-tier extraction; see `STAGE_3_BUDGET.md`) | **Next** |
 | 4 | "Sleep" consolidation scheduler | **Done** (policy proven in sim; real jobs plug in at Stage 3/5) |
@@ -58,13 +58,16 @@ L3 sleep consolidation → L4 insight engine → L5 agent/query) is in
 | 6 | Portable `kortex` (C-ABI/FFI + Swift/Python bindings, MCP server) | Spec ready (`STAGE_6.md`) |
 | 7 | Skinki macOS product | Parked |
 
-**In-flight, not yet gated:** the latest commit added an **IVF index** with
-per-list 1-bit RaBitQ residual codes (`kortex-vector/src/ivf.rs`,
-`ivf_two_stage_search`, `--index ivf` in the harness) — the "earned next move"
-from Stage 1 to fix within-cluster discrimination and cut scan cost. It builds
-and has unit tests but is **not yet wired into a CI fitness gate** and the
-roadmap still says Stage 1 ends at the flat-scan verdict. Finishing this
-(scale-bench numbers + a gate) is the natural next concrete task.
+**IVF (Stage 1 close-out, done):** `kortex-vector/src/ivf.rs` adds an **IVF
+index** with per-list 1-bit RaBitQ residual codes (`ivf_two_stage_search`,
+`--index ivf --nprobe ...` in `scale-bench`). Measured win on realistic (mild)
+geometry at 1M: recall@10 1.000 at p95 2.6 ms vs flat's 32.9 ms (~12x scan-cost
+cut), 229 MB projected at 5M. Guarded in CI by a small mild-geometry
+`scale-bench --index ivf --assert-gate` run; the 5M RAM projection is **split**
+(per-vec linear + sqrt(n) centroids via `resident_bytes_at`) so the gate is
+N-independent and fast. IVF does not rescue the synthetic adversarial extreme
+(huge blobs) — that's the documented stress ceiling, deferred to Stage-3
+co-design (multi-bit residuals / OPQ), not a Stage-1 blocker.
 
 ## Hard budgets (worst case ~10 years, ~5M units, M1 Air 8 GB)
 

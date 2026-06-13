@@ -16,7 +16,7 @@ layered design and budgets.
 | Stage | Focus | Status |
 | --- | --- | --- |
 | 0 | Eval harness + synthetic corpus (the measuring stick) | **Done** |
-| 1 | Memory compression PoC (RaBitQ + Model2Vec, two-stage, mmap) | **Done** (re-validated at scale; flat-scan limit mapped) |
+| 1 | Memory compression PoC (RaBitQ + Model2Vec, two-stage, mmap) | **Done** (re-validated at scale; IVF closes the scan-cost gap, gated) |
 | 2 | Storage substrate (Lance/Cozo) + append-only L0; maybe a `.kx` codec | **Done** (+ 2B durability) |
 | 3 | Incremental local GraphRAG (LightRAG + HippoRAG 2 PPR + RAPTOR) | Next |
 | 4 | "Sleep" consolidation engine (idle + on-power background jobs) | **Done** (policy proven in simulation; real jobs land at Stage 3/5) |
@@ -64,13 +64,21 @@ layered design and budgets.
   query < 300 ms. The re-validation surfaced and fixed a real latency bug (a
   full per-query sort of all candidates) and corrected the resident accounting
   to 40 B/vec (was 36).
-- **Invent? Not yet — iterate.** Existing blocks clear the budget except on
-  adversarial geometry at 5M, where 1-bit codes against a *global* centroid
-  can't rank within a dense cluster. The earned next move is **IVF-style
-  partitioning with per-list centroids** (standard RaBitQ deployment): it fixes
-  within-cluster discrimination and cuts scan cost 10-50x — co-designed with
-  Stage 3's index work. Real-EmbeddingGemma validation is the other open
-  follow-up.
+- **Invent? Not yet — iterate, and the iteration landed.** Existing blocks
+  clear the budget except on adversarial geometry at 5M, where 1-bit codes
+  against a *global* centroid can't rank within a dense cluster, and the flat
+  O(n) scan eats ~120 ms of the 150 ms budget at 5M regardless of geometry. The
+  earned next move — **IVF-style partitioning with per-list centroids** (the
+  standard RaBitQ deployment) — is now built (`kortex-vector/src/ivf.rs`) and
+  gated. Measured at 1M on the realistic (mild) geometry it holds **recall@10
+  1.000 at p95 2.6 ms** (vs flat's 32.9 ms — a ~12x scan-cost cut) for ~8 extra
+  B/vec, projecting to 229 MB at 5M (budget 250). A small mild-geometry
+  `scale-bench --index ivf --assert-gate` run guards it in CI; the 5M RAM
+  projection is split (per-vec linear + sqrt(n) centroids) so the verdict is
+  N-independent. IVF does **not** rescue the synthetic adversarial extreme (huge
+  blobs k-means can't sub-partition) — that stays the stress ceiling and a
+  Stage-3 co-design item (multi-bit residuals / OPQ), not a Stage-1 blocker.
+  Real-EmbeddingGemma validation remains the other open follow-up.
 
 ## Stage 2 — Storage substrate (pure-Rust, gate passed) — Done
 

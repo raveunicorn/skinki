@@ -207,6 +207,50 @@ gated on Hugging Face) — same model class (multilingual-capable MRL text
 embedder), so the geometry conclusion should transfer; re-confirm when the
 product embedder is wired in.
 
+### Result, part 4 — IVF closes the scan-cost gap (the earned next move, gated)
+
+Parts 2-3 named the next move: the flat coarse scan is O(n) and eats ~120 ms of
+the 150 ms budget at 5M *regardless of geometry*. `kortex-vector/src/ivf.rs`
+implements it — an inverted-file index that clusters vectors into `nlist` lists
+with their own centroids and quantizes each vector's residual against its
+**list** centroid (not the global one), so the 1-bit codes discriminate
+*within* a cluster. Search ranks the `nlist` centroids exactly, then scans only
+the `nprobe` best lists. Run it with `scale-bench --index ivf --nprobe ...`.
+
+Measured at 1M, dim 256, mild geometry (the realistic regime — part 3 showed
+real embeddings are far milder than the adversarial synthetic):
+
+| index | nprobe | recall@10 | p95 | resident @5M |
+| --- | --- | --- | --- | --- |
+| flat (part 2) | — | 1.000 | 32.9 ms | 190.7 MB |
+| **ivf** | 16 | **1.000** | **2.6 ms** | 229.4 MB |
+| ivf | 64 | 1.000 | 3.4 ms | 229.4 MB |
+
+**IVF cuts p95 ~12x (32.9 → 2.6 ms) at recall 1.000**, well inside the latency
+budget, for ~8 extra B/vec (the per-slot original-id array) — 229 MB projected
+at 5M, still under the 250 MB RAM budget. The O(n) scan is gone.
+
+Two honest caveats, both stated rather than hidden:
+
+1. **The 5M RAM projection is now split, not linear.** IVF's per-slot arrays
+   scale with `n` but the centroid table scales with `nlist ≈ sqrt(n)`, so the
+   old `total × 5M/n` projection over-counted at small N. `resident_bytes_at`
+   projects the two terms separately, making the verdict N-independent — which
+   is what lets the CI gate run on a tiny mild-geometry index yet report the
+   true ~5M RAM.
+2. **IVF does *not* rescue the adversarial extreme.** On a few enormous blobs
+   (e.g. 8 clusters / ~60k points each), k-means can't separate the sub-lists
+   inside a blob and the 1-bit residual shortlist needs a large `refine`, so
+   recall 1.0 still costs a high `nprobe` — IVF is no better than flat there.
+   Part 3 already classed that synthetic case as the stress *ceiling*, not the
+   expectation; the win above is on the realistic geometry. Pushing the extreme
+   further (multi-bit residual codes, OPQ rotation) is a Stage-3 co-design item,
+   not a Stage-1 blocker.
+
+**Verdict: Stage 1 closed.** Flat clears the budget on mild geometry and maps
+its own limit; IVF removes the scan-cost ceiling on the realistic regime at
+recall 1.000 within budget, and both are pinned by `--assert-gate` in CI.
+
 ## Usage
 
 ```bash

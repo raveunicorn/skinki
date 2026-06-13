@@ -56,6 +56,16 @@ jobs:
         run: >
           cargo run --release --locked -p kortex-harness -- compress-bench
           --source synthetic --dim 256 --vectors 4000 --queries 100 --assert-gate
+      # Stage 1 (IVF): the earned next move — per-list 1-bit RaBitQ residual
+      # codes. Same three-part budget (recall ≥ 0.95, p95 ≤ 150ms, resident@5M
+      # ≤ 250MB) on a small mild-geometry index. The 5M RAM projection is split
+      # (per-vec linear + sqrt(n) centroids) so the verdict is N-independent;
+      # recall is deterministic, so a small N validates correctness for CI.
+      - name: Stage 1 IVF gate
+        run: >
+          cargo run --release --locked -p kortex-harness -- scale-bench
+          --scale 20k --dim 256 --clusters 64 --index ivf --nprobe 12,24
+          --refine 1024 --queries 100 --assert-gate
       # Stage 2: storage substrate gate (content overhead ≤ 1.25x;
       # index bytes/unit ≤ 24; p95 < 1ms; ingest ≥ 50k/s).
       # Uses the Stage 0 synthetic corpus — deterministic, no external deps.

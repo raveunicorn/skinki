@@ -886,15 +886,20 @@ fn run_scale_bench(
     // The ivf path additionally needs a training sample (pass 1a) before the
     // two assign/encode streaming passes (1b/1c).
     let t1 = Instant::now();
-    let resident_index_bytes = match index {
+    // `resident_at_5m` is the budget-relevant projection. For flat every byte
+    // scales with n, so the projection is linear. IVF projects honestly via
+    // `resident_bytes_at` (centroid table grows as sqrt(n), not linearly), so a
+    // small-N gate run reports the same ~5M RAM the at-scale runs measure.
+    let (resident_index_bytes, resident_5m_bytes) = match index {
         IndexKind::Flat => {
             let mut builder = RaBitQBuilder::new(dim, 1, seed, centroid);
             stream_rows(&fpath, dim, Some(n as u32), |_, row| builder.push(row))?;
             let rq = builder.finish();
             let resident = rq.resident_bytes() as u64;
+            let at_5m = (resident as f64 * 5_000_000.0 / n as f64) as u64;
             rq.save(&dir)?;
             drop(rq);
-            resident
+            (resident, at_5m)
         }
         IndexKind::Ivf => {
             // Pass 1a — sample pass: every stride-th row, capped at 100k, for
@@ -930,9 +935,10 @@ fn run_scale_bench(
             })?;
             let ivf = ivf_builder.finish();
             let resident = ivf.resident_bytes() as u64;
+            let at_5m = ivf.resident_bytes_at(5_000_000) as u64;
             ivf.save(&dir)?;
             drop(ivf);
-            resident
+            (resident, at_5m)
         }
     };
     let build_secs = t1.elapsed().as_secs_f64();
@@ -1053,7 +1059,7 @@ fn run_scale_bench(
         cold_open_first_query_ms,
         resident_index_bytes,
         resident_index_mb,
-        resident_mb_at_5m: resident_index_mb * (5_000_000.0 / n as f64),
+        resident_mb_at_5m: resident_5m_bytes as f64 / 1_048_576.0,
         peak_rss_mb: rss_mb(),
     })
 }
@@ -1090,7 +1096,7 @@ fn print_scale_report(r: &ScaleBenchReport) {
         r.cold_open_first_query_ms
     );
     println!(
-        "resident index     : {:.1} MB measured at n={} ({:.1} B/vec) -> {:.1} MB at 5M (linear)",
+        "resident index     : {:.1} MB measured at n={} ({:.1} B/vec) -> {:.1} MB at 5M (flat: linear; ivf: per-vec linear + sqrt(n) centroids)",
         r.resident_index_mb,
         r.vectors,
         r.resident_index_bytes as f64 / r.vectors as f64,
