@@ -34,7 +34,8 @@ kortex/                      PRIMARY — the engine (all real work)
     kortex-baseline/  BM25 lexical baseline (the yardstick)
     kortex-vector/    Stage 1: embeddings, quantizers, two-stage, mmap, IVF (unsafe: mmap)
     kortex-store/     Stage 2/2B: append-only L0 + unit store, rotation, dedup (unsafe: mmap)
-    kortex-harness/   `kortex` CLI: generate/eval/demo/compress-bench/scale-bench/store-bench
+    kortex-sleep/     Stage 4: interruptible/resumable consolidation scheduler + macOS signals
+    kortex-harness/   `kortex` CLI: generate/eval/demo/compress-bench/scale-bench/store-bench/sleep-sim
   specs/              per-stage delegation contracts (STAGE_<n>.md from TEMPLATE.md)
 apps/skinki-macos/    PARKED Stage-7 SwiftUI wrapper — do not touch
 ARCHITECTURE.md  ROADMAP.md  AGENTS.md   the vision, the staged plan, the rules
@@ -52,7 +53,7 @@ L3 sleep consolidation → L4 insight engine → L5 agent/query) is in
 | 1 | Memory compression (Matryoshka-256 + two-stage 1-bit RaBitQ → float rerank) | **Done**; flat-scan latency limit at 5M mapped → **IVF in progress** |
 | 2 / 2B | Storage substrate + durability (pure Rust, mmap, append-only) | **Done** |
 | 3 | Incremental local GraphRAG (two-tier extraction; see `STAGE_3_BUDGET.md`) | **Next** |
-| 4 | "Sleep" consolidation scheduler | Spec ready (`STAGE_4.md`), delegatable |
+| 4 | "Sleep" consolidation scheduler | **Done** (policy proven in sim; real jobs plug in at Stage 3/5) |
 | 5 | Insight Engine (anti-hallucination keystone) | Planned — frontier-only, the "soul" |
 | 6 | Portable `kortex` (C-ABI/FFI + Swift/Python bindings, MCP server) | Spec ready (`STAGE_6.md`) |
 | 7 | Skinki macOS product | Parked |
@@ -91,6 +92,7 @@ cargo fmt --check        # CI enforces; `cargo fmt` to fix
 cargo run --release -p kortex-harness -- compress-bench \
     --source synthetic --dim 256 --vectors 4000 --queries 100 --assert-gate   # Stage 1
 cargo run --release -p kortex-harness -- store-bench --years 5 --assert-gate   # Stage 2
+cargo run --release -p kortex-harness -- sleep-sim --assert-gate               # Stage 4
 ```
 
 A change is correct **iff** build + test + clippy + fmt + the relevant
@@ -137,6 +139,7 @@ genuinely wrong, raise it with the human first.
 Each `kortex/specs/STAGE_<n>.md` is a contract: hypothesis, fixed trait
 interface, budgets/invariants, test plan, and a ticket table splitting **design
 tickets** (subtle — keep on a frontier model) from **impl tickets** (mechanical
-— safe to delegate). The gate decides correctness, not reviewer taste. Stages 2,
-4, 6 are spec'd and delegatable; Stages 3 and 5 are the "soul" and stay on a
-frontier model with heavy review.
+— safe to delegate). The gate decides correctness, not reviewer taste. Stages 2
+and 4 were built this way (done); **Stage 6** (`STAGE_6.md`) is spec'd and
+delegatable next; Stages 3 and 5 are the "soul" and stay on a frontier model
+with heavy review.
