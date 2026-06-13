@@ -18,7 +18,7 @@ layered design and budgets.
 | 0 | Eval harness + synthetic corpus (the measuring stick) | **Done** |
 | 1 | Memory compression PoC (RaBitQ + Model2Vec, two-stage, mmap) | **Done** (re-validated at scale; IVF closes the scan-cost gap, gated) |
 | 2 | Storage substrate (Lance/Cozo) + append-only L0; maybe a `.kx` codec | **Done** (+ 2B durability) |
-| 3 | Incremental local GraphRAG (deterministic-first, two-tier; venue-anchored multi-hop) | **Next** (spec ready: [`STAGE_3.md`](kortex/specs/STAGE_3.md)) |
+| 3 | Incremental local GraphRAG (deterministic-first, two-tier; venue-anchored multi-hop) | **In progress** — deterministic tier done + gated (multi-hop 2.5–3× BM25); LLM tier (D2) next ([`STAGE_3.md`](kortex/specs/STAGE_3.md)) |
 | 4 | "Sleep" consolidation engine (idle + on-power background jobs) | **Done** (policy proven in simulation; real jobs land at Stage 3/5) |
 | 5 | Insight Engine (deterministic discovery + FDR + cite-or-silence) | Planned |
 | 6 | Portable `kortex` crate (C-ABI/FFI + CLI, Swift/Python bindings) | Planned |

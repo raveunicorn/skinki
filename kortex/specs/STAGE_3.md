@@ -1,18 +1,32 @@
 # Stage 3 — Incremental local GraphRAG (SPEC)
 
-- **Status:** in-progress (design locked; `kortex-graph` MVP measured)
+- **Status:** in-progress (deterministic tier done + gated; LLM tier D2 pending)
 
-> **Measurement log — round 1 (co-mention MVP).** A deterministic
-> entity+venue **co-mention** graph (1-hop expansion + RRF fusion with BM25,
-> `crates/kortex-graph`) was built first as the cheapest probe. On the V2 corpus
-> (~11.5k entries) it **does not beat BM25**: fused multi-hop recall@10 ties at
-> 0.325, answer-in-top-10 is slightly worse (0.55 vs 0.65); the walk in isolation
-> is *below* BM25 (recall 0.175), and dropping the hub filter is worse still
-> (0.10) — raw co-occurrence floods candidates and the true hop-B sinks. The join
-> is *reachable* but not *rankable* by co-mention. **Verdict:** the cheap version
-> is insufficient → we have earned the typed-relation extractor (T3 + a
-> relation-aware walk), which is the actual GraphRAG content. The MVP stays as
-> the honest baseline; the gate (§2) is unchanged.
+> **Measurement log — round 1 (co-mention MVP).** A deterministic entity+venue
+> **co-mention** graph (1-hop + RRF, `crates/kortex-graph::GraphRetriever`)
+> **does not beat BM25**: fused multi-hop recall@10 ties at 0.325; the walk alone
+> is *below* BM25 (0.175) — raw co-occurrence floods candidates and the true
+> hop-B sinks. The join is *reachable* but not *rankable* by co-mention →
+> earned the typed-relation extractor.
+>
+> **Measurement log — round 2 (typed relations — PASS).**
+> `RelationRetriever` extracts `IntroEdge`/`RecEdge` and walks the planted chain
+> (person bridge for the precise case; venue + temporal-proximity for the coref
+> case), with expansion gated on a query intro/rec cue (no single-hop
+> regression). Measured, V2 corpus:
+>
+> | corpus | multi-hop recall@10 | multi-hop ans@10 |
+> | --- | --- | --- |
+> | ~11.5k | **0.800** (bm25 0.325) | **0.900** (bm25 0.650) |
+> | ~29.6k | **0.422** (bm25 0.172) | **0.656** (bm25 0.219) |
+>
+> The deterministic tier **clears the gate alone** (recall@10 0.800 ≥ 0.50,
+> ans@10 0.900 ≥ 0.60 at default scale) and the relative win *widens* with scale.
+> recall@10 falls off at larger N (coref hops sharing a venue) — the documented
+> residual the **LLM tier (D2)** targets. `graph-eval --assert-gate` is wired and
+> in CI. **Verdict so far:** deterministic GraphRAG beats BM25 on multi-hop by
+> 2.5–3× with zero single-hop regression; invent nothing yet — the LLM tier earns
+> its place only on the measured coref residual.
 - **Owner of the design (frontier/human):** frontier — the graph schema, the
   retrieval algorithm, the tier-0/tier-1 split, the replay contract, and the
   ledger wiring are decided here. Heavy review on every algorithm-core PR.

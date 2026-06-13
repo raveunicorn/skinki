@@ -87,3 +87,10 @@ jobs:
         run: >
           cargo run --release --locked -p kortex-harness -- ledger-bench
           --assert-gate
+      # Stage 3 (GraphRAG): the typed-relation retriever must clear the multi-hop
+      # bars (recall@10 >= 0.50, ans@10 >= 0.60) and not regress single-hop recall
+      # below BM25. Deterministic; no inference (the LLM tier is replay-only).
+      - name: Stage 3 graph gate
+        run: >
+          cargo run --release --locked -p kortex-harness -- graph-eval
+          --assert-gate

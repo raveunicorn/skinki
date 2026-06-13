@@ -28,7 +28,7 @@ use kortex_vector::quant::{RaBitQ, RaBitQBuilder};
 use kortex_vector::search::{ivf_two_stage_search, recall as recall_overlap, two_stage_search};
 use kortex_vector::store::{available_disk_bytes, FloatMmapStore};
 
-use kortex_graph::GraphRetriever;
+use kortex_graph::{GraphRetriever, RelationRetriever};
 use kortex_ledger::{score_staleness, ContentHash, Derivation, Ledger, MethodStamp};
 use kortex_sleep::{check_gate, run_sim, SimConfig, SimResult, StubJob};
 use kortex_vector::{dot, VectorSet};
@@ -231,6 +231,10 @@ enum Cmd {
         difficulty: String,
         #[arg(long, default_value_t = 10)]
         k: usize,
+        /// Exit non-zero unless the relation retriever clears the Stage 3 gate
+        /// (multi-hop recall@k >= 0.50, ans@k >= 0.60, no single-hop regression).
+        #[arg(long, default_value_t = false)]
+        assert_gate: bool,
     },
 }
 
@@ -677,6 +681,7 @@ fn main() -> Result<()> {
             entries_per_day,
             difficulty,
             k,
+            assert_gate,
         } => {
             let corpus = generate(&GenConfig {
                 seed,
@@ -684,7 +689,7 @@ fn main() -> Result<()> {
                 entries_per_day,
                 difficulty: parse_difficulty(&difficulty)?,
             });
-            run_graph_eval(&corpus, k);
+            run_graph_eval(&corpus, k, assert_gate)?;
         }
     }
     Ok(())
@@ -694,12 +699,15 @@ fn main() -> Result<()> {
 // Stage 3 MVP — graph-eval: deterministic co-mention graph vs BM25
 // ---------------------------------------------------------------------------
 
-fn run_graph_eval(corpus: &Corpus, k: usize) {
+fn run_graph_eval(corpus: &Corpus, k: usize, assert_gate: bool) -> anyhow::Result<()> {
     let mut bm25 = Bm25::new();
     bm25.index(corpus);
 
     let mut graph = GraphRetriever::new();
     graph.index(corpus);
+
+    let mut relation = RelationRetriever::new();
+    relation.index(corpus);
 
     let recall_items: Vec<QItem> = corpus
         .ground_truth
@@ -724,11 +732,20 @@ fn run_graph_eval(corpus: &Corpus, k: usize) {
 
     let mut bm25_durations: Vec<Duration> = Vec::new();
     let mut graph_durations: Vec<Duration> = Vec::new();
+    let mut relation_durations: Vec<Duration> = Vec::new();
 
     let bm25_recall = score_set(&bm25, corpus, &recall_items, k, &mut bm25_durations);
     let bm25_multihop = score_set(&bm25, corpus, &multihop_items, k, &mut bm25_durations);
     let graph_recall = score_set(&graph, corpus, &recall_items, k, &mut graph_durations);
     let graph_multihop = score_set(&graph, corpus, &multihop_items, k, &mut graph_durations);
+    let relation_recall = score_set(&relation, corpus, &recall_items, k, &mut relation_durations);
+    let relation_multihop = score_set(
+        &relation,
+        corpus,
+        &multihop_items,
+        k,
+        &mut relation_durations,
+    );
 
     println!("=== Kortex Stage 3 (MVP) — Graph vs BM25 contrast ===");
     println!(
@@ -748,31 +765,62 @@ fn run_graph_eval(corpus: &Corpus, k: usize) {
         multihop_items.len()
     );
     println!();
-    println!("{:<28} {:>9} {:>9}", "metric", "bm25", "graph");
     println!(
-        "{:<28} {:>9.3} {:>9.3}",
+        "{:<28} {:>9} {:>9} {:>9}",
+        "metric", "bm25", "graph", "relation"
+    );
+    println!(
+        "{:<28} {:>9.3} {:>9.3} {:>9.3}",
         format!("single-hop recall@{k}"),
         bm25_recall.recall_at_k,
-        graph_recall.recall_at_k
+        graph_recall.recall_at_k,
+        relation_recall.recall_at_k
     );
     println!(
-        "{:<28} {:>9.3} {:>9.3}",
+        "{:<28} {:>9.3} {:>9.3} {:>9.3}",
         format!("single-hop ans@{k}"),
         bm25_recall.answer_in_topk,
-        graph_recall.answer_in_topk
+        graph_recall.answer_in_topk,
+        relation_recall.answer_in_topk
     );
     println!(
-        "{:<28} {:>9.3} {:>9.3}",
+        "{:<28} {:>9.3} {:>9.3} {:>9.3}",
         format!("multi-hop  recall@{k}"),
         bm25_multihop.recall_at_k,
-        graph_multihop.recall_at_k
+        graph_multihop.recall_at_k,
+        relation_multihop.recall_at_k
     );
     println!(
-        "{:<28} {:>9.3} {:>9.3}",
+        "{:<28} {:>9.3} {:>9.3} {:>9.3}",
         format!("multi-hop  ans@{k}"),
         bm25_multihop.answer_in_topk,
-        graph_multihop.answer_in_topk
+        graph_multihop.answer_in_topk,
+        relation_multihop.answer_in_topk
     );
+
+    if assert_gate {
+        // Stage 3 gate: the relation retriever must clear the multi-hop bars and
+        // not regress single-hop recall below BM25 (the deterministic-tier
+        // verdict; recall is deterministic so a fixed corpus is a stable gate).
+        const MULTIHOP_RECALL_MIN: f64 = 0.50;
+        const MULTIHOP_ANS_MIN: f64 = 0.60;
+        let mh_recall = relation_multihop.recall_at_k;
+        let mh_ans = relation_multihop.answer_in_topk;
+        let sh_ok = relation_recall.recall_at_k >= bm25_recall.recall_at_k;
+        if mh_recall >= MULTIHOP_RECALL_MIN && mh_ans >= MULTIHOP_ANS_MIN && sh_ok {
+            println!(
+                "\nGATE: PASS (relation multi-hop recall@{k}={mh_recall:.3} ans@{k}={mh_ans:.3}; single-hop recall {:.3} >= bm25 {:.3})",
+                relation_recall.recall_at_k, bm25_recall.recall_at_k
+            );
+        } else {
+            anyhow::bail!(
+                "Stage 3 gate FAILED: relation multi-hop recall@{k}={mh_recall:.3} (want >={MULTIHOP_RECALL_MIN}), ans@{k}={mh_ans:.3} (want >={MULTIHOP_ANS_MIN}), single-hop recall {:.3} vs bm25 {:.3} (must not regress)",
+                relation_recall.recall_at_k,
+                bm25_recall.recall_at_k
+            );
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
