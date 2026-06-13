@@ -70,3 +70,11 @@ decisions pre-made and isolated as frontier-only tickets):
 
 Stages 0 and 1 are complete; their "specs" are the shipped code, tests, and the
 results documented in [`../README.md`](../README.md).
+
+**Design notes (pre-code, "do the math before the code"):**
+
+- [`STAGE_3_BUDGET.md`](STAGE_3_BUDGET.md) — extraction compute arithmetic that
+  forces a two-tier design.
+- [`DERIVATION_LEDGER.md`](DERIVATION_LEDGER.md) — **proposal**: staleness-aware
+  memory via a content-addressed Merkle DAG of derivations (hash-linked reasoning
+  chains). Cross-cuts Stages 2/3/5; awaiting go/no-go.
