@@ -7,6 +7,7 @@
 //! without paying full-precision RAM or latency.
 
 use crate::exact::{select_top_k, top_k};
+use crate::ivf::IvfRaBitQ;
 use crate::quant::Quantizer;
 use crate::VectorSet;
 
@@ -20,6 +21,23 @@ pub fn two_stage_search(
     refine: usize,
 ) -> Vec<u32> {
     let shortlist = coarse.search(query, refine.max(k));
+    let scores = precise.scores_subset(query, &shortlist);
+    let mut scored: Vec<(f32, u32)> = scores.into_iter().zip(shortlist.iter().copied()).collect();
+    select_top_k(&mut scored, k)
+}
+
+/// IVF two-stage retrieval: [`IvfRaBitQ::shortlist`] probes `nprobe` lists for
+/// `refine.max(k)` candidates, `precise` re-ranks them down to top-`k`. Mirrors
+/// [`two_stage_search`], swapping the coarse stage for the IVF shortlist.
+pub fn ivf_two_stage_search(
+    ivf: &IvfRaBitQ,
+    precise: &dyn Quantizer,
+    query: &[f32],
+    k: usize,
+    nprobe: usize,
+    refine: usize,
+) -> Vec<u32> {
+    let shortlist = ivf.shortlist(query, nprobe, refine.max(k));
     let scores = precise.scores_subset(query, &shortlist);
     let mut scored: Vec<(f32, u32)> = scores.into_iter().zip(shortlist.iter().copied()).collect();
     select_top_k(&mut scored, k)

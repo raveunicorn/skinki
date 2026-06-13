@@ -23,8 +23,9 @@ use kortex_store::{derive_units, RawEvent, Source, Store};
 use kortex_telemetry::{peak_rss_bytes, LatencySummary};
 use kortex_vector::bench::{passes_gate, run_matrix, verdict, BenchReport, Budgets};
 use kortex_vector::embed::{synthetic_clusters, ClusterSampler, StaticHashEmbedder};
+use kortex_vector::ivf::{IvfBuilder, IvfRaBitQ};
 use kortex_vector::quant::{RaBitQ, RaBitQBuilder};
-use kortex_vector::search::{recall as recall_overlap, two_stage_search};
+use kortex_vector::search::{ivf_two_stage_search, recall as recall_overlap, two_stage_search};
 use kortex_vector::store::{available_disk_bytes, FloatMmapStore};
 
 use kortex_sleep::{check_gate, run_sim, SimConfig, SimResult, StubJob};
@@ -172,6 +173,17 @@ enum Cmd {
         /// The last --queries rows are held out as queries.
         #[arg(long)]
         vectors_file: Option<PathBuf>,
+        /// Index type: "flat" (1-bit RaBitQ, global centroid) or "ivf"
+        /// (per-list 1-bit RaBitQ residual codes).
+        #[arg(long, default_value = "flat")]
+        index: String,
+        /// Comma list of nprobe settings (ivf only); cross-producted with
+        /// --refine.
+        #[arg(long, default_value = "16,64,256")]
+        nprobe: String,
+        /// IVF list count; 0 = auto heuristic (see `IvfBuilder::train`).
+        #[arg(long, default_value_t = 0)]
+        nlist: usize,
     },
     /// Stage 4: simulate the sleep consolidation scheduler over a scripted
     /// timeline with stub jobs, verifying all six gate metrics.
@@ -482,6 +494,9 @@ fn main() -> Result<()> {
             report_out,
             assert_gate,
             vectors_file,
+            index,
+            nprobe,
+            nlist,
         } => {
             let n = parse_scale(&scale)?;
             let refines: Vec<usize> = refine
@@ -489,6 +504,22 @@ fn main() -> Result<()> {
                 .map(|s| s.trim().parse::<usize>().context("bad --refine entry"))
                 .collect::<Result<_>>()?;
             anyhow::ensure!(!refines.is_empty(), "--refine must list at least one size");
+            let index = match index.to_ascii_lowercase().as_str() {
+                "flat" => IndexKind::Flat,
+                "ivf" => IndexKind::Ivf,
+                other => anyhow::bail!("unknown --index '{other}' (expected flat or ivf)"),
+            };
+            let nprobes: Vec<usize> = if index == IndexKind::Ivf {
+                nprobe
+                    .split(',')
+                    .map(|s| s.trim().parse::<usize>().context("bad --nprobe entry"))
+                    .collect::<Result<_>>()?
+            } else {
+                Vec::new()
+            };
+            if index == IndexKind::Ivf {
+                anyhow::ensure!(!nprobes.is_empty(), "--nprobe must list at least one value");
+            }
             let report = run_scale_bench(
                 n,
                 seed,
@@ -500,6 +531,9 @@ fn main() -> Result<()> {
                 dir,
                 keep,
                 vectors_file,
+                index,
+                &nprobes,
+                nlist,
             )?;
             print_scale_report(&report);
             if let Some(path) = report_out {
@@ -580,8 +614,28 @@ fn parse_scale(s: &str) -> Result<usize> {
     Ok(n)
 }
 
+/// Index variant exercised by `scale-bench`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IndexKind {
+    /// 1-bit RaBitQ against a single global centroid (Stage 1 baseline).
+    Flat,
+    /// Per-list 1-bit RaBitQ residual codes (this module).
+    Ivf,
+}
+
+impl IndexKind {
+    fn label(&self) -> &'static str {
+        match self {
+            IndexKind::Flat => "flat (1-bit RaBitQ, global centroid)",
+            IndexKind::Ivf => "ivf (per-list 1-bit RaBitQ residual codes)",
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ScaleRefineRun {
+    /// `None` for the flat index (no probing); `Some(nprobe)` for ivf.
+    nprobe: Option<usize>,
     refine: usize,
     recall_at_k: f64,
     latency: LatencySummary,
@@ -597,14 +651,15 @@ struct ScaleBenchReport {
     gen_secs: f64,
     build_secs: f64,
     truth_secs: f64,
-    /// One timed run per --refine setting, sharing the same build/truth.
+    /// One timed run per (nprobe, refine) setting (flat: per refine only),
+    /// sharing the same build/truth.
     runs: Vec<ScaleRefineRun>,
     cold_open_first_query_ms: f64,
     resident_index_bytes: u64,
     resident_index_mb: f64,
     /// Linear extrapolation to 5M vectors — sound for RAM because the index
-    /// is strictly per-vector (codes + factor + popcount), unlike latency,
-    /// which is only ever reported as measured.
+    /// is strictly per-vector (codes + factor + popcount [+ ids for ivf]),
+    /// unlike latency, which is only ever reported as measured.
     resident_mb_at_5m: f64,
     peak_rss_mb: f64,
 }
@@ -687,6 +742,9 @@ fn run_scale_bench(
     dir: Option<PathBuf>,
     keep: bool,
     vectors_file: Option<PathBuf>,
+    index: IndexKind,
+    nprobes: &[usize],
+    nlist: usize,
 ) -> Result<ScaleBenchReport> {
     use std::io::Write;
 
@@ -821,18 +879,64 @@ fn run_scale_bench(
         (dir, true, fpath, n, centroid, queries, gen_secs)
     };
     let float_file_bytes = (n * dim * 4) as u64;
+    println!("scale-bench: index = {}", index.label());
 
-    // Pass 1 — stream the file into the incremental index builder. Excludes
-    // held-out query rows (which live past index n in a user file).
+    // Pass 1 — build the index. The flat path is unchanged: stream the file
+    // into the incremental 1-bit RaBitQ builder against the global centroid.
+    // The ivf path additionally needs a training sample (pass 1a) before the
+    // two assign/encode streaming passes (1b/1c).
     let t1 = Instant::now();
-    let mut builder = RaBitQBuilder::new(dim, 1, seed, centroid);
-    stream_rows(&fpath, dim, Some(n as u32), |_, row| builder.push(row))?;
-    let rq = builder.finish();
-    let resident_index_bytes = rq.resident_bytes() as u64;
-    rq.save(&dir)?;
-    drop(rq);
+    let resident_index_bytes = match index {
+        IndexKind::Flat => {
+            let mut builder = RaBitQBuilder::new(dim, 1, seed, centroid);
+            stream_rows(&fpath, dim, Some(n as u32), |_, row| builder.push(row))?;
+            let rq = builder.finish();
+            let resident = rq.resident_bytes() as u64;
+            rq.save(&dir)?;
+            drop(rq);
+            resident
+        }
+        IndexKind::Ivf => {
+            // Pass 1a — sample pass: every stride-th row, capped at 100k, for
+            // training the IVF list centroids.
+            let stride = (n / 100_000).max(1);
+            let mut sample = VectorSet::new(dim);
+            stream_rows(&fpath, dim, Some(n as u32), |id, row| {
+                if (id as usize).is_multiple_of(stride) && sample.count() < 100_000 {
+                    sample.push(row);
+                }
+            })?;
+            println!(
+                "pass 1a (training sample): {} rows (stride {stride})",
+                sample.count()
+            );
+
+            let mut ivf_builder = IvfBuilder::train(dim, nlist, seed, &sample, n);
+            drop(sample);
+            println!(
+                "pass 1a (train IVF centroids): nlist={}",
+                ivf_builder.nlist()
+            );
+
+            // Pass 1b — assign each base row to its nearest list.
+            stream_rows(&fpath, dim, Some(n as u32), |_, row| {
+                ivf_builder.assign(row)
+            })?;
+            ivf_builder.finalize_layout();
+
+            // Pass 1c — encode each base row's residual into its list slot.
+            stream_rows(&fpath, dim, Some(n as u32), |_, row| {
+                ivf_builder.encode(row)
+            })?;
+            let ivf = ivf_builder.finish();
+            let resident = ivf.resident_bytes() as u64;
+            ivf.save(&dir)?;
+            drop(ivf);
+            resident
+        }
+    };
     let build_secs = t1.elapsed().as_secs_f64();
-    println!("pass 1 (build 1-bit index): {build_secs:.1}s");
+    println!("pass 1 (build index): {build_secs:.1}s");
 
     // Pass 2 — exact ground truth by streaming the base portion once.
     let t2 = Instant::now();
@@ -860,40 +964,72 @@ fn run_scale_bench(
     // the first query end-to-end. (Page cache is warm from the build — a true
     // cold start needs a reboot/purge — so treat this as a lower bound.)
     let t3 = Instant::now();
-    let rq = RaBitQ::load(&dir).context("loading saved index")?;
     let fmm = FloatMmapStore::open(&fpath, dim).context("mmap of float file")?;
-    let _ = two_stage_search(&rq, &fmm, queries.get(0), k, refines[0]);
+    let (rq, ivf): (Option<RaBitQ>, Option<IvfRaBitQ>) = match index {
+        IndexKind::Flat => {
+            let rq = RaBitQ::load(&dir).context("loading saved index")?;
+            let _ = two_stage_search(&rq, &fmm, queries.get(0), k, refines[0]);
+            (Some(rq), None)
+        }
+        IndexKind::Ivf => {
+            let ivf = IvfRaBitQ::load(&dir).context("loading saved index")?;
+            let _ = ivf_two_stage_search(&ivf, &fmm, queries.get(0), k, nprobes[0], refines[0]);
+            (None, Some(ivf))
+        }
+    };
     let cold_open_first_query_ms = t3.elapsed().as_secs_f64() * 1000.0;
 
     // Timed queries: full coarse scan over n + float rerank from mmap, once
-    // per refine setting (the expensive passes above are shared).
-    let mut runs = Vec::with_capacity(refines.len());
-    for &refine in refines {
-        let mut durations: Vec<Duration> = Vec::with_capacity(num_queries);
-        let mut racc = 0.0;
-        for (qi, t) in truth.iter().enumerate() {
-            let q = queries.get(qi);
-            let start = Instant::now();
-            let got = two_stage_search(&rq, &fmm, q, k, refine);
-            durations.push(start.elapsed());
-            racc += recall_overlap(&got, t);
+    // per --refine setting (flat), or once per (nprobe, refine) pair (ivf) —
+    // the expensive build/truth passes above are shared across all settings.
+    let probe_settings: Vec<Option<usize>> = match index {
+        IndexKind::Flat => vec![None],
+        IndexKind::Ivf => nprobes.iter().map(|&p| Some(p)).collect(),
+    };
+    let mut runs = Vec::with_capacity(probe_settings.len() * refines.len());
+    for &nprobe in &probe_settings {
+        for &refine in refines {
+            let mut durations: Vec<Duration> = Vec::with_capacity(num_queries);
+            let mut racc = 0.0;
+            for (qi, t) in truth.iter().enumerate() {
+                let q = queries.get(qi);
+                let start = Instant::now();
+                let got = match (&rq, &ivf, nprobe) {
+                    (Some(rq), _, _) => two_stage_search(rq, &fmm, q, k, refine),
+                    (_, Some(ivf), Some(nprobe)) => {
+                        ivf_two_stage_search(ivf, &fmm, q, k, nprobe, refine)
+                    }
+                    _ => unreachable!("index/probe mismatch"),
+                };
+                durations.push(start.elapsed());
+                racc += recall_overlap(&got, t);
+            }
+            let recall_at_k = racc / num_queries.max(1) as f64;
+            let latency = LatencySummary::from_durations(&durations);
+            match nprobe {
+                Some(nprobe) => println!(
+                    "nprobe {nprobe:>5} refine {refine:>6}: recall@{k}={recall_at_k:.3}  p50={:.1}ms p95={:.1}ms",
+                    latency.p50_ms, latency.p95_ms
+                ),
+                None => println!(
+                    "refine {refine:>6}: recall@{k}={recall_at_k:.3}  p50={:.1}ms p95={:.1}ms",
+                    latency.p50_ms, latency.p95_ms
+                ),
+            }
+            runs.push(ScaleRefineRun {
+                nprobe,
+                refine,
+                recall_at_k,
+                latency,
+            });
         }
-        let recall_at_k = racc / num_queries.max(1) as f64;
-        let latency = LatencySummary::from_durations(&durations);
-        println!(
-            "refine {refine:>6}: recall@{k}={recall_at_k:.3}  p50={:.1}ms p95={:.1}ms",
-            latency.p50_ms, latency.p95_ms
-        );
-        runs.push(ScaleRefineRun {
-            refine,
-            recall_at_k,
-            latency,
-        });
     }
 
-    // Drop the mmap before any cleanup that might remove files under it.
+    // Drop the mmap and index handles before any cleanup that might remove
+    // files under them.
     drop(fmm);
     drop(rq);
+    drop(ivf);
 
     // Only remove the working dir if we created it (never the user's
     // --vectors-file, which lives elsewhere and is never copied here).
@@ -930,12 +1066,17 @@ fn print_scale_report(r: &ScaleBenchReport) {
         r.queries
     );
     println!(
-        "{:<10} {:>10} {:>9} {:>9} {:>9} {:>9}",
-        "refine", "recall@k", "p50_ms", "p95_ms", "mean_ms", "max_ms"
+        "{:<8} {:<10} {:>10} {:>9} {:>9} {:>9} {:>9}",
+        "nprobe", "refine", "recall@k", "p50_ms", "p95_ms", "mean_ms", "max_ms"
     );
     for run in &r.runs {
+        let nprobe = run
+            .nprobe
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".to_string());
         println!(
-            "{:<10} {:>10.3} {:>9.2} {:>9.2} {:>9.2} {:>9.2}",
+            "{:<8} {:<10} {:>10.3} {:>9.2} {:>9.2} {:>9.2} {:>9.2}",
+            nprobe,
             run.refine,
             run.recall_at_k,
             run.latency.p50_ms,
@@ -1385,7 +1526,7 @@ fn print_ground_truth_summary(corpus: &Corpus) {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 4: Sleep simulation CLI
+// Stage 4 — sleep consolidation simulation
 // ---------------------------------------------------------------------------
 
 /// Simple deterministic SplitMix64 PRNG — same constants as kortex-corpus.

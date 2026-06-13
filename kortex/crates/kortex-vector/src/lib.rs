@@ -28,6 +28,7 @@
 pub mod bench;
 pub mod embed;
 pub mod exact;
+pub mod ivf;
 pub mod quant;
 pub mod rotate;
 pub mod search;
