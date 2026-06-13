@@ -797,6 +797,10 @@ fn run_graph_eval(corpus: &Corpus, k: usize, assert_gate: bool) -> anyhow::Resul
         graph_multihop.answer_in_topk,
         relation_multihop.answer_in_topk
     );
+    println!(
+        "\nrelation ledger  : {} edge derivations (provenance-pinned -> incremental re-extraction + staleness, T7)",
+        relation.ledger().len()
+    );
 
     if assert_gate {
         // Stage 3 gate: the relation retriever must clear the multi-hop bars and

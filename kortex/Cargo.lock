@@ -153,6 +153,7 @@ dependencies = [
  "kortex-baseline",
  "kortex-corpus",
  "kortex-eval",
+ "kortex-ledger",
  "serde",
 ]
 

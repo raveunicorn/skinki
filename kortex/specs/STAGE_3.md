@@ -1,6 +1,7 @@
 # Stage 3 — Incremental local GraphRAG (SPEC)
 
-- **Status:** in-progress (deterministic tier done + gated; LLM tier D2 pending)
+- **Status:** in-progress (deterministic tier done + gated; **T7 ledger wiring
+  done**; LLM tier D2 + replay T6 pending)
 
 > **Measurement log — round 1 (co-mention MVP).** A deterministic entity+venue
 > **co-mention** graph (1-hop + RRF, `crates/kortex-graph::GraphRetriever`)

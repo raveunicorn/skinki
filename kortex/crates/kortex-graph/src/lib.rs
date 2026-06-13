@@ -73,6 +73,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use kortex_baseline::Bm25;
 use kortex_corpus::{Corpus, EntityKind, EntryId};
 use kortex_eval::RetrievalSystem;
+use kortex_ledger::{ContentHash, Derivation, Ledger, MethodStamp};
 
 /// Venue anchors — the corpus's coreference bridges for multi-hop chains
 /// (see `kortex-corpus`'s `VENUES`). Treated as gazetteer phrases just like
@@ -303,6 +304,14 @@ const MAX_DT_DAYS: u32 = 90;
 /// Reciprocal Rank Fusion smoothing constant (shared with `GraphRetriever`).
 const REL_RRF_C: f64 = 60.0;
 
+/// Extractor version stamped onto every edge's derivation. Bump it when the
+/// extraction rules change: the ledger then flags every edge this extractor
+/// produced for re-derivation, even if no source text moved (AGENTS rule 3 —
+/// the "how" changed). Method ids distinguish the two relation kinds.
+const EXTRACTOR_VERSION: u64 = 1;
+const M_INTRO: u32 = 1;
+const M_REC: u32 = 2;
+
 /// "P introduced me to Q (and maybe others) at venue V on day `day`."
 struct IntroEdge {
     persons: Vec<String>,
@@ -336,6 +345,12 @@ pub struct RelationRetriever {
     /// venue (lowercase) -> indices into `rec`.
     rec_by_venue: BTreeMap<String, Vec<usize>>,
     bm25: Bm25,
+    /// Derivation ledger: one record per extracted edge, pinning the source
+    /// entry's content hash + the extractor's method/version. This is what makes
+    /// the graph incrementally re-extractable and staleness-aware (Stage 3 T7):
+    /// when a unit changes (or `EXTRACTOR_VERSION` bumps), `ledger.stale_closure`
+    /// flags exactly the edges that must be rebuilt.
+    ledger: Ledger,
 }
 
 impl Default for RelationRetriever {
@@ -349,6 +364,7 @@ impl Default for RelationRetriever {
             rec_by_person: BTreeMap::new(),
             rec_by_venue: BTreeMap::new(),
             bm25: Bm25::new(),
+            ledger: Ledger::new(),
         }
     }
 }
@@ -380,6 +396,28 @@ impl RelationRetriever {
     fn has_any_cue(text_lower: &str, cues: &[&str]) -> bool {
         cues.iter().any(|c| text_lower.contains(c))
     }
+
+    /// Content hash of a source entry's text — the provenance "input" an edge
+    /// derives from. (A sentence-unit hash would be finer; entry-level is the
+    /// right grain for this corpus, where one entry asserts the relation.)
+    fn entry_hash(text: &str) -> ContentHash {
+        ContentHash::of(text.as_bytes())
+    }
+
+    /// Canonical, rebuild-stable content hash of an intro / rec edge.
+    fn intro_output_hash(entry: EntryId, persons: &[String], venue: &str) -> ContentHash {
+        ContentHash::of(format!("intro|{entry}|{}|{venue}", persons.join(",")).as_bytes())
+    }
+    fn rec_output_hash(entry: EntryId, by: &[String], venue: Option<&str>) -> ContentHash {
+        ContentHash::of(format!("rec|{entry}|{}|{}", by.join(","), venue.unwrap_or("")).as_bytes())
+    }
+
+    /// The derivation ledger backing this graph — one record per extracted edge,
+    /// pinning the source entry's content hash and the extractor's method
+    /// version. Drives incremental re-extraction and staleness (Stage 3 T7).
+    pub fn ledger(&self) -> &Ledger {
+        &self.ledger
+    }
 }
 
 impl RetrievalSystem for RelationRetriever {
@@ -406,10 +444,14 @@ impl RetrievalSystem for RelationRetriever {
 
         let mut intro: Vec<IntroEdge> = Vec::new();
         let mut rec: Vec<RecEdge> = Vec::new();
+        // One derivation per edge, in entry order (deterministic): input = the
+        // source entry's content hash, output = the edge's canonical hash.
+        let mut ledger = Ledger::new();
 
         for entry in &corpus.entries {
             let text_lower = entry.text.to_lowercase();
             let (entry_persons, entry_venues) = self.entities_in(&text_lower);
+            let src = Self::entry_hash(&entry.text);
 
             if Self::has_any_cue(&text_lower, INTRO_CUES)
                 && !entry_venues.is_empty()
@@ -418,8 +460,14 @@ impl RetrievalSystem for RelationRetriever {
                 // entry_venues / entry_persons are BTreeSets -> already sorted;
                 // "first" is deterministic.
                 let venue = entry_venues.iter().next().unwrap().clone();
+                let persons: Vec<String> = entry_persons.iter().cloned().collect();
+                ledger.record(Derivation::new(
+                    Self::intro_output_hash(entry.id, &persons, &venue),
+                    vec![src],
+                    MethodStamp::new(M_INTRO, EXTRACTOR_VERSION),
+                ));
                 intro.push(IntroEdge {
-                    persons: entry_persons.iter().cloned().collect(),
+                    persons,
                     venue,
                     entry: entry.id,
                     day: entry.day,
@@ -428,14 +476,21 @@ impl RetrievalSystem for RelationRetriever {
 
             if Self::has_any_cue(&text_lower, REC_CUES) {
                 let venue = entry_venues.iter().next().cloned();
+                let by: Vec<String> = entry_persons.iter().cloned().collect();
+                ledger.record(Derivation::new(
+                    Self::rec_output_hash(entry.id, &by, venue.as_deref()),
+                    vec![src],
+                    MethodStamp::new(M_REC, EXTRACTOR_VERSION),
+                ));
                 rec.push(RecEdge {
-                    by: entry_persons.iter().cloned().collect(),
+                    by,
                     venue,
                     entry: entry.id,
                     day: entry.day,
                 });
             }
         }
+        self.ledger = ledger;
 
         let mut intro_by_person: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for (i, e) in intro.iter().enumerate() {
@@ -904,5 +959,67 @@ mod tests {
     fn relation_name_method_is_stable() {
         let r = RelationRetriever::new();
         assert_eq!(r.name(), "graph-relation");
+    }
+
+    // --- T7: ledger-backed incremental re-extraction + staleness ------------
+
+    #[test]
+    fn changing_an_entry_flags_exactly_its_edges() {
+        use kortex_ledger::score_staleness;
+        let corpus = two_chain_corpus();
+        let mut r = RelationRetriever::new();
+        r.index(&corpus);
+        assert!(
+            !r.ledger().is_empty(),
+            "edges must be recorded in the ledger"
+        );
+
+        // Supersede entry 0 (a hop-A intro entry): its content hash moves.
+        let h0 = RelationRetriever::entry_hash(&corpus.entries[0].text);
+        let changed: BTreeSet<ContentHash> = [h0].into_iter().collect();
+
+        // Independent oracle: outputs whose derivation cites entry 0's hash.
+        let truth: BTreeSet<ContentHash> = r
+            .ledger()
+            .records()
+            .iter()
+            .filter(|d| d.inputs.contains(&h0))
+            .map(|d| d.output)
+            .collect();
+        assert!(!truth.is_empty(), "entry 0 should assert >= 1 edge");
+
+        let flagged = r.ledger().stale_closure(&changed, &BTreeMap::new());
+        let s = score_staleness(&flagged, &truth);
+        assert_eq!(
+            s.invalidation_recall, 1.0,
+            "must catch every dependent edge"
+        );
+        assert_eq!(
+            s.over_invalidation, 0.0,
+            "must not flag any other entry's edges"
+        );
+        assert_eq!(flagged, truth, "exactly entry 0's edges, nothing else");
+    }
+
+    #[test]
+    fn bumping_extractor_version_flags_all_its_edges() {
+        let corpus = two_chain_corpus();
+        let mut r = RelationRetriever::new();
+        r.index(&corpus);
+
+        // Pretend the intro extractor moved to a new version: every intro edge
+        // must be flagged for re-derivation, with no source text changed.
+        let current = BTreeMap::from([(M_INTRO, EXTRACTOR_VERSION + 1)]);
+        let flagged = r.ledger().stale_closure(&BTreeSet::new(), &current);
+
+        let intro_outputs: BTreeSet<ContentHash> = r
+            .ledger()
+            .records()
+            .iter()
+            .filter(|d| d.method.id == M_INTRO)
+            .map(|d| d.output)
+            .collect();
+        assert!(!intro_outputs.is_empty(), "expected intro edges to exist");
+        assert_eq!(flagged, intro_outputs, "all intro edges, no rec edges");
     }
 }
