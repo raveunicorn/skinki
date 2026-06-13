@@ -206,6 +206,10 @@ pub fn available_disk_bytes(path: &std::path::Path) -> Option<u64> {
     unsafe {
         let mut st: libc::statvfs = std::mem::zeroed();
         if libc::statvfs(cpath.as_ptr() as *const libc::c_char, &mut st) == 0 {
+            // The `as u64` casts are load-bearing on 32-bit targets, where the
+            // statvfs fields are `c_ulong` (u32); newer clippy only sees the
+            // 64-bit case where `c_ulong == u64` and flags them as redundant.
+            #[allow(clippy::unnecessary_cast)]
             Some(st.f_bavail as u64 * st.f_frsize as u64)
         } else {
             None
