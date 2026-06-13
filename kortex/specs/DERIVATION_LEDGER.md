@@ -1,11 +1,14 @@
 # Derivation Ledger — staleness-aware memory via hash-linked reasoning (design note)
 
-- **Status:** **v0 foundation built** (`crates/kortex-ledger`) — the algorithm
-  core (content-addressed DAG + deterministic `stale_closure` + the §6 metric)
-  with property/golden tests. Persistence, corpus-wired benchmark, and Stage-3
-  integration are the remaining steps. The design below is the contract the
-  foundation implements; full adoption into the graph/insight path still wants a
-  human go.
+- **Status:** **v0 built + gated** (`crates/kortex-ledger` + `kortex
+  ledger-bench --assert-gate`). The algorithm core (content-addressed DAG +
+  deterministic `stale_closure` + the §6 metric), JSON persistence, property/
+  golden tests, and a corpus-wired benchmark over the planted contradictions are
+  in and green in CI. On the V2 corpus the ledger reaches **invalidation-recall
+  1.000 at 0 over-invalidation** versus a provenance-free baseline's **0.000** —
+  the silent-staleness gap made into a number. Durable append-only persistence
+  (on `kortex-store`) and Stage-3 integration are the remaining steps; full
+  adoption into the graph/insight path still wants a human go.
 - **Where it touches the stack:** L0 provenance (Stage 2, exists), L2b graph and
   two-tier extraction (Stage 3), the Insight Engine (Stage 5). It is the
   connective tissue that makes "cite or be silent" survive *time*.

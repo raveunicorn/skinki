@@ -192,15 +192,17 @@ layered design and budgets.
 - STT choice for Russian (Whisper large/distil vs Parakeet vs Apple Speech).
 - The "invent a format vs use Lance/Cozo" line is decided by Stage 2 data, not
   in advance.
-- **Staleness-aware memory (proposal, pre-design):** store the *reasoning chain*
+- **Staleness-aware memory (v0 built + gated):** store the *reasoning chain*
   behind a derived fact and hash-pin its premises, so a changed premise breaks
   the link and the conclusion is flagged for re-evaluation — deterministic
   propagation of contradictions over a content-addressed Merkle DAG (Git/Nix
-  shape, not a literal blockchain). Cross-cuts L0 provenance, Stage 3 graph, and
-  the Stage 5 keystone; benchmarkable on the `Contradiction` ground truth the
-  corpus already plants. See
+  shape, not a literal blockchain). `crates/kortex-ledger` + `ledger-bench
+  --assert-gate` reach **invalidation-recall 1.000 at 0 over-invalidation** on
+  the corpus's planted `Contradiction` ground truth, vs a provenance-free
+  baseline's **0.000**. Cross-cuts L0 provenance, Stage 3 graph, and the Stage 5
+  keystone. Remaining: durable persistence (on `kortex-store`) and Stage-3
+  integration. See
   [`kortex/specs/DERIVATION_LEDGER.md`](kortex/specs/DERIVATION_LEDGER.md).
-  Awaiting go/no-go.
 - External validation of the architecture's core pattern: DeepSeek V4's
   CSA/HCA attention (query-dependent selection over compressed entries +
   heavily-compressed global context) is the same "compress + select" shape we

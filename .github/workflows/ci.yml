@@ -79,3 +79,11 @@ jobs:
         run: >
           cargo run --release --locked -p kortex-harness -- sleep-sim
           --assert-gate
+      # Derivation Ledger: staleness propagation over a derivation DAG built from
+      # the corpus's planted contradictions — ledger must reach invalidation
+      # recall 1.0 at 0 over-invalidation with real signal, vs a provenance-free
+      # baseline that detects nothing. Deterministic; no LLM.
+      - name: Derivation Ledger gate
+        run: >
+          cargo run --release --locked -p kortex-harness -- ledger-bench
+          --assert-gate

@@ -214,6 +214,21 @@ impl Ledger {
         }
         stale
     }
+
+    /// Persist the ledger as JSON. v0 persistence: the in-memory `Vec` *is* the
+    /// append-only log, so a serialized snapshot is faithful. Durable
+    /// append/rotation/torn-tail recovery is a later step on `kortex-store`'s
+    /// machinery (per the design note); this is enough to carry a ledger across
+    /// sessions and to pin a golden snapshot in tests.
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(self).map_err(std::io::Error::other)?;
+        std::fs::write(path, bytes)
+    }
+
+    pub fn load(path: &std::path::Path) -> std::io::Result<Self> {
+        let bytes = std::fs::read(path)?;
+        serde_json::from_slice(&bytes).map_err(std::io::Error::other)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +401,35 @@ mod tests {
         assert_eq!(
             score.over_invalidation, 0.0,
             "must not flag the independent b"
+        );
+    }
+
+    #[test]
+    fn save_load_roundtrip_and_serialization_is_deterministic() {
+        let (p, q, a, b, c) = (h("p"), h("q"), h("a"), h("b"), h("c"));
+        let mut l = Ledger::new();
+        l.record(Derivation::new(a, vec![p], m()));
+        l.record(Derivation::new(b, vec![q], MethodStamp::new(2, 5)));
+        l.record(Derivation::new(c, vec![a, b], m()));
+
+        // Serializing the same ledger twice is byte-identical (no map/set order
+        // leaking into the snapshot).
+        let s1 = serde_json::to_vec(&l).unwrap();
+        let s2 = serde_json::to_vec(&l).unwrap();
+        assert_eq!(s1, s2);
+
+        let dir = std::env::temp_dir().join(format!("kortex_ledger_io_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("ledger.json");
+        l.save(&path).unwrap();
+        let loaded = Ledger::load(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(l.records(), loaded.records());
+        // A reloaded ledger answers staleness identically.
+        assert_eq!(
+            l.stale_closure(&set(&[p]), &BTreeMap::new()),
+            loaded.stale_closure(&set(&[p]), &BTreeMap::new())
         );
     }
 

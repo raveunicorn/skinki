@@ -35,7 +35,8 @@ kortex/                      PRIMARY — the engine (all real work)
     kortex-vector/    Stage 1: embeddings, quantizers, two-stage, mmap, IVF (unsafe: mmap)
     kortex-store/     Stage 2/2B: append-only L0 + unit store, rotation, dedup (unsafe: mmap)
     kortex-sleep/     Stage 4: interruptible/resumable consolidation scheduler + macOS signals
-    kortex-harness/   `kortex` CLI: generate/eval/demo/compress-bench/scale-bench/store-bench/sleep-sim
+    kortex-ledger/    Derivation Ledger: hash-linked reasoning DAG + deterministic staleness propagation
+    kortex-harness/   `kortex` CLI: generate/eval/demo/compress-bench/scale-bench/store-bench/sleep-sim/ledger-bench
   specs/              per-stage delegation contracts (STAGE_<n>.md from TEMPLATE.md)
 apps/skinki-macos/    PARKED Stage-7 SwiftUI wrapper — do not touch
 ARCHITECTURE.md  ROADMAP.md  AGENTS.md   the vision, the staged plan, the rules
@@ -96,6 +97,7 @@ cargo run --release -p kortex-harness -- compress-bench \
     --source synthetic --dim 256 --vectors 4000 --queries 100 --assert-gate   # Stage 1
 cargo run --release -p kortex-harness -- store-bench --years 5 --assert-gate   # Stage 2
 cargo run --release -p kortex-harness -- sleep-sim --assert-gate               # Stage 4
+cargo run --release -p kortex-harness -- ledger-bench --assert-gate            # Derivation Ledger
 ```
 
 A change is correct **iff** build + test + clippy + fmt + the relevant

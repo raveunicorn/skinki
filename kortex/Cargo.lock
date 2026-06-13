@@ -155,6 +155,7 @@ dependencies = [
  "kortex-baseline",
  "kortex-corpus",
  "kortex-eval",
+ "kortex-ledger",
  "kortex-sleep",
  "kortex-store",
  "kortex-telemetry",

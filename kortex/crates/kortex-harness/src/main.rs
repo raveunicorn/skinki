@@ -28,6 +28,7 @@ use kortex_vector::quant::{RaBitQ, RaBitQBuilder};
 use kortex_vector::search::{ivf_two_stage_search, recall as recall_overlap, two_stage_search};
 use kortex_vector::store::{available_disk_bytes, FloatMmapStore};
 
+use kortex_ledger::{score_staleness, ContentHash, Derivation, Ledger, MethodStamp};
 use kortex_sleep::{check_gate, run_sim, SimConfig, SimResult, StubJob};
 use kortex_vector::{dot, VectorSet};
 
@@ -193,6 +194,26 @@ enum Cmd {
         #[arg(long)]
         report_out: Option<PathBuf>,
         /// Exit non-zero if any gate metric fails (for CI).
+        #[arg(long, default_value_t = false)]
+        assert_gate: bool,
+    },
+    /// Derivation Ledger: build a derivation DAG over the corpus's planted
+    /// conclusions, supersede each planted contradiction, and measure whether
+    /// staleness propagates to exactly the dependent conclusions — versus a
+    /// fact-storage baseline that detects nothing.
+    LedgerBench {
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long, default_value_t = 5)]
+        years: u32,
+        #[arg(long, default_value_t = 6)]
+        entries_per_day: u32,
+        #[arg(long, default_value = "v2")]
+        difficulty: String,
+        #[arg(long)]
+        report_out: Option<PathBuf>,
+        /// Exit non-zero if the ledger doesn't reach recall 1.0 at 0
+        /// over-invalidation with real signal (for CI).
         #[arg(long, default_value_t = false)]
         assert_gate: bool,
     },
@@ -589,6 +610,49 @@ fn main() -> Result<()> {
                     println!("\nGATE: PASS (sleep-sim --assert-gate satisfied)");
                 } else {
                     anyhow::bail!("Stage 4 gate FAILED: {}", verdict.failures.join("; "));
+                }
+            }
+        }
+        Cmd::LedgerBench {
+            seed,
+            years,
+            entries_per_day,
+            difficulty,
+            report_out,
+            assert_gate,
+        } => {
+            let corpus = generate(&GenConfig {
+                seed,
+                years,
+                entries_per_day,
+                difficulty: parse_difficulty(&difficulty)?,
+            });
+            let report = run_ledger_bench(&corpus);
+            print_ledger_bench(&report);
+            if let Some(path) = report_out {
+                let file = std::fs::File::create(&path)
+                    .with_context(|| format!("creating {}", path.display()))?;
+                serde_json::to_writer_pretty(file, &report).context("writing report")?;
+                println!("Report written to {}", path.display());
+            }
+            if assert_gate {
+                // The exact-hash policy must be perfect on this construction:
+                // catch every dependent (recall 1.0), flag nothing independent
+                // (over 0.0), and there must be real signal to catch.
+                let ok = report.ledger_invalidation_recall >= 1.0
+                    && report.ledger_over_invalidation <= 0.0
+                    && report.contradictions_with_dependents > 0
+                    && report.ledger_invalidation_recall > report.baseline_invalidation_recall;
+                if ok {
+                    println!("\nGATE: PASS (ledger-bench --assert-gate satisfied)");
+                } else {
+                    anyhow::bail!(
+                        "Ledger gate FAILED: recall={:.3} (want 1.0), over={:.3} (want 0.0), contradictions_with_dependents={} (want >0), baseline_recall={:.3}",
+                        report.ledger_invalidation_recall,
+                        report.ledger_over_invalidation,
+                        report.contradictions_with_dependents,
+                        report.baseline_invalidation_recall
+                    );
                 }
             }
         }
@@ -1686,4 +1750,185 @@ fn print_sleep_sim(result: &SimResult) {
             println!("  - {f}");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Derivation Ledger benchmark — staleness propagation on planted contradictions
+// ---------------------------------------------------------------------------
+
+// Method ids for the derivation DAG built from corpus ground truth. Each kind
+// of conclusion is produced by a distinct (versioned) "method".
+const M_BELIEF: u32 = 1;
+const M_MULTIHOP: u32 = 2;
+const M_RECALL: u32 = 3;
+const M_INSIGHT: u32 = 4;
+const M_TEMPORAL: u32 = 5;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LedgerBenchReport {
+    corpus_entries: usize,
+    /// Total derivations in the DAG (beliefs + higher-order conclusions).
+    derivations: usize,
+    contradictions: usize,
+    /// Contradictions whose superseded entry actually feeds a conclusion — the
+    /// ones that exercise propagation.
+    contradictions_with_dependents: usize,
+    /// Mean conclusions a single reversal invalidates (over the above).
+    mean_fanout: f64,
+    max_fanout: usize,
+    /// Fraction of genuinely-stale conclusions the ledger catches (want 1.0).
+    ledger_invalidation_recall: f64,
+    /// Fraction the ledger wrongly flags as stale (want 0.0).
+    ledger_over_invalidation: f64,
+    /// What a fact-storage memory (no provenance) catches — structurally 0.
+    baseline_invalidation_recall: f64,
+}
+
+/// Build a derivation DAG from the corpus's planted ground truth, then for each
+/// planted contradiction supersede the "before" entry and measure whether
+/// staleness reaches exactly the dependent conclusions. The DAG is one tier
+/// (entry premises -> conclusions); transitive propagation is covered by
+/// `kortex-ledger`'s unit tests. The value shown here is scale, isolation, and
+/// the contrast against a provenance-free baseline.
+fn run_ledger_bench(corpus: &Corpus) -> LedgerBenchReport {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    // Premise hash per entry: a one-byte change to the entry text moves it,
+    // which is the signal a reversal rides on.
+    let premise: BTreeMap<u64, ContentHash> = corpus
+        .entries
+        .iter()
+        .map(|e| (e.id, ContentHash::of(e.text.as_bytes())))
+        .collect();
+    let prem = |id: u64| premise.get(&id).copied();
+    let stamp = |id| MethodStamp::new(id, 1);
+    let inputs_of = |ids: &[u64]| ids.iter().filter_map(|&id| prem(id)).collect::<Vec<_>>();
+
+    let gt = &corpus.ground_truth;
+    let mut ledger = Ledger::new();
+
+    // Each planted contradiction models a belief the engine formed FROM the
+    // "before" entry — exactly the thing the later reversal must invalidate.
+    for c in &gt.contradictions {
+        if let Some(p) = prem(c.entry_before) {
+            ledger.record(Derivation::new(
+                ContentHash::of(format!("belief:{}", c.id).as_bytes()),
+                vec![p],
+                stamp(M_BELIEF),
+            ));
+        }
+    }
+    // Higher-order conclusions that cite source entries — richer DAG with shared
+    // premises, so propagation must stay isolated to the right dependents.
+    for q in &gt.multi_hop {
+        ledger.record(Derivation::new(
+            ContentHash::of(format!("multihop:{}", q.id).as_bytes()),
+            inputs_of(&q.hop_entries),
+            stamp(M_MULTIHOP),
+        ));
+    }
+    for q in &gt.recall {
+        ledger.record(Derivation::new(
+            ContentHash::of(format!("recall:{}", q.id).as_bytes()),
+            inputs_of(&q.relevant_entries),
+            stamp(M_RECALL),
+        ));
+    }
+    for ib in &gt.insights {
+        ledger.record(Derivation::new(
+            ContentHash::of(format!("insight:{}", ib.id).as_bytes()),
+            inputs_of(&ib.supporting_entries),
+            stamp(M_INSIGHT),
+        ));
+    }
+    for t in &gt.temporal {
+        let mut ids = t.lead_entries.clone();
+        ids.extend_from_slice(&t.trail_entries);
+        ledger.record(Derivation::new(
+            ContentHash::of(format!("temporal:{}", t.id).as_bytes()),
+            inputs_of(&ids),
+            stamp(M_TEMPORAL),
+        ));
+    }
+
+    let empty_versions: BTreeMap<u32, u64> = BTreeMap::new();
+    let mut with_dep = 0usize;
+    let (mut recall_sum, mut over_sum, mut base_sum) = (0.0, 0.0, 0.0);
+    let (mut fanout_sum, mut max_fanout) = (0usize, 0usize);
+
+    for c in &gt.contradictions {
+        let Some(p) = prem(c.entry_before) else {
+            continue;
+        };
+        // Independent oracle: every conclusion whose inputs cite the superseded
+        // premise. Computed directly from membership, not via stale_closure.
+        let truth: BTreeSet<ContentHash> = ledger
+            .records()
+            .iter()
+            .filter(|d| d.inputs.contains(&p))
+            .map(|d| d.output)
+            .collect();
+        if truth.is_empty() {
+            continue;
+        }
+        with_dep += 1;
+
+        let changed: BTreeSet<ContentHash> = [p].into_iter().collect();
+        let flagged = ledger.stale_closure(&changed, &empty_versions);
+        let score = score_staleness(&flagged, &truth);
+        // A fact-storage memory has no provenance, so it flags nothing.
+        let base = score_staleness(&BTreeSet::new(), &truth);
+
+        recall_sum += score.invalidation_recall;
+        over_sum += score.over_invalidation;
+        base_sum += base.invalidation_recall;
+        fanout_sum += truth.len();
+        max_fanout = max_fanout.max(truth.len());
+    }
+
+    let mean = |s: f64| {
+        if with_dep == 0 {
+            0.0
+        } else {
+            s / with_dep as f64
+        }
+    };
+    LedgerBenchReport {
+        corpus_entries: corpus.entries.len(),
+        derivations: ledger.len(),
+        contradictions: gt.contradictions.len(),
+        contradictions_with_dependents: with_dep,
+        mean_fanout: mean(fanout_sum as f64),
+        max_fanout,
+        ledger_invalidation_recall: mean(recall_sum),
+        ledger_over_invalidation: mean(over_sum),
+        baseline_invalidation_recall: mean(base_sum),
+    }
+}
+
+fn print_ledger_bench(r: &LedgerBenchReport) {
+    println!("\n=== Kortex — Derivation Ledger benchmark (planted contradictions) ===");
+    println!("corpus entries     : {}", r.corpus_entries);
+    println!("derivations (DAG)  : {}", r.derivations);
+    println!(
+        "contradictions     : {} ({} with derived dependents)",
+        r.contradictions, r.contradictions_with_dependents
+    );
+    println!(
+        "fan-out per reversal: mean {:.1}, max {} conclusions invalidated",
+        r.mean_fanout, r.max_fanout
+    );
+    println!(
+        "invalidation-recall : ledger {:.3}  vs  fact-storage baseline {:.3}",
+        r.ledger_invalidation_recall, r.baseline_invalidation_recall
+    );
+    println!(
+        "over-invalidation   : {:.3}  (0 = no independent conclusion wrongly flagged)",
+        r.ledger_over_invalidation
+    );
+    println!(
+        "\nReading: when a belief is reversed, a provenance-free memory detects {:.0}% of\nthe conclusions that silently went stale; the ledger detects {:.0}% and flags\nnothing it shouldn't — staleness the agent would otherwise never notice.",
+        r.baseline_invalidation_recall * 100.0,
+        r.ledger_invalidation_recall * 100.0
+    );
 }
