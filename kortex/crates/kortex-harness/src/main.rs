@@ -1547,11 +1547,13 @@ fn run_sleep_sim(seed: u64) -> anyhow::Result<SimResult> {
     // of alternating active and blocked windows.
     let mut timeline: Vec<TimelineSegment> = Vec::new();
     let mut tick = 1u64;
-    // Active: overnight (idle + power on), 1h = ~7200 ticks (at 0.5s/tick)
-    // Simulate a week with ~2 active windows per day (night + afternoon idle).
+    // A week of day cycles. Window sizes are chosen so a realistic backlog
+    // spans several days: the policy must pause through every mid-day blocked
+    // window and resume at night, so the headline gate exercises all six
+    // metrics — not just draining inside the first active window.
     for _day in 0..7u64 {
-        // Morning: active for ~7200 ticks (simulated 1h)
-        let dur = 7200;
+        // Morning: active (on power, user idle).
+        let dur = 400;
         timeline.push(TimelineSegment {
             tick_start: tick,
             tick_end: tick + dur - 1,
@@ -1561,8 +1563,8 @@ fn run_sleep_sim(seed: u64) -> anyhow::Result<SimResult> {
         });
         tick += dur;
 
-        // Mid-day: blocked (user active, on battery or mixed)
-        let dur = 3600;
+        // Mid-day: blocked (user active, on battery or throttling).
+        let dur = 300;
         timeline.push(TimelineSegment {
             tick_start: tick,
             tick_end: tick + dur - 1,
@@ -1572,8 +1574,8 @@ fn run_sleep_sim(seed: u64) -> anyhow::Result<SimResult> {
         });
         tick += dur;
 
-        // Night: active again
-        let dur = 14400;
+        // Night: active again (longer idle window).
+        let dur = 800;
         timeline.push(TimelineSegment {
             tick_start: tick,
             tick_end: tick + dur - 1,
@@ -1592,13 +1594,14 @@ fn run_sleep_sim(seed: u64) -> anyhow::Result<SimResult> {
         thermal_ok: true,
     });
 
-    // Generate a deterministic backlog of stub jobs from the seed.
-    let num_jobs = 5 + (splitmix64(&mut rng) % 11) as usize; // 5-15 jobs
+    // A backlog large enough to span multiple days of active windows, so the
+    // policy is forced to stop at every blocked window and resume afterwards.
+    let num_jobs = 15 + (splitmix64(&mut rng) % 11) as usize; // 15-25 jobs
     let mut jobs: Vec<StubJob> = Vec::new();
     for i in 0..num_jobs {
         let priority = (splitmix64(&mut rng) % 10) as u8 + 1; // 1-10
-        let total_work = 50 + splitmix64(&mut rng) % 451; // 50-500
-        let items_per_step = 5 + splitmix64(&mut rng) % 26; // 5-30
+        let total_work = 2000 + splitmix64(&mut rng) % 3001; // 2000-5000
+        let items_per_step = 15 + splitmix64(&mut rng) % 11; // 15-25
         jobs.push(StubJob::new(
             format!("sim_job_{i}"),
             priority,

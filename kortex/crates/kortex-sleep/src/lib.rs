@@ -25,6 +25,14 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+/// The per-step work cap the scheduler enforces on every [`Scheduler::tick`].
+/// The gate check ([`check_gate`]) reuses this same constant, so the policy
+/// and its verification can never silently diverge.
+const STEP_MAX_ITEMS: u32 = 1000;
+
+/// Soft per-step time bound handed to each job (best-effort, not enforced).
+const STEP_SOFT_DEADLINE_MS: u32 = 100;
+
 // ---------------------------------------------------------------------------
 // T1: Core types — StepBudget, StepOutcome, PowerSignals, Job
 // ---------------------------------------------------------------------------
@@ -74,6 +82,11 @@ pub trait Job: Send {
     fn priority(&self) -> u8;
     /// Advance work by at most `budget.max_items` items, respecting
     /// `budget.soft_deadline_ms` best-effort.
+    ///
+    /// A call with `budget.max_items == 0` must be a side-effect-free *probe*:
+    /// it does no work and reports `Progress { done, total }` (or `Finished`
+    /// if already complete) without consuming any. [`Scheduler::submit`] relies
+    /// on this to learn a job's total work at enqueue time.
     fn step(&mut self, budget: StepBudget) -> StepOutcome;
     /// Serialise remaining work so the job can be restored later.
     fn checkpoint(&self) -> Vec<u8>;
@@ -139,6 +152,10 @@ pub struct Scheduler<S: PowerSignals> {
     dir: PathBuf,
     next_seq: u64,
     tick_count: u64,
+    /// True when `open` found a non-empty checkpoint on disk that has not yet
+    /// been loaded via `restore_from_checkpoint`. Guards `submit` from
+    /// overwriting (and thereby destroying) the persisted queue.
+    pending_restore: bool,
 }
 
 impl<S: PowerSignals> Scheduler<S> {
@@ -150,13 +167,18 @@ impl<S: PowerSignals> Scheduler<S> {
     pub fn open(dir: &Path, signals: S) -> anyhow::Result<Self> {
         fs::create_dir_all(dir)
             .with_context(|| format!("creating scheduler dir {}", dir.display()))?;
-        Ok(Self {
+        let mut sched = Self {
             signals,
             heap: BinaryHeap::new(),
             dir: dir.to_path_buf(),
             next_seq: 0,
             tick_count: 0,
-        })
+            pending_restore: false,
+        };
+        // A non-empty checkpoint must be restored before new jobs are submitted,
+        // otherwise the first `submit` would overwrite the persisted queue.
+        sched.pending_restore = !sched.load_checkpoint_entries()?.is_empty();
+        Ok(sched)
     }
 
     /// Submit a new job to the queue. Persists the checkpoint immediately.
@@ -164,6 +186,12 @@ impl<S: PowerSignals> Scheduler<S> {
     /// A zero-budget probe step is called to determine the initial remaining
     /// work; the job state is preserved (the probe does not consume work).
     pub fn submit(&mut self, mut job: Box<dyn Job>) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.pending_restore,
+            "scheduler has an unrestored on-disk checkpoint; call \
+             restore_from_checkpoint() before submitting (submitting now would \
+             overwrite and lose the persisted queue)"
+        );
         let remaining = match job.step(StepBudget {
             max_items: 0,
             soft_deadline_ms: 0,
@@ -189,6 +217,11 @@ impl<S: PowerSignals> Scheduler<S> {
     /// A step executes iff `on_external_power && user_idle && thermal_ok`.
     /// Otherwise this is a no-op (returns `false`). Between steps, the scheduler
     /// persists progress so a crash loses at most one step of work.
+    ///
+    /// The three signals are queried in a fixed order each tick —
+    /// `on_external_power`, then `user_idle`, then `thermal_ok`. Scripted
+    /// sources such as [`FakeSignals`] depend on this order to advance their
+    /// timeline exactly once per tick.
     pub fn tick(&mut self) -> anyhow::Result<bool> {
         self.tick_count += 1;
         let power = self.signals.on_external_power();
@@ -201,8 +234,8 @@ impl<S: PowerSignals> Scheduler<S> {
             return Ok(false);
         };
         let outcome = entry.job.step(StepBudget {
-            max_items: 1000,
-            soft_deadline_ms: 100,
+            max_items: STEP_MAX_ITEMS,
+            soft_deadline_ms: STEP_SOFT_DEADLINE_MS,
         });
         match &outcome {
             StepOutcome::Progress { done, total } => {
@@ -258,15 +291,18 @@ impl<S: PowerSignals> Scheduler<S> {
                 anyhow::anyhow!("decoding checkpoint state for {}: {}", e.id, err)
             })?;
             let job = factory(&e.id, e.priority, &state);
-            let seq = self.next_seq;
-            self.next_seq += 1;
+            // Preserve the original submission order (`seq`) so priority ties
+            // resolve identically before and after a restart — resume is then
+            // lossless in ordering, not just in remaining work.
+            self.next_seq = self.next_seq.max(e.seq + 1);
             self.heap.push(QueueEntry {
                 priority: e.priority,
                 job,
-                seq,
+                seq: e.seq,
                 remaining: e.remaining,
             });
         }
+        self.pending_restore = false;
         self.save_checkpoint()?;
         Ok(())
     }
@@ -493,7 +529,12 @@ impl Job for StubJob {
 
     fn restore(&mut self, state: &[u8]) {
         assert!(state.len() >= 24, "StubJob checkpoint too short");
+        // Lossless: restore every field the checkpoint carries, not just
+        // `remaining`. `total` and `items_per_step` are needed for the job to
+        // keep stepping correctly after a restore.
         self.remaining = u64::from_le_bytes(state[0..8].try_into().unwrap());
+        self.total = u64::from_le_bytes(state[8..16].try_into().unwrap());
+        self.items_per_step = u64::from_le_bytes(state[16..24].try_into().unwrap());
     }
 }
 
@@ -679,14 +720,16 @@ pub fn check_gate(result: &SimResult) -> GateVerdict {
         ));
     }
 
-    // 3. Resume correctness: checkpoint→restore round-trip (tested in unit tests)
+    // 3. Resume correctness: a mid-run crash+restore drains the same total work
+    //    with nothing lost or double-counted. Proven on the real persistence
+    //    path by `resume_is_lossless` (round-trip) and `scheduler_checkpoint_persistence`.
 
-    // 4. Per-step budget respected: each "ran" entry must have work_done <= max_items (1000)
+    // 4. Per-step budget respected: each "ran" entry must have work_done <= STEP_MAX_ITEMS.
     for entry in &result.trace {
         if let Some(done) = entry.work_done {
-            if done > 1000 {
+            if done > STEP_MAX_ITEMS as u64 {
                 failures.push(format!(
-                    "tick {}: work_done={done} exceeds step budget (1000)",
+                    "tick {}: work_done={done} exceeds step budget ({STEP_MAX_ITEMS})",
                     entry.tick
                 ));
             }
@@ -1020,7 +1063,11 @@ mod tests {
         // 4. All entries respect step budget
         for entry in &result.trace {
             if let Some(done) = entry.work_done {
-                assert!(done <= 1000, "step budget exceeded at tick {}", entry.tick);
+                assert!(
+                    done <= STEP_MAX_ITEMS as u64,
+                    "step budget exceeded at tick {}",
+                    entry.tick
+                );
             }
         }
 
@@ -1124,5 +1171,199 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- T3: StubJob::restore is lossless (all fields, not just remaining) ---
+
+    #[test]
+    fn stub_job_restore_is_lossless() {
+        let mut job = StubJob::new("orig", 5, 300, 17);
+        job.step(StepBudget {
+            max_items: 17,
+            soft_deadline_ms: 100,
+        });
+        let ck = job.checkpoint();
+
+        // A blank job restored from the checkpoint must match field-for-field.
+        let mut blank = StubJob::new("orig", 5, 1, 1);
+        blank.restore(&ck);
+        assert_eq!(blank.remaining, job.remaining);
+        assert_eq!(blank.total, job.total);
+        assert_eq!(blank.items_per_step, job.items_per_step);
+        // And it must keep stepping correctly (needs `total`/`items_per_step`).
+        assert_eq!(blank.checkpoint(), ck);
+    }
+
+    // --- T3: submit before restore is rejected (no silent queue destruction) ---
+
+    #[test]
+    fn submit_before_restore_is_rejected() {
+        let timeline = vec![TimelineSegment {
+            tick_start: 1,
+            tick_end: 100,
+            on_power: true,
+            user_idle: true,
+            thermal_ok: true,
+        }];
+        let dir = std::env::temp_dir().join(format!("kortex_sleep_guard_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        // Session 1: persist a job.
+        {
+            let mut sched = Scheduler::open(&dir, FakeSignals::new(timeline.clone())).unwrap();
+            sched
+                .submit(Box::new(StubJob::new("persisted", 5, 100, 10)))
+                .unwrap();
+        }
+        // Session 2: opening over the checkpoint must refuse a naive submit
+        // (which would overwrite and destroy the persisted queue).
+        {
+            let mut sched = Scheduler::open(&dir, FakeSignals::new(timeline.clone())).unwrap();
+            let err = sched.submit(Box::new(StubJob::new("intruder", 9, 50, 10)));
+            assert!(err.is_err(), "submit before restore must be rejected");
+            // After restoring, submit is allowed again and the queue is intact.
+            let factory = |id: &str, pri: u8, state: &[u8]| -> Box<dyn Job> {
+                Box::new(StubJob::from_checkpoint(id, pri, state))
+            };
+            sched.restore_from_checkpoint(factory).unwrap();
+            sched
+                .submit(Box::new(StubJob::new("ok_now", 1, 10, 10)))
+                .unwrap();
+            let ids: Vec<String> = sched
+                .load_checkpoint_entries()
+                .unwrap()
+                .into_iter()
+                .map(|e| e.id)
+                .collect();
+            assert!(
+                ids.iter().any(|i| i == "persisted"),
+                "persisted job survived"
+            );
+            assert!(ids.iter().any(|i| i == "ok_now"));
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- T6: golden locked-hash trace (pins the scheduling policy byte-for-byte) ---
+
+    fn fnv1a64(data: &[u8]) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for &b in data {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
+    }
+
+    #[test]
+    fn golden_trace_hash_is_locked() {
+        let timeline = vec![
+            TimelineSegment {
+                tick_start: 1,
+                tick_end: 5,
+                on_power: true,
+                user_idle: true,
+                thermal_ok: true,
+            },
+            TimelineSegment {
+                tick_start: 6,
+                tick_end: 10,
+                on_power: false,
+                user_idle: false,
+                thermal_ok: false,
+            },
+            TimelineSegment {
+                tick_start: 11,
+                tick_end: 20,
+                on_power: true,
+                user_idle: true,
+                thermal_ok: true,
+            },
+        ];
+        let jobs = vec![StubJob::new("a", 5, 30, 10), StubJob::new("b", 3, 20, 10)];
+        let result = run_sim(SimConfig { timeline, jobs });
+        let bytes = serde_json::to_vec(&result.trace).expect("serialise trace");
+        let hash = fnv1a64(&bytes);
+        // Locked golden — any change to the scheduling policy moves this hash.
+        assert_eq!(
+            hash, 0xe345_a3f1_e1f2_0148,
+            "sleep scheduling trace changed (hash {hash:#018x}); if intentional, update the golden"
+        );
+    }
+
+    // --- T3/T6: a mid-run crash + restore drains the identical total work ---
+
+    #[test]
+    fn resume_is_lossless() {
+        // All-active timeline: every tick runs, so a restart's tick-count reset
+        // is irrelevant and we isolate the persistence/restore path itself.
+        let timeline = vec![TimelineSegment {
+            tick_start: 1,
+            tick_end: 100_000,
+            on_power: true,
+            user_idle: true,
+            thermal_ok: true,
+        }];
+        let make_jobs = || {
+            vec![
+                StubJob::new("j1", 7, 230, 13),
+                StubJob::new("j2", 7, 170, 9), // same priority as j1 — exercises seq tie-break
+                StubJob::new("j3", 3, 90, 25),
+            ]
+        };
+        let total: u64 = make_jobs().iter().map(|j| j.total).sum();
+        let factory = |id: &str, pri: u8, state: &[u8]| -> Box<dyn Job> {
+            Box::new(StubJob::from_checkpoint(id, pri, state))
+        };
+
+        // Run A: uninterrupted.
+        let dir_a = std::env::temp_dir().join(format!("kortex_sleep_resA_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir_a);
+        let ticks_a = {
+            let mut s = Scheduler::open(&dir_a, FakeSignals::new(timeline.clone())).unwrap();
+            for j in make_jobs() {
+                s.submit(Box::new(j)).unwrap();
+            }
+            let mut n = 0u64;
+            while s.pending_work() > 0 {
+                s.tick().unwrap();
+                n += 1;
+            }
+            assert_eq!(s.pending_work(), 0);
+            n
+        };
+
+        // Run B: crash + restore after 5 ticks, then drain.
+        let dir_b = std::env::temp_dir().join(format!("kortex_sleep_resB_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir_b);
+        {
+            let mut s = Scheduler::open(&dir_b, FakeSignals::new(timeline.clone())).unwrap();
+            for j in make_jobs() {
+                s.submit(Box::new(j)).unwrap();
+            }
+            for _ in 0..5 {
+                s.tick().unwrap();
+            }
+            // drop `s` — simulated crash; checkpoint is on disk.
+        }
+        let ticks_b = {
+            let mut s = Scheduler::open(&dir_b, FakeSignals::new(timeline.clone())).unwrap();
+            s.restore_from_checkpoint(factory).unwrap();
+            let mut n = 5u64;
+            while s.pending_work() > 0 {
+                s.tick().unwrap();
+                n += 1;
+            }
+            assert_eq!(s.pending_work(), 0, "resumed run must fully drain");
+            n
+        };
+
+        // Losslessness: same number of work-steps to drain — no step lost or
+        // repeated across the crash, and tie-break order survived the restore.
+        assert_eq!(ticks_a, ticks_b, "resume took a different number of steps");
+        assert!(total > 0);
+
+        let _ = fs::remove_dir_all(&dir_a);
+        let _ = fs::remove_dir_all(&dir_b);
     }
 }

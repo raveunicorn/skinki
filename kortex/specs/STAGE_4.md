@@ -1,6 +1,7 @@
 # Stage 4 — "Sleep" engine: interruptible background consolidation scheduler (SPEC)
 
-- **Status:** ready-to-build (independent of Stage 3 — jobs are stubs here)
+- **Status:** **done** — scheduler + deterministic simulator shipped; `sleep-sim
+  --assert-gate` green (all six metrics). Real consolidation jobs are Stage 3/5.
 - **Owner of the design (frontier/human):** done below — the scheduler is a
   platform-agnostic, trait-driven skeleton. The *real* consolidation jobs (Leiden
   communities, RAPTOR summaries, PPR precompute) are Stage 3/5 and are **not** in
@@ -126,10 +127,10 @@ pub struct FakeSignals { /* schedule of (tick_range -> signal state) */ }
 
 ## 7. Definition of done
 
-- [ ] `sleep-sim --assert-gate` green; all six gate metrics hold.
-- [ ] `cargo test`, `clippy -D warnings`, `cargo fmt --check` clean.
-- [ ] CI: add a `sleep gate` step.
-- [ ] ROADMAP Stage 4 row → done; this spec Status → done.
+- [x] `sleep-sim --assert-gate` green; all six gate metrics hold.
+- [x] `cargo test`, `clippy -D warnings`, `cargo fmt --check` clean.
+- [x] CI: add a `sleep gate` step.
+- [x] ROADMAP Stage 4 row → done; this spec Status → done.
 
 ## 8. Out of scope
 

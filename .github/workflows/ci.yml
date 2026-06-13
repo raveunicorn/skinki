@@ -63,3 +63,9 @@ jobs:
         run: >
           cargo run --release --locked -p kortex-harness -- store-bench
           --years 5 --assert-gate
+      # Stage 4: sleep scheduler policy gate (all six metrics over a scripted
+      # week — no work while blocked, full drain, step budget, determinism).
+      - name: Stage 4 sleep gate
+        run: >
+          cargo run --release --locked -p kortex-harness -- sleep-sim
+          --assert-gate

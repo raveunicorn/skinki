@@ -86,12 +86,14 @@ impl PowerSignals for MacOSSignals {
 
 fn check_ac_power() -> bool {
     match Command::new("pmset").args(["-g", "batt"]).output() {
-        Ok(out) => {
+        Ok(out) if out.status.success() => {
             let s = String::from_utf8_lossy(&out.stdout);
-            // "Now drawing from 'AC Power'" or "Now drawing from 'Battery Power'"
-            !s.contains("Battery Power")
+            // "Now drawing from 'AC Power'" vs "'Battery Power'". Require a
+            // positive AC reading; anything ambiguous is treated as battery so
+            // we never run background work on an unconfirmed power source.
+            s.contains("AC Power") && !s.contains("Battery Power")
         }
-        Err(_) => false, // conservative: assume battery
+        _ => false, // conservative: assume battery (block work) on any failure
     }
 }
 
@@ -109,23 +111,20 @@ fn get_hid_idle_ns() -> Option<u64> {
         .args(["-c", "IOHIDSystem", "-r", "-d", "1", "-n", "root"])
         .output()
         .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout);
-    // Look for: "HIDIdleTime" = 123456789
-    for line in s.lines() {
-        if let Some(val) = line.split('"').nth(3) {
-            if let Ok(ns) = val.trim().parse::<u64>() {
-                return Some(ns);
-            }
-        }
+    if !out.status.success() {
+        return None;
     }
-    // Fallback: grep for the = number pattern
+    let s = String::from_utf8_lossy(&out.stdout);
+    // Parse only the HIDIdleTime line (`"HIDIdleTime" = 123456789`). Matching on
+    // any quoted field would grab an unrelated numeric property and report a
+    // bogus idle time — which could let work run while the user is active.
     for line in s.lines() {
-        if line.contains("HIDIdleTime") {
-            if let Some(eq) = line.find('=') {
-                let val = line[eq + 1..].trim();
-                if let Ok(ns) = val.parse::<u64>() {
-                    return Some(ns);
-                }
+        if !line.contains("HIDIdleTime") {
+            continue;
+        }
+        if let Some(eq) = line.find('=') {
+            if let Ok(ns) = line[eq + 1..].trim().parse::<u64>() {
+                return Some(ns);
             }
         }
     }
@@ -134,7 +133,7 @@ fn get_hid_idle_ns() -> Option<u64> {
 
 fn check_thermal_ok() -> bool {
     match Command::new("pmset").args(["-g", "therm"]).output() {
-        Ok(out) => {
+        Ok(out) if out.status.success() => {
             let s = String::from_utf8_lossy(&out.stdout);
             // "CPU_Scheduler_Limit = 100" means no throttling.
             // Values < 100 indicate thermal throttling.
@@ -152,6 +151,7 @@ fn check_thermal_ok() -> bool {
             // changed — don't block work on parse failure).
             true
         }
-        Err(_) => true, // conservative: assume OK (don't block on tool failure)
+        // A missing/failed therm query shouldn't halt all consolidation.
+        _ => true,
     }
 }
