@@ -7,6 +7,7 @@ description = "Stage 3 — deterministic GraphRAG (typed-relation multi-hop retr
 
 [dependencies]
 serde.workspace = true
+serde_json.workspace = true
 kortex-corpus.workspace = true
 kortex-eval.workspace = true
 kortex-baseline.workspace = true

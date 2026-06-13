@@ -28,7 +28,7 @@ use kortex_vector::quant::{RaBitQ, RaBitQBuilder};
 use kortex_vector::search::{ivf_two_stage_search, recall as recall_overlap, two_stage_search};
 use kortex_vector::store::{available_disk_bytes, FloatMmapStore};
 
-use kortex_graph::{GraphRetriever, RelationRetriever};
+use kortex_graph::{ArtifactLog, GraphRetriever, LlmExtraction, RelationRetriever};
 use kortex_ledger::{score_staleness, ContentHash, Derivation, Ledger, MethodStamp};
 use kortex_sleep::{check_gate, run_sim, SimConfig, SimResult, StubJob};
 use kortex_vector::{dot, VectorSet};
@@ -699,6 +699,23 @@ fn main() -> Result<()> {
 // Stage 3 MVP — graph-eval: deterministic co-mention graph vs BM25
 // ---------------------------------------------------------------------------
 
+/// Sorted set of ground-truth Person names that occur (case-insensitive
+/// substring match) in `text`. Used by the Stage 3 D2 ORACLE to resolve a
+/// coreference rec edge's recommender from hop A's text — this stands in for
+/// what an LLM tier would infer, but is itself a deterministic function of
+/// the planted ground truth (no inference at gate time).
+fn person_names_in(text: &str, corpus: &Corpus) -> std::collections::BTreeSet<String> {
+    let text_lower = text.to_lowercase();
+    corpus
+        .ground_truth
+        .entities
+        .iter()
+        .filter(|e| e.kind == kortex_corpus::EntityKind::Person)
+        .map(|e| e.name.to_lowercase())
+        .filter(|n| text_lower.contains(n.as_str()))
+        .collect()
+}
+
 fn run_graph_eval(corpus: &Corpus, k: usize, assert_gate: bool) -> anyhow::Result<()> {
     let mut bm25 = Bm25::new();
     bm25.index(corpus);
@@ -708,6 +725,63 @@ fn run_graph_eval(corpus: &Corpus, k: usize, assert_gate: bool) -> anyhow::Resul
 
     let mut relation = RelationRetriever::new();
     relation.index(corpus);
+
+    // --- D2: build the ORACLE artifact log -----------------------------
+    //
+    // For each planted multi-hop chain [hopA, hopB]: if hopB is the
+    // ambiguous coreference rec form (`relation.selects_for_llm_tier`), the
+    // recommender Q is the person(s) named in hopA's text that are NOT named
+    // in the question itself (the question already names the querying
+    // person; Q is the *other* person hopA introduces). This is a
+    // deterministic function of planted ground truth — it stands in for the
+    // LLM tier, not a live model — and is written/replayed through the real
+    // T6 artifact-log path.
+    let artifact_path = std::env::temp_dir().join(format!(
+        "kortex_graph_eval_artifacts_{}.jsonl",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&artifact_path);
+    for mh in &corpus.ground_truth.multi_hop {
+        if mh.hop_entries.len() != 2 {
+            continue;
+        }
+        let (hop_a, hop_b) = (mh.hop_entries[0], mh.hop_entries[1]);
+        let Some(hop_b_text) = corpus.entry_text(hop_b) else {
+            continue;
+        };
+        if !relation.selects_for_llm_tier(hop_b_text) {
+            continue;
+        }
+        let Some(hop_a_text) = corpus.entry_text(hop_a) else {
+            continue;
+        };
+        let hop_a_persons = person_names_in(hop_a_text, corpus);
+        let question_persons = person_names_in(&mh.question, corpus);
+        let resolved_by: Vec<String> = hop_a_persons
+            .into_iter()
+            .filter(|p| !question_persons.contains(p))
+            .collect();
+        if resolved_by.is_empty() {
+            continue;
+        }
+        ArtifactLog::append(
+            &artifact_path,
+            &LlmExtraction {
+                entry: hop_b,
+                resolved_by,
+                model_version: 1,
+            },
+        )?;
+    }
+    let replayed = if artifact_path.exists() {
+        ArtifactLog::replay(&artifact_path)?
+    } else {
+        Vec::new()
+    };
+    let _ = std::fs::remove_file(&artifact_path);
+
+    let mut relation_llm = RelationRetriever::new();
+    relation_llm.index_with_artifacts(corpus, &replayed);
 
     let recall_items: Vec<QItem> = corpus
         .ground_truth
@@ -733,6 +807,7 @@ fn run_graph_eval(corpus: &Corpus, k: usize, assert_gate: bool) -> anyhow::Resul
     let mut bm25_durations: Vec<Duration> = Vec::new();
     let mut graph_durations: Vec<Duration> = Vec::new();
     let mut relation_durations: Vec<Duration> = Vec::new();
+    let mut relation_llm_durations: Vec<Duration> = Vec::new();
 
     let bm25_recall = score_set(&bm25, corpus, &recall_items, k, &mut bm25_durations);
     let bm25_multihop = score_set(&bm25, corpus, &multihop_items, k, &mut bm25_durations);
@@ -745,6 +820,20 @@ fn run_graph_eval(corpus: &Corpus, k: usize, assert_gate: bool) -> anyhow::Resul
         &multihop_items,
         k,
         &mut relation_durations,
+    );
+    let relation_llm_recall = score_set(
+        &relation_llm,
+        corpus,
+        &recall_items,
+        k,
+        &mut relation_llm_durations,
+    );
+    let relation_llm_multihop = score_set(
+        &relation_llm,
+        corpus,
+        &multihop_items,
+        k,
+        &mut relation_llm_durations,
     );
 
     println!("=== Kortex Stage 3 (MVP) — Graph vs BM25 contrast ===");
@@ -766,41 +855,63 @@ fn run_graph_eval(corpus: &Corpus, k: usize, assert_gate: bool) -> anyhow::Resul
     );
     println!();
     println!(
-        "{:<28} {:>9} {:>9} {:>9}",
-        "metric", "bm25", "graph", "relation"
+        "{:<28} {:>9} {:>9} {:>9} {:>9}",
+        "metric", "bm25", "graph", "relation", "rel+llm"
     );
     println!(
-        "{:<28} {:>9.3} {:>9.3} {:>9.3}",
+        "{:<28} {:>9.3} {:>9.3} {:>9.3} {:>9.3}",
         format!("single-hop recall@{k}"),
         bm25_recall.recall_at_k,
         graph_recall.recall_at_k,
-        relation_recall.recall_at_k
+        relation_recall.recall_at_k,
+        relation_llm_recall.recall_at_k
     );
     println!(
-        "{:<28} {:>9.3} {:>9.3} {:>9.3}",
+        "{:<28} {:>9.3} {:>9.3} {:>9.3} {:>9.3}",
         format!("single-hop ans@{k}"),
         bm25_recall.answer_in_topk,
         graph_recall.answer_in_topk,
-        relation_recall.answer_in_topk
+        relation_recall.answer_in_topk,
+        relation_llm_recall.answer_in_topk
     );
     println!(
-        "{:<28} {:>9.3} {:>9.3} {:>9.3}",
+        "{:<28} {:>9.3} {:>9.3} {:>9.3} {:>9.3}",
         format!("multi-hop  recall@{k}"),
         bm25_multihop.recall_at_k,
         graph_multihop.recall_at_k,
-        relation_multihop.recall_at_k
+        relation_multihop.recall_at_k,
+        relation_llm_multihop.recall_at_k
     );
     println!(
-        "{:<28} {:>9.3} {:>9.3} {:>9.3}",
+        "{:<28} {:>9.3} {:>9.3} {:>9.3} {:>9.3}",
         format!("multi-hop  ans@{k}"),
         bm25_multihop.answer_in_topk,
         graph_multihop.answer_in_topk,
-        relation_multihop.answer_in_topk
+        relation_multihop.answer_in_topk,
+        relation_llm_multihop.answer_in_topk
     );
     println!(
         "\nrelation ledger  : {} edge derivations (provenance-pinned -> incremental re-extraction + staleness, T7)",
         relation.ledger().len()
     );
+
+    // D2 — LLM-tier selection policy: the fraction of corpus units routed to
+    // the (simulated) LLM tier, and the multi-hop recall@k lift it buys over
+    // the deterministic relation tier alone.
+    let tier1_share = relation.llm_tier_share(corpus);
+    let mh_lift = relation_llm_multihop.recall_at_k - relation_multihop.recall_at_k;
+    println!(
+        "llm tier         : selected {} / {} units ({:.2}% of corpus) -> tier-1 share {:.4}",
+        corpus
+            .entries
+            .iter()
+            .filter(|e| relation.selects_for_llm_tier(&e.text))
+            .count(),
+        corpus.entries.len(),
+        tier1_share * 100.0,
+        tier1_share
+    );
+    println!("multi-hop recall@{k} lift (rel+llm - relation): {mh_lift:+.3}");
 
     // T8 — graph RAM telemetry: measure the graph structures and project to 5M
     // (edges scale ~linearly with entries). Budget: <= ~120 MB, leaving room for
@@ -823,20 +934,37 @@ fn run_graph_eval(corpus: &Corpus, k: usize, assert_gate: bool) -> anyhow::Resul
         const MULTIHOP_RECALL_MIN: f64 = 0.50;
         const MULTIHOP_ANS_MIN: f64 = 0.60;
         const GRAPH_RAM_5M_MAX_MB: f64 = 120.0;
+        // D2: the LLM tier must stay cheap (selects a small minority of units).
+        // We do NOT gate on a positive lift: the oracle-ceiling measurement shows
+        // the LLM tier does not reliably beat the deterministic venue+temporal
+        // bridge on this corpus (it can even hurt, via person-name-collision
+        // cross-talk) — an honest "not earned yet" result, surfaced as the printed
+        // `mh_lift`, not a pass/fail. The gate guards the deterministic tier and
+        // the tier-1 cost.
+        const TIER1_SHARE_MAX: f64 = 0.05;
         let mh_recall = relation_multihop.recall_at_k;
         let mh_ans = relation_multihop.answer_in_topk;
         let sh_ok = relation_recall.recall_at_k >= bm25_recall.recall_at_k;
         let ram_ok = graph_5m_mb <= GRAPH_RAM_5M_MAX_MB;
-        if mh_recall >= MULTIHOP_RECALL_MIN && mh_ans >= MULTIHOP_ANS_MIN && sh_ok && ram_ok {
+        let tier1_ok = tier1_share <= TIER1_SHARE_MAX;
+        if mh_recall >= MULTIHOP_RECALL_MIN
+            && mh_ans >= MULTIHOP_ANS_MIN
+            && sh_ok
+            && ram_ok
+            && tier1_ok
+        {
             println!(
-                "\nGATE: PASS (relation multi-hop recall@{k}={mh_recall:.3} ans@{k}={mh_ans:.3}; single-hop recall {:.3} >= bm25 {:.3}; graph {graph_5m_mb:.1} MB @5M)",
-                relation_recall.recall_at_k, bm25_recall.recall_at_k
+                "\nGATE: PASS (relation multi-hop recall@{k}={mh_recall:.3} ans@{k}={mh_ans:.3}; single-hop recall {:.3} >= bm25 {:.3}; graph {graph_5m_mb:.1} MB @5M; tier-1 share {:.4} <= {TIER1_SHARE_MAX}; LLM-tier lift {mh_lift:+.3} — informational, not earned)",
+                relation_recall.recall_at_k,
+                bm25_recall.recall_at_k,
+                tier1_share,
             );
         } else {
             anyhow::bail!(
-                "Stage 3 gate FAILED: relation multi-hop recall@{k}={mh_recall:.3} (want >={MULTIHOP_RECALL_MIN}), ans@{k}={mh_ans:.3} (want >={MULTIHOP_ANS_MIN}), single-hop recall {:.3} vs bm25 {:.3} (no regress), graph {graph_5m_mb:.1} MB @5M (want <={GRAPH_RAM_5M_MAX_MB})",
+                "Stage 3 gate FAILED: relation multi-hop recall@{k}={mh_recall:.3} (want >={MULTIHOP_RECALL_MIN}), ans@{k}={mh_ans:.3} (want >={MULTIHOP_ANS_MIN}), single-hop recall {:.3} vs bm25 {:.3} (no regress), graph {graph_5m_mb:.1} MB @5M (want <={GRAPH_RAM_5M_MAX_MB}), tier-1 share {:.4} (want <={TIER1_SHARE_MAX})",
                 relation_recall.recall_at_k,
-                bm25_recall.recall_at_k
+                bm25_recall.recall_at_k,
+                tier1_share,
             );
         }
     }

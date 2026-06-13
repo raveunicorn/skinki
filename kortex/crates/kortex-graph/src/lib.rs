@@ -64,9 +64,31 @@
 //!
 //! Single-hop recall never drops below BM25. Gated by
 //! `graph-eval --assert-gate` (multi-hop recall@10 >= 0.50, ans@10 >= 0.60, no
-//! single-hop regression). The deterministic tier clears the gate alone; the LLM
-//! tier (`STAGE_3.md` D2) is reserved for lifting the residual coref hops, where
-//! recall@10 falls off at scale — a documented follow-up, not a blocker.
+//! single-hop regression). The deterministic tier clears the gate alone.
+//!
+//! ## Measured verdict (round 3 — the LLM tier is *not earned* on this corpus)
+//!
+//! T6/D2 add the two-tier machinery: an append-only [`ArtifactLog`] (replay
+//! contract, AGENTS rule 3), a deterministic [`RelationRetriever::selects_for_llm_tier`]
+//! policy (a unit goes to tier-1 iff it is an ambiguous coreference rec — a rec
+//! cue + a venue + *no* person), and [`RelationRetriever::index_with_artifacts`]
+//! to fold replayed resolutions back in. To measure the tier's *ceiling* without
+//! a model, `graph-eval` builds a **ground-truth oracle** artifact log (the
+//! perfect LLM) and replays it.
+//!
+//! The honest result: the oracle tier-1 selects only ~0.1% of units (well under
+//! the 5% budget) but **does not reliably help** — multi-hop recall@10 lift is
+//! **-0.125 at ~11.5k** and only **+0.031 at ~29.6k**. Resolving the
+//! coreference to a *person name* re-indexes that hop under `rec_by_person`, and
+//! because the corpus reuses person names, this injects cross-chain noise the
+//! deterministic **venue+temporal** bridge had avoided. In other words: even a
+//! *perfect* model adds nothing here once the substrate disambiguates by time —
+//! a direct vindication of the project's first law, **intelligence in the
+//! memory, not the model**. So we *do not adopt* the LLM tier: the gate prints
+//! the lift as informational and does not require it. The replay+selection
+//! machinery stays, ready to be re-measured on a regime where the oracle ceiling
+//! actually pays (e.g. genuinely unrecoverable coref, or relation types the
+//! deterministic patterns can't see).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -312,6 +334,71 @@ const EXTRACTOR_VERSION: u64 = 1;
 const M_INTRO: u32 = 1;
 const M_REC: u32 = 2;
 
+/// Method id for an LLM-tier coreference resolution applied to a `RecEdge`
+/// (Stage 3 D2). The "model version" is carried per-record in
+/// [`LlmExtraction::model_version`] so the ledger can flag every LLM-tier edge
+/// for re-derivation if the (simulated) model changes, exactly like
+/// `EXTRACTOR_VERSION` does for the deterministic tier.
+pub const M_LLM_REC: u32 = 3;
+
+// ---------------------------------------------------------------------------
+// T6 — replay artifact log
+// ---------------------------------------------------------------------------
+//
+// Every LLM-tier output that feeds the graph is appended to a flat,
+// append-only JSON-lines log before it is folded in. `index_with_artifacts`
+// never calls an LLM directly: it only consumes records that were produced
+// once (by the oracle in this measurement, or a real model in Stage 5+) and
+// replayed back through this log, so the graph build stays
+// `rebuild(log)`-deterministic (AGENTS.md: LLM outputs are replayable, not
+// bit-deterministic, but everything downstream of the log is).
+
+/// One LLM-tier extraction: the coreference `RecEdge` it resolved, and the
+/// (lowercased) recommender name(s) it inferred for that edge's `by` field.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct LlmExtraction {
+    /// The coref rec entry the LLM resolved.
+    pub entry: EntryId,
+    /// Lowercased recommender person name(s) it inferred.
+    pub resolved_by: Vec<String>,
+    /// Simulated model version, stamped into the ledger's `MethodStamp` so a
+    /// model upgrade can be detected as staleness (AGENTS.md rule 3).
+    pub model_version: u64,
+}
+
+/// Thin namespace for the artifact-log replay contract (T6). Methods are
+/// associated functions — there is no per-instance state, only the file.
+pub struct ArtifactLog;
+
+impl ArtifactLog {
+    /// Append one record as a JSON line to `path` (create-or-append).
+    pub fn append(path: &std::path::Path, x: &LlmExtraction) -> std::io::Result<()> {
+        use std::io::Write;
+        let line = serde_json::to_string(x).map_err(std::io::Error::other)?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        f.write_all(line.as_bytes())?;
+        f.write_all(b"\n")?;
+        Ok(())
+    }
+
+    /// Replay all records (JSON-lines) in file order. Deterministic.
+    pub fn replay(path: &std::path::Path) -> std::io::Result<Vec<LlmExtraction>> {
+        let contents = std::fs::read_to_string(path)?;
+        let mut out = Vec::new();
+        for line in contents.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let x: LlmExtraction = serde_json::from_str(line).map_err(std::io::Error::other)?;
+            out.push(x);
+        }
+        Ok(out)
+    }
+}
+
 /// "P introduced me to Q (and maybe others) at venue V on day `day`."
 struct IntroEdge {
     persons: Vec<String>,
@@ -417,6 +504,99 @@ impl RelationRetriever {
     /// version. Drives incremental re-extraction and staleness (Stage 3 T7).
     pub fn ledger(&self) -> &Ledger {
         &self.ledger
+    }
+
+    /// True iff this unit is an AMBIGUOUS coreference recommendation — a REC
+    /// cue + a venue mentioned but NO person named. This is exactly the unit
+    /// whose recommender the LLM tier (D2) must resolve: the deterministic
+    /// tier can only bridge it via the noisy venue+temporal walk.
+    ///
+    /// Pure function of `text` (any case) and the gazetteer built by `index`.
+    pub fn selects_for_llm_tier(&self, text: &str) -> bool {
+        let text_lower = text.to_lowercase();
+        if !Self::has_any_cue(&text_lower, REC_CUES) {
+            return false;
+        }
+        let (persons, venues) = self.entities_in(&text_lower);
+        !venues.is_empty() && persons.is_empty()
+    }
+
+    /// Fraction of `corpus.entries` selected for the LLM tier by
+    /// [`Self::selects_for_llm_tier`] — the "tier-1 share" the Stage 3 gate
+    /// caps (cheap deterministic tier handles the rest).
+    pub fn llm_tier_share(&self, corpus: &Corpus) -> f64 {
+        let n = corpus.entries.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let selected = corpus
+            .entries
+            .iter()
+            .filter(|e| self.selects_for_llm_tier(&e.text))
+            .count();
+        selected as f64 / n as f64
+    }
+
+    /// Like [`RetrievalSystem::index`], but after deterministic extraction,
+    /// fold in replayed LLM-tier resolutions (T6/D2): for each
+    /// [`LlmExtraction`], find the `RecEdge` at that entry and merge its
+    /// `resolved_by` persons into the edge's `by` (dedup, sorted), then rebuild
+    /// `rec_by_person`. Each applied resolution is also recorded in the ledger
+    /// as a `Derivation` (input = the entry's content hash, output = the
+    /// upgraded rec edge's hash, method = `MethodStamp{ id: M_LLM_REC, version:
+    /// model_version }`), so the LLM tier is replay- and staleness-tracked too.
+    ///
+    /// Deterministic and idempotent on the same `(corpus, artifacts)`:
+    /// `artifacts` is processed in its given (file) order, `by` is
+    /// deduped+sorted before hashing, and `rec_by_person` is rebuilt from
+    /// scratch in ascending `rec` index order.
+    pub fn index_with_artifacts(&mut self, corpus: &Corpus, artifacts: &[LlmExtraction]) {
+        self.index(corpus);
+
+        // entry -> index into `self.rec`, for O(1) lookup while applying
+        // artifacts. Built once; rec entries are unique per EntryId by
+        // construction (one REC-cue check per corpus entry).
+        let mut rec_by_entry: BTreeMap<EntryId, usize> = BTreeMap::new();
+        for (i, e) in self.rec.iter().enumerate() {
+            rec_by_entry.insert(e.entry, i);
+        }
+
+        for art in artifacts {
+            let Some(&ri) = rec_by_entry.get(&art.entry) else {
+                continue; // no rec edge at this entry — nothing to upgrade
+            };
+            if art.resolved_by.is_empty() {
+                continue;
+            }
+
+            let edge = &mut self.rec[ri];
+            let src = Self::entry_hash(&corpus.entries[art.entry as usize].text);
+            let before = Self::rec_output_hash(edge.entry, &edge.by, edge.venue.as_deref());
+
+            // Merge: dedup + sort for determinism, idempotent on repeats.
+            let mut by: BTreeSet<String> = edge.by.iter().cloned().collect();
+            for p in &art.resolved_by {
+                by.insert(p.clone());
+            }
+            edge.by = by.into_iter().collect();
+
+            let after = Self::rec_output_hash(edge.entry, &edge.by, edge.venue.as_deref());
+            self.ledger.record(Derivation::new(
+                after,
+                vec![src, before],
+                MethodStamp::new(M_LLM_REC, art.model_version),
+            ));
+        }
+
+        // Rebuild rec_by_person from scratch (ascending rec index order ->
+        // deterministic posting order, same as `index`).
+        let mut rec_by_person: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (i, e) in self.rec.iter().enumerate() {
+            for p in &e.by {
+                rec_by_person.entry(p.clone()).or_default().push(i);
+            }
+        }
+        self.rec_by_person = rec_by_person;
     }
 
     /// Approximate resident bytes of the **graph** structures that scale with
@@ -1065,5 +1245,125 @@ mod tests {
             .collect();
         assert!(!intro_outputs.is_empty(), "expected intro edges to exist");
         assert_eq!(flagged, intro_outputs, "all intro edges, no rec edges");
+    }
+
+    // --- T6/D2: LLM-tier artifact log + selection policy --------------------
+
+    #[test]
+    fn artifact_log_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "kortex_graph_artifact_log_test_{}_{}",
+            std::process::id(),
+            "roundtrip"
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("artifacts.jsonl");
+        let _ = std::fs::remove_file(&path);
+
+        let a = LlmExtraction {
+            entry: 1,
+            resolved_by: vec!["anna".to_string()],
+            model_version: 1,
+        };
+        let b = LlmExtraction {
+            entry: 3,
+            resolved_by: vec!["carol".to_string(), "diane".to_string()],
+            model_version: 1,
+        };
+        ArtifactLog::append(&path, &a).unwrap();
+        ArtifactLog::append(&path, &b).unwrap();
+
+        let replayed = ArtifactLog::replay(&path).unwrap();
+        assert_eq!(replayed, vec![a, b]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn llm_tier_upgrades_coref_recedge() {
+        let corpus = two_chain_corpus();
+
+        // Entry 1 is the coreference rec edge: "The person I met at the
+        // meetup recommended the book Dune." -> hop A (entry 0) names Anna and
+        // Marcus; the LLM resolves "the person I met" to Marcus.
+        let mut rel = RelationRetriever::new();
+        rel.index(&corpus);
+        assert!(
+            rel.selects_for_llm_tier(&corpus.entries[1].text),
+            "entry 1 (coref rec) should be selected for the LLM tier"
+        );
+        assert!(
+            !rel.selects_for_llm_tier(&corpus.entries[0].text),
+            "entry 0 (names both people) should NOT be selected"
+        );
+
+        let artifacts = vec![LlmExtraction {
+            entry: 1,
+            resolved_by: vec!["marcus".to_string()],
+            model_version: 1,
+        }];
+
+        let mut rel_llm = RelationRetriever::new();
+        rel_llm.index_with_artifacts(&corpus, &artifacts);
+
+        let ri = rel_llm
+            .rec
+            .iter()
+            .position(|e| e.entry == 1)
+            .expect("rec edge at entry 1 must exist");
+        assert_eq!(
+            rel_llm.rec[ri].by,
+            vec!["marcus".to_string()],
+            "RecEdge.by must now contain the LLM-resolved recommender"
+        );
+        assert!(
+            rel_llm
+                .rec_by_person
+                .get("marcus")
+                .is_some_and(|v| v.contains(&ri)),
+            "rec_by_person must index the upgraded edge"
+        );
+
+        // Ledger gained an M_LLM_REC derivation for this upgrade.
+        assert!(
+            rel_llm
+                .ledger()
+                .records()
+                .iter()
+                .any(|d| d.method.id == M_LLM_REC && d.method.version == 1),
+            "expected an M_LLM_REC derivation"
+        );
+    }
+
+    #[test]
+    fn index_with_artifacts_is_deterministic() {
+        let corpus = two_chain_corpus();
+        let artifacts = vec![LlmExtraction {
+            entry: 1,
+            resolved_by: vec!["marcus".to_string()],
+            model_version: 1,
+        }];
+        let query = "What book was recommended by the person Anna introduced me to?";
+
+        let mut r1 = RelationRetriever::new();
+        r1.index_with_artifacts(&corpus, &artifacts);
+        let out1 = r1.search(query, 4);
+
+        let mut r2 = RelationRetriever::new();
+        r2.index_with_artifacts(&corpus, &artifacts);
+        let out2 = r2.search(query, 4);
+
+        assert_eq!(
+            out1, out2,
+            "same corpus + artifacts must yield identical search output"
+        );
+
+        // Idempotent: applying the same artifacts again (fresh index + apply
+        // twice via two separate calls is not the API, so just re-run on a
+        // fresh instance) yields the same edge state.
+        assert_eq!(
+            r1.rec[r1.rec.iter().position(|e| e.entry == 1).unwrap()].by,
+            r2.rec[r2.rec.iter().position(|e| e.entry == 1).unwrap()].by
+        );
     }
 }

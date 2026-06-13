@@ -1,7 +1,8 @@
 # Stage 3 — Incremental local GraphRAG (SPEC)
 
-- **Status:** in-progress (deterministic tier done + gated; **T7 ledger wiring
-  done**; LLM tier D2 + replay T6 pending)
+- **Status:** in-progress (deterministic tier done + gated; **T7 ledger, T8
+  telemetry, T6 replay + D2 selection all done**; live-LLM integration deferred —
+  the oracle ceiling shows the tier isn't earned on this corpus)
 
 > **Measurement log — round 1 (co-mention MVP).** A deterministic entity+venue
 > **co-mention** graph (1-hop + RRF, `crates/kortex-graph::GraphRetriever`)
@@ -23,11 +24,27 @@
 >
 > The deterministic tier **clears the gate alone** (recall@10 0.800 ≥ 0.50,
 > ans@10 0.900 ≥ 0.60 at default scale) and the relative win *widens* with scale.
-> recall@10 falls off at larger N (coref hops sharing a venue) — the documented
-> residual the **LLM tier (D2)** targets. `graph-eval --assert-gate` is wired and
-> in CI. **Verdict so far:** deterministic GraphRAG beats BM25 on multi-hop by
-> 2.5–3× with zero single-hop regression; invent nothing yet — the LLM tier earns
-> its place only on the measured coref residual.
+> recall@10 falls off at larger N (coref hops sharing a venue) — the residual the
+> LLM tier (D2) targets. `graph-eval --assert-gate` is wired and in CI.
+>
+> **Measurement log — round 3 (LLM tier T6/D2 — measured, NOT earned).** Added
+> the replay machinery (`ArtifactLog`), the deterministic selection policy
+> (`selects_for_llm_tier`: rec-cue + venue + no person → ambiguous coref), and
+> `index_with_artifacts`. Measured the tier's *ceiling* with a ground-truth
+> **oracle** (perfect LLM) replayed through the log — no live model:
+>
+> | corpus | tier-1 share | multi-hop recall@10 lift (rel+llm − relation) |
+> | --- | --- | --- |
+> | ~11.5k | 0.10% | **−0.125** |
+> | ~29.6k | 0.04% | **+0.031** |
+>
+> Even a *perfect* model doesn't reliably help: resolving coref to a reused
+> person name re-indexes the hop under `rec_by_person` and injects cross-chain
+> noise the deterministic **venue+temporal** bridge avoided. **Verdict: the LLM
+> tier is not earned on this corpus** — a vindication of "intelligence in the
+> memory, not the model." The gate prints the lift as informational and does not
+> require it; the machinery stays for re-measurement on a regime where the oracle
+> ceiling actually pays. Live-LLM integration deferred to Stage 6/7.
 - **Owner of the design (frontier/human):** frontier — the graph schema, the
   retrieval algorithm, the tier-0/tier-1 split, the replay contract, and the
   ledger wiring are decided here. Heavy review on every algorithm-core PR.

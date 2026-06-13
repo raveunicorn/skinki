@@ -155,6 +155,7 @@ dependencies = [
  "kortex-eval",
  "kortex-ledger",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
