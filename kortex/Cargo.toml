@@ -10,6 +10,7 @@ members = [
     "crates/kortex-sleep",
     "crates/kortex-ledger",
     "crates/kortex-harness",
+    "crates/kortex-graph",
 ]
 
 # Kortex — the portable local memory + insight engine (Stage 0: eval harness).
@@ -38,6 +39,7 @@ kortex-vector = { path = "crates/kortex-vector" }
 kortex-store = { path = "crates/kortex-store" }
 kortex-sleep = { path = "crates/kortex-sleep" }
 kortex-ledger = { path = "crates/kortex-ledger" }
+kortex-graph = { path = "crates/kortex-graph" }
 
 [profile.release]
 opt-level = 3

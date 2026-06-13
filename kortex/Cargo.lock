@@ -147,6 +147,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "kortex-graph"
+version = "0.1.0"
+dependencies = [
+ "kortex-baseline",
+ "kortex-corpus",
+ "kortex-eval",
+ "serde",
+]
+
+[[package]]
 name = "kortex-harness"
 version = "0.1.0"
 dependencies = [
@@ -155,6 +165,7 @@ dependencies = [
  "kortex-baseline",
  "kortex-corpus",
  "kortex-eval",
+ "kortex-graph",
  "kortex-ledger",
  "kortex-sleep",
  "kortex-store",

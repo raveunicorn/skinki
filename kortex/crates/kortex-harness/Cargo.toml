@@ -22,3 +22,4 @@ kortex-vector.workspace = true
 kortex-store.workspace = true
 kortex-sleep.workspace = true
 kortex-ledger.workspace = true
+kortex-graph.workspace = true

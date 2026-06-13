@@ -1,6 +1,18 @@
 # Stage 3 — Incremental local GraphRAG (SPEC)
 
-- **Status:** ready-to-build (design locked below; impl tickets delegatable)
+- **Status:** in-progress (design locked; `kortex-graph` MVP measured)
+
+> **Measurement log — round 1 (co-mention MVP).** A deterministic
+> entity+venue **co-mention** graph (1-hop expansion + RRF fusion with BM25,
+> `crates/kortex-graph`) was built first as the cheapest probe. On the V2 corpus
+> (~11.5k entries) it **does not beat BM25**: fused multi-hop recall@10 ties at
+> 0.325, answer-in-top-10 is slightly worse (0.55 vs 0.65); the walk in isolation
+> is *below* BM25 (recall 0.175), and dropping the hub filter is worse still
+> (0.10) — raw co-occurrence floods candidates and the true hop-B sinks. The join
+> is *reachable* but not *rankable* by co-mention. **Verdict:** the cheap version
+> is insufficient → we have earned the typed-relation extractor (T3 + a
+> relation-aware walk), which is the actual GraphRAG content. The MVP stays as
+> the honest baseline; the gate (§2) is unchanged.
 - **Owner of the design (frontier/human):** frontier — the graph schema, the
   retrieval algorithm, the tier-0/tier-1 split, the replay contract, and the
   ledger wiring are decided here. Heavy review on every algorithm-core PR.

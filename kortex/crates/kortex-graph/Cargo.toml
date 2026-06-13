@@ -1,0 +1,12 @@
+[package]
+name = "kortex-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stage 3 MVP — deterministic co-mention graph retriever (multi-hop vs BM25)."
+
+[dependencies]
+serde.workspace = true
+kortex-corpus.workspace = true
+kortex-eval.workspace = true
+kortex-baseline.workspace = true

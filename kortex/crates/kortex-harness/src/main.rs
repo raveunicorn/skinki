@@ -28,6 +28,7 @@ use kortex_vector::quant::{RaBitQ, RaBitQBuilder};
 use kortex_vector::search::{ivf_two_stage_search, recall as recall_overlap, two_stage_search};
 use kortex_vector::store::{available_disk_bytes, FloatMmapStore};
 
+use kortex_graph::GraphRetriever;
 use kortex_ledger::{score_staleness, ContentHash, Derivation, Ledger, MethodStamp};
 use kortex_sleep::{check_gate, run_sim, SimConfig, SimResult, StubJob};
 use kortex_vector::{dot, VectorSet};
@@ -216,6 +217,20 @@ enum Cmd {
         /// over-invalidation with real signal (for CI).
         #[arg(long, default_value_t = false)]
         assert_gate: bool,
+    },
+    /// Stage 3 MVP: score the deterministic co-mention graph retriever
+    /// alongside BM25, printing a single-hop / multi-hop contrast table.
+    GraphEval {
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long, default_value_t = 5)]
+        years: u32,
+        #[arg(long, default_value_t = 6)]
+        entries_per_day: u32,
+        #[arg(long, default_value = "v2")]
+        difficulty: String,
+        #[arg(long, default_value_t = 10)]
+        k: usize,
     },
 }
 
@@ -656,8 +671,108 @@ fn main() -> Result<()> {
                 }
             }
         }
+        Cmd::GraphEval {
+            seed,
+            years,
+            entries_per_day,
+            difficulty,
+            k,
+        } => {
+            let corpus = generate(&GenConfig {
+                seed,
+                years,
+                entries_per_day,
+                difficulty: parse_difficulty(&difficulty)?,
+            });
+            run_graph_eval(&corpus, k);
+        }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Stage 3 MVP — graph-eval: deterministic co-mention graph vs BM25
+// ---------------------------------------------------------------------------
+
+fn run_graph_eval(corpus: &Corpus, k: usize) {
+    let mut bm25 = Bm25::new();
+    bm25.index(corpus);
+
+    let mut graph = GraphRetriever::new();
+    graph.index(corpus);
+
+    let recall_items: Vec<QItem> = corpus
+        .ground_truth
+        .recall
+        .iter()
+        .map(|q| QItem {
+            question: &q.question,
+            relevant: &q.relevant_entries,
+            answer: &q.answer,
+        })
+        .collect();
+    let multihop_items: Vec<QItem> = corpus
+        .ground_truth
+        .multi_hop
+        .iter()
+        .map(|q| QItem {
+            question: &q.question,
+            relevant: &q.hop_entries,
+            answer: &q.answer,
+        })
+        .collect();
+
+    let mut bm25_durations: Vec<Duration> = Vec::new();
+    let mut graph_durations: Vec<Duration> = Vec::new();
+
+    let bm25_recall = score_set(&bm25, corpus, &recall_items, k, &mut bm25_durations);
+    let bm25_multihop = score_set(&bm25, corpus, &multihop_items, k, &mut bm25_durations);
+    let graph_recall = score_set(&graph, corpus, &recall_items, k, &mut graph_durations);
+    let graph_multihop = score_set(&graph, corpus, &multihop_items, k, &mut graph_durations);
+
+    println!("=== Kortex Stage 3 (MVP) — Graph vs BM25 contrast ===");
+    println!(
+        "corpus           : {} entries (seed {}, {} years, {} entries/day, {})",
+        corpus.entries.len(),
+        corpus.meta.seed,
+        corpus.meta.years,
+        corpus.entries.len() as f64 / (corpus.meta.years.max(1) as f64 * 365.0),
+        match corpus.meta.difficulty {
+            Difficulty::V1 => "v1",
+            Difficulty::V2 => "v2",
+        }
+    );
+    println!(
+        "queries          : single-hop recall={}, multi-hop={}",
+        recall_items.len(),
+        multihop_items.len()
+    );
+    println!();
+    println!("{:<28} {:>9} {:>9}", "metric", "bm25", "graph");
+    println!(
+        "{:<28} {:>9.3} {:>9.3}",
+        format!("single-hop recall@{k}"),
+        bm25_recall.recall_at_k,
+        graph_recall.recall_at_k
+    );
+    println!(
+        "{:<28} {:>9.3} {:>9.3}",
+        format!("single-hop ans@{k}"),
+        bm25_recall.answer_in_topk,
+        graph_recall.answer_in_topk
+    );
+    println!(
+        "{:<28} {:>9.3} {:>9.3}",
+        format!("multi-hop  recall@{k}"),
+        bm25_multihop.recall_at_k,
+        graph_multihop.recall_at_k
+    );
+    println!(
+        "{:<28} {:>9.3} {:>9.3}",
+        format!("multi-hop  ans@{k}"),
+        bm25_multihop.answer_in_topk,
+        graph_multihop.answer_in_topk
+    );
 }
 
 // ---------------------------------------------------------------------------
