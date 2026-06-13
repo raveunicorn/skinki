@@ -802,23 +802,39 @@ fn run_graph_eval(corpus: &Corpus, k: usize, assert_gate: bool) -> anyhow::Resul
         relation.ledger().len()
     );
 
+    // T8 — graph RAM telemetry: measure the graph structures and project to 5M
+    // (edges scale ~linearly with entries). Budget: <= ~120 MB, leaving room for
+    // the Stage-1 vector index within the 250 MB idle envelope.
+    let graph_bytes = relation.graph_resident_bytes();
+    let n = corpus.entries.len().max(1);
+    let graph_5m_mb = (graph_bytes as f64 / n as f64) * 5_000_000.0 / 1_048_576.0;
+    println!(
+        "relation graph   : {:.2} MB at n={} ({:.1} B/entry) -> {:.1} MB at 5M (budget <=120)",
+        graph_bytes as f64 / 1_048_576.0,
+        n,
+        graph_bytes as f64 / n as f64,
+        graph_5m_mb
+    );
+
     if assert_gate {
         // Stage 3 gate: the relation retriever must clear the multi-hop bars and
         // not regress single-hop recall below BM25 (the deterministic-tier
         // verdict; recall is deterministic so a fixed corpus is a stable gate).
         const MULTIHOP_RECALL_MIN: f64 = 0.50;
         const MULTIHOP_ANS_MIN: f64 = 0.60;
+        const GRAPH_RAM_5M_MAX_MB: f64 = 120.0;
         let mh_recall = relation_multihop.recall_at_k;
         let mh_ans = relation_multihop.answer_in_topk;
         let sh_ok = relation_recall.recall_at_k >= bm25_recall.recall_at_k;
-        if mh_recall >= MULTIHOP_RECALL_MIN && mh_ans >= MULTIHOP_ANS_MIN && sh_ok {
+        let ram_ok = graph_5m_mb <= GRAPH_RAM_5M_MAX_MB;
+        if mh_recall >= MULTIHOP_RECALL_MIN && mh_ans >= MULTIHOP_ANS_MIN && sh_ok && ram_ok {
             println!(
-                "\nGATE: PASS (relation multi-hop recall@{k}={mh_recall:.3} ans@{k}={mh_ans:.3}; single-hop recall {:.3} >= bm25 {:.3})",
+                "\nGATE: PASS (relation multi-hop recall@{k}={mh_recall:.3} ans@{k}={mh_ans:.3}; single-hop recall {:.3} >= bm25 {:.3}; graph {graph_5m_mb:.1} MB @5M)",
                 relation_recall.recall_at_k, bm25_recall.recall_at_k
             );
         } else {
             anyhow::bail!(
-                "Stage 3 gate FAILED: relation multi-hop recall@{k}={mh_recall:.3} (want >={MULTIHOP_RECALL_MIN}), ans@{k}={mh_ans:.3} (want >={MULTIHOP_ANS_MIN}), single-hop recall {:.3} vs bm25 {:.3} (must not regress)",
+                "Stage 3 gate FAILED: relation multi-hop recall@{k}={mh_recall:.3} (want >={MULTIHOP_RECALL_MIN}), ans@{k}={mh_ans:.3} (want >={MULTIHOP_ANS_MIN}), single-hop recall {:.3} vs bm25 {:.3} (no regress), graph {graph_5m_mb:.1} MB @5M (want <={GRAPH_RAM_5M_MAX_MB})",
                 relation_recall.recall_at_k,
                 bm25_recall.recall_at_k
             );

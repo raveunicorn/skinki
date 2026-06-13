@@ -418,6 +418,50 @@ impl RelationRetriever {
     pub fn ledger(&self) -> &Ledger {
         &self.ledger
     }
+
+    /// Approximate resident bytes of the **graph** structures that scale with
+    /// corpus size — typed edges, the person/venue indexes, and the derivation
+    /// ledger (Stage 3 T8). Excludes the BM25 fusion component (the lexical /
+    /// Stage-1 surrogate, budgeted separately) and the gazetteer. Each
+    /// `String`/`Vec` is counted as its payload plus a 24-byte (ptr,len,cap)
+    /// header, with a small per-`BTreeMap`-entry node overhead — honest enough
+    /// to project a 5M budget, not a precise allocator readout.
+    pub fn graph_resident_bytes(&self) -> usize {
+        const HDR: usize = 24; // String / Vec header
+        let strs = |v: &[String]| v.iter().map(|s| s.len() + HDR).sum::<usize>();
+
+        let intro_bytes: usize = self
+            .intro
+            .iter()
+            .map(|e| std::mem::size_of::<IntroEdge>() + strs(&e.persons) + e.venue.len() + HDR)
+            .sum();
+        let rec_bytes: usize = self
+            .rec
+            .iter()
+            .map(|e| {
+                std::mem::size_of::<RecEdge>()
+                    + strs(&e.by)
+                    + e.venue.as_ref().map_or(0, |v| v.len() + HDR)
+            })
+            .sum();
+
+        let map_bytes = |m: &BTreeMap<String, Vec<usize>>| -> usize {
+            m.iter()
+                .map(|(k, v)| {
+                    k.len() + HDR + v.len() * std::mem::size_of::<usize>() + HDR + 48
+                    // node ovhd
+                })
+                .sum::<usize>()
+        };
+        let index_bytes = map_bytes(&self.intro_by_person)
+            + map_bytes(&self.rec_by_person)
+            + map_bytes(&self.rec_by_venue);
+
+        // One ledger record ~ output(16) + one input(16) + Vec hdr(24) + method(12).
+        let ledger_bytes = self.ledger.len() * 68;
+
+        intro_bytes + rec_bytes + index_bytes + ledger_bytes
+    }
 }
 
 impl RetrievalSystem for RelationRetriever {
