@@ -57,12 +57,20 @@ decisions pre-made and isolated as frontier-only tickets):
 - [`STAGE_6.md`](STAGE_6.md) — portable engine: stable C-ABI + Swift/Python
   bindings with cross-language result parity (one frontier-reviewed `unsafe`
   boundary).
+- [`STAGE_3.md`](STAGE_3.md) — incremental local GraphRAG. The **design** (graph
+  schema, retrieval core, tier-0/tier-1 split, replay + ledger wiring) is
+  frontier-owned and reviewed heavily, but the **impl tickets** (gazetteer NER,
+  pattern relations, graph/CSR plumbing, CLI/gate, golden tests) are delegatable
+  behind the locked interface. Two design tickets (D1 ranking core, D2 selection
+  policy) stay frontier.
 
 **Keep on a frontier model** (algorithm cores / anti-hallucination / UX):
 
-- Stage 3 (GraphRAG extraction + PPR) and Stage 5 (Insight Engine) — the "soul";
-  no spec hand-off, built with heavy review. The compute-budget arithmetic that
-  constrains the Stage 3 design is already done:
+- Stage 5 (Insight Engine) — the "soul"; no spec hand-off, built with heavy
+  review. Stage 3 (GraphRAG) now has a frontier-owned spec
+  ([`STAGE_3.md`](STAGE_3.md)) whose mechanical impl tickets are delegatable; its
+  algorithm cores (D1/D2) stay frontier. The compute-budget arithmetic that
+  constrains the Stage 3 design is in
   [`STAGE_3_BUDGET.md`](STAGE_3_BUDGET.md) (extraction must be two-tier; LLM
   outputs replayable per AGENTS.md rule 3).
 - Stage 7 (macOS app) — parked; interaction design is human, boilerplate can be
