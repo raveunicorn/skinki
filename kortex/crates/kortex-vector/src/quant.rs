@@ -566,6 +566,142 @@ pub struct QuantizedQuery {
     total: f32,
 }
 
+/// Quantize an already-rotated query (length `padded`) into bit-planes for the
+/// 1-bit popcount fast scan. Free function so `ivf.rs` can build a
+/// [`QuantizedQuery`] for its per-list residual scoring without going through
+/// a [`RaBitQ`] instance.
+pub(crate) fn quantize_rotated_query(y: &[f32], padded: usize) -> QuantizedQuery {
+    debug_assert_eq!(y.len(), padded);
+    let words = padded / 64;
+    let mut lo = f32::INFINITY;
+    let mut hi = f32::NEG_INFINITY;
+    let mut total = 0.0f32;
+    for &v in y {
+        lo = lo.min(v);
+        hi = hi.max(v);
+        total += v;
+    }
+    let levels = (1u32 << QUERY_BITS) - 1; // 15
+    let range = hi - lo;
+    let (step, inv_step) = if range > 1e-12 {
+        let s = range / levels as f32;
+        (s, 1.0 / s)
+    } else {
+        (0.0, 0.0) // degenerate: all coords equal; every q_d = 0
+    };
+    let mut planes = vec![0u64; QUERY_BITS * words];
+    for (d, &v) in y.iter().enumerate() {
+        let q = (((v - lo) * inv_step).round() as u32).min(levels);
+        let w = d / 64;
+        let bit = (d % 64) as u32;
+        for (j, plane) in planes.chunks_exact_mut(words).enumerate() {
+            if (q >> j) & 1 == 1 {
+                plane[w] |= 1u64 << bit;
+            }
+        }
+    }
+    QuantizedQuery {
+        planes,
+        words,
+        lo,
+        step,
+        total,
+    }
+}
+
+/// Score one 1-bit-coded vector (at `slot`) against a quantized query, using
+/// the popcount fast path. `factor` and `pc` are that vector's RaBitQ ranking
+/// factor and code popcount. Free function so `ivf.rs` can reuse the kernel
+/// for per-list residual codes (see [`QuantizedQuery`] for the math).
+#[inline]
+pub(crate) fn score_bit1_fast_at(
+    codes: &[u8],
+    bytes_per_vec_codes: usize,
+    slot: usize,
+    factor: f32,
+    pc: u32,
+    qq: &QuantizedQuery,
+) -> f32 {
+    let words = qq.words;
+    let base = slot * bytes_per_vec_codes;
+    let mut t = [0u32; QUERY_BITS];
+    for w in 0..words {
+        let b0 = base + w * 8;
+        let code = u64::from_le_bytes(codes[b0..b0 + 8].try_into().unwrap());
+        for (j, tj) in t.iter_mut().enumerate() {
+            *tj += (code & qq.planes[j * words + w]).count_ones();
+        }
+    }
+    let mut weighted = 0.0f32;
+    for (j, &tj) in t.iter().enumerate() {
+        weighted += ((1u32 << j) * tj) as f32;
+    }
+    let pos = qq.lo * pc as f32 + qq.step * weighted;
+    factor * (2.0 * pos - qq.total)
+}
+
+/// 1-bit RaBitQ residual encoder against a *per-vector* (e.g. per-IVF-list)
+/// centroid, sharing the same rotation/sign-code math as
+/// [`RaBitQBuilder`]'s 1-bit branch but without baking in a single dataset
+/// centroid. Used by `ivf.rs` to encode `(v - list_centroid)` per list.
+pub(crate) struct Bit1Encoder {
+    rotator: Rotator,
+    padded: usize,
+    bytes_per_vec_codes: usize,
+}
+
+impl Bit1Encoder {
+    pub(crate) fn new(dim: usize, seed: u64) -> Self {
+        let rotator = Rotator::new(seed ^ 0x2B17, dim, 2);
+        let padded = rotator.out_dim();
+        // The word-wise scan paths assume whole u64 words per vector.
+        assert!(padded >= 64, "Bit1Encoder requires dim > 32 (padded >= 64)");
+        Bit1Encoder {
+            rotator,
+            padded,
+            bytes_per_vec_codes: padded / 8,
+        }
+    }
+
+    pub(crate) fn padded(&self) -> usize {
+        self.padded
+    }
+
+    pub(crate) fn bytes_per_vec(&self) -> usize {
+        self.bytes_per_vec_codes
+    }
+
+    pub(crate) fn rotator(&self) -> &Rotator {
+        &self.rotator
+    }
+
+    /// Encode the residual `(v - c)` into 1-bit sign codes: normalize, rotate,
+    /// write sign bits LSB-first per byte into `out` (caller-zeroed, length
+    /// `bytes_per_vec()`). Returns `(factor, popcount)` with
+    /// `factor = norm_r / ||rotated||_1` — identical math to
+    /// `RaBitQBuilder`'s 1-bit branch (same epsilon, same sign convention).
+    pub(crate) fn encode_residual_into(&self, v: &[f32], c: &[f32], out: &mut [u8]) -> (f32, u32) {
+        debug_assert_eq!(v.len(), c.len());
+        debug_assert_eq!(out.len(), self.bytes_per_vec_codes);
+        let mut residual: Vec<f32> = v.iter().zip(c).map(|(&vi, &ci)| vi - ci).collect();
+        let norm_r = l2_norm(&residual).max(1e-9);
+        for x in residual.iter_mut() {
+            *x /= norm_r;
+        }
+        let x = self.rotator.apply(&residual); // unit, length padded
+        let mut l1 = 0.0f32;
+        let mut ones = 0u32;
+        for d in 0..self.padded {
+            if x[d] >= 0.0 {
+                ones += 1;
+                out[d / 8] |= 1u8 << (d % 8);
+            }
+            l1 += x[d].abs();
+        }
+        (norm_r / l1.max(1e-9), ones)
+    }
+}
+
 impl RaBitQ {
     pub fn build(vs: &VectorSet, bits: u8, seed: u64) -> Self {
         let dim = vs.dim;
@@ -710,62 +846,19 @@ impl RaBitQ {
 
     /// Quantize a rotated query into bit-planes for the popcount fast scan.
     pub fn quantize_query(&self, y: &[f32]) -> QuantizedQuery {
-        debug_assert_eq!(y.len(), self.padded);
-        let words = self.padded / 64;
-        let mut lo = f32::INFINITY;
-        let mut hi = f32::NEG_INFINITY;
-        let mut total = 0.0f32;
-        for &v in y {
-            lo = lo.min(v);
-            hi = hi.max(v);
-            total += v;
-        }
-        let levels = (1u32 << QUERY_BITS) - 1; // 15
-        let range = hi - lo;
-        let (step, inv_step) = if range > 1e-12 {
-            let s = range / levels as f32;
-            (s, 1.0 / s)
-        } else {
-            (0.0, 0.0) // degenerate: all coords equal; every q_d = 0
-        };
-        let mut planes = vec![0u64; QUERY_BITS * words];
-        for (d, &v) in y.iter().enumerate() {
-            let q = (((v - lo) * inv_step).round() as u32).min(levels);
-            let w = d / 64;
-            let bit = (d % 64) as u32;
-            for (j, plane) in planes.chunks_exact_mut(words).enumerate() {
-                if (q >> j) & 1 == 1 {
-                    plane[w] |= 1u64 << bit;
-                }
-            }
-        }
-        QuantizedQuery {
-            planes,
-            words,
-            lo,
-            step,
-            total,
-        }
+        quantize_rotated_query(y, self.padded)
     }
 
     #[inline]
     fn score_one_bit1_fast(&self, qq: &QuantizedQuery, id: usize) -> f32 {
-        let words = qq.words;
-        let base = id * self.bytes_per_vec_codes;
-        let mut t = [0u32; QUERY_BITS];
-        for w in 0..words {
-            let b0 = base + w * 8;
-            let code = u64::from_le_bytes(self.codes[b0..b0 + 8].try_into().unwrap());
-            for (j, tj) in t.iter_mut().enumerate() {
-                *tj += (code & qq.planes[j * words + w]).count_ones();
-            }
-        }
-        let mut weighted = 0.0f32;
-        for (j, &tj) in t.iter().enumerate() {
-            weighted += ((1u32 << j) * tj) as f32;
-        }
-        let pos = qq.lo * self.pc[id] as f32 + qq.step * weighted;
-        self.factors[id] * (2.0 * pos - qq.total)
+        score_bit1_fast_at(
+            &self.codes,
+            self.bytes_per_vec_codes,
+            id,
+            self.factors[id],
+            self.pc[id],
+            qq,
+        )
     }
 
     #[inline]
