@@ -1,11 +1,15 @@
-# skinki Exocortex — Roadmap
+# skinki — Roadmap
 
 This is not a list of "ready solutions" but a map of **hypothesis-driven
 stages**. Each stage is a small "impossible task" with a hard budget (a fitness
 function) and a **kill-or-keep gate**: if the best existing approach can't fit
-the M1 Air 8 GB budget, that is the license to invent our own. The primary
-artifact is the headless Rust engine (`skinki`); the macOS app is the Stage 7
-wrapper.
+the M1 Air 8 GB budget, that is the license to invent our own. This repo is the
+headless engine; a macOS consumer product is a planned Stage 7.
+
+What's gated-and-validated vs. validated *only on synthetic* (and what failed on
+real data) is tracked honestly in the
+[README](README.md#honest-status-read-this-first) — read that for the unvarnished
+state. This roadmap is the plan and the per-stage detail.
 
 Design target: a worst-case "extreme" user — **~10 years, tens of GB of raw
 input, ~5M memory units.** See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the
@@ -18,7 +22,7 @@ layered design and budgets.
 | 0 | Eval harness + synthetic corpus (the measuring stick) | **Done** |
 | 1 | Memory compression PoC (RaBitQ + Model2Vec, two-stage, mmap) | **Done** (re-validated at scale; IVF closes the scan-cost gap, gated) |
 | 2 | Storage substrate (Lance/Cozo) + append-only L0; maybe a `.kx` codec | **Done** (+ 2B durability) |
-| 3 | Incremental local GraphRAG (deterministic-first, two-tier; venue-anchored multi-hop) | **Deterministic tier done + gated** — multi-hop 2.5–3× BM25, ledger-wired, RAM-budgeted, 3C context assembler; LLM tier measured via oracle = *not earned* (live-LLM deferred) ([`STAGE_3.md`](specs/STAGE_3.md)) |
+| 3 | Incremental local GraphRAG (deterministic-first, two-tier; venue-anchored multi-hop) | **Done on synthetic, fails on real data (honest)** — 2.5–3× BM25 on the synthetic corpus, ledger-wired + 3C assembler, gated; but on real dialogue (LoCoMo) the graph does **not** beat BM25. The synthetic win didn't transfer ([`STAGE_3.md`](specs/STAGE_3.md)) |
 | 4 | "Sleep" consolidation engine (idle + on-power background jobs) | **Done** (policy proven in simulation; real jobs land at Stage 3/5) |
 | 5 | Insight Engine (deterministic discovery + FDR + cite-or-silence) | Planned |
 | 6 | Portable `skinki` (C-ABI/FFI + Python binding; MCP server) | **Done** (C-ABI + Python parity gated; `skinki-mcp` ships search + context-assembler to agents; Swift → Stage 7) |

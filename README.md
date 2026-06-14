@@ -109,6 +109,23 @@ Pure-`ctypes` Python binding in [`bindings/python/skinki.py`](bindings/python/sk
 — no PyO3, no build step. Cross-language results are byte-identical to the Rust
 path (gated by `scripts/ffi-gate.sh`).
 
+## Where this fits
+
+This is about the engine's *shape*, not proven deployments — it's early. But
+"local, embeddable, 0-network, stable C-ABI" is a shape cloud memory APIs can't
+take, which is exactly where it's interesting:
+
+- **Memory for AI agents** — persistent, private recall across sessions over MCP.
+- **Embedded / edge / games** — one library + header into a C/C++/Rust/legacy
+  codebase, no backend, deterministic (NPC memory, on-device assistants, sensors).
+- **On-prem / regulated** — air-gapped knowledge with provenance, where data
+  legally can't leave the box (the staleness/ledger angle is built for this).
+- **Big-data pipelines** — a fast, deterministic, dependency-light memory
+  primitive you embed rather than a service you call.
+
+If none of these is you but the benchmark discipline is, the repo is also just an
+honest case study in building a memory engine from scratch.
+
 ## What's inside
 
 | crate | role |
@@ -157,4 +174,6 @@ issue or PR. The benchmark decides, not opinion.
 
 ## License
 
-MIT OR Apache-2.0.
+Licensed under either of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT) at
+your option. Unless you explicitly state otherwise, any contribution you submit
+for inclusion shall be dual-licensed as above, with no additional terms.

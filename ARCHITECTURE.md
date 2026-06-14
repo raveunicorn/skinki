@@ -1,14 +1,15 @@
-# skinki Exocortex — Architecture
+# skinki — Architecture
 
-This document describes the architecture of the **Exocortex**: a portable,
-local-first memory and insight engine. The primary artifact is a headless Rust
-crate (`skinki`); the macOS app (`apps/skinki-macos/`) is
-a secondary consumer wrapper whose own architecture is documented
-there.
+This document describes the architecture of **skinki**: a portable, local-first
+memory engine (a macOS consumer product is a planned Stage 7; this repo is the
+headless engine only).
 
 - **Audience:** contributors.
-- **Status:** living document. Stage 0 (the eval harness) is implemented; later
-  layers are built and benchmarked stage by stage per the [roadmap](ROADMAP.md).
+- **Status:** living document. The substrate layers (capture, units, vector
+  index, storage, sleep scheduler, derivation ledger, the deterministic graph,
+  the C-ABI/MCP surface) are built and gated; what's *validated on real data* vs.
+  only synthetic is tracked honestly in the [README](README.md#honest-status-read-this-first)
+  and [ROADMAP](ROADMAP.md). The insight engine is the remaining keystone.
 
 ## Guiding constraints
 
