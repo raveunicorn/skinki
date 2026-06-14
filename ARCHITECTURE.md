@@ -2,9 +2,9 @@
 
 This document describes the architecture of the **Exocortex**: a portable,
 local-first memory and insight engine. The primary artifact is a headless Rust
-crate (`skinki`); the macOS app ([`apps/skinki-macos/`](apps/skinki-macos/)) is
+crate (`skinki`); the macOS app (`apps/skinki-macos/`) is
 a secondary consumer wrapper whose own architecture is documented
-[there](apps/skinki-macos/ARCHITECTURE.md).
+there.
 
 - **Audience:** contributors.
 - **Status:** living document. Stage 0 (the eval harness) is implemented; later
@@ -127,7 +127,7 @@ through Swift bindings at Stage 7. A Python binding drives CI and evaluation.
 | Baseline retriever (L2a proxy) | [`crates/skinki-baseline`](crates/skinki-baseline) |
 | CLI / orchestration | [`crates/skinki-harness`](crates/skinki-harness) |
 | L1-L5 engine | built stage by stage (see [`ROADMAP.md`](ROADMAP.md)) |
-| Consumer wrapper | [`apps/skinki-macos`](apps/skinki-macos) (parked, Stage 7) |
+| Consumer wrapper | `apps/skinki-macos` (parked, Stage 7) |
 
 ## Why these choices (trade-offs)
 
@@ -144,4 +144,4 @@ through Swift bindings at Stage 7. A Python binding drives CI and evaluation.
 
 - [`ROADMAP.md`](ROADMAP.md) — staged, hypothesis-driven plan with decision gates.
 - [`README.md`](README.md) — the engine and the Stage 0 harness.
-- [`apps/skinki-macos/ARCHITECTURE.md`](apps/skinki-macos/ARCHITECTURE.md) — the macOS wrapper (Stage 7).
+- `apps/skinki-macos/ARCHITECTURE.md` — the macOS wrapper (Stage 7).

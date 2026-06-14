@@ -34,7 +34,7 @@ The gate here is the **cross-language equality test**, not a numeric budget.
 ## 3. Public interface (the C-ABI v0)
 
 New crate `skinki-ffi` (`crate-type = ["cdylib", "staticlib"]`). Hand-written
-header `skinki/crates/skinki-ffi/include/skinki.h`:
+header `crates/skinki-ffi/include/skinki.h`:
 
 ```c
 #include <stdint.h>

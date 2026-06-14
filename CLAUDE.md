@@ -11,9 +11,9 @@ The bet is "**intelligence lives in the memory substrate, not the model**" — o
 an 8 GB M1 Air the LLM is only ~4B, so the leverage is a substrate that ingests
 years of voice/text, compresses it, links it into a knowledge graph,
 consolidates it offline ("sleep"), and surfaces grounded, *cited* insights. The
-primary artifact is a **headless Rust engine** (`skinki/`) — "FFmpeg for personal
-knowledge". The macOS app (`apps/skinki-macos/`) is a parked Stage-7 wrapper;
-**do not touch it** unless a task explicitly targets it.
+repo **is** the headless Rust engine — "FFmpeg for personal knowledge"; the
+cargo workspace lives at the repo root. (A macOS consumer product is a planned
+Stage 7; no app ships in this repo.)
 
 ## Two laws (everything else follows from these)
 
@@ -42,7 +42,6 @@ skinki/                      PRIMARY — the engine (all real work)
     skinki-harness/   `skinki` CLI: generate/eval/demo/compress-bench/scale-bench/store-bench/sleep-sim/ledger-bench/graph-eval
   bindings/python/    pure-ctypes binding over the C-ABI (no PyO3)
   specs/              per-stage delegation contracts (STAGE_<n>.md from TEMPLATE.md)
-apps/skinki-macos/    PARKED Stage-7 SwiftUI wrapper — do not touch
 ARCHITECTURE.md  ROADMAP.md  AGENTS.md   the vision, the staged plan, the rules
 ```
 
@@ -87,7 +86,7 @@ co-design (multi-bit residuals / OPQ), not a Stage-1 blocker.
 
 ## How to build, test, and check the gate
 
-All commands run from **`skinki/`** (the workspace lives there, not the repo root):
+All commands run from the repo root:
 
 ```bash
 cd skinki

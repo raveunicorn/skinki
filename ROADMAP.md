@@ -177,7 +177,7 @@ layered design and budgets.
   calibrated pop-up insights, mascot reactions; onboarding/privacy; `.dmg`
   (codesign + notarize).
 - **Gate:** a `.dmg` that meets every budget on a live M1 Air. The parked
-  scaffolding lives in [`apps/skinki-macos/`](apps/skinki-macos/).
+  is a planned future product; no app ships in this repo.
 
 ## Open questions / risks
 

@@ -7,10 +7,9 @@ stays green*.
 
 ## What this repo is
 
-- `skinki/` — the **primary** artifact: a headless, local-first Rust memory +
-  insight engine ("FFmpeg for personal knowledge"). All real work happens here.
-- `apps/skinki-macos/` — a **parked** SwiftUI/Tuist consumer wrapper (Stage 7).
-  Do not touch unless a task explicitly targets it.
+- This repo **is** the engine: a headless, local-first Rust memory + insight
+  engine ("FFmpeg for personal knowledge"). The cargo workspace is at the repo
+  root. A macOS consumer product is a planned Stage 7; no app ships here.
 - Vision and plan: [`README.md`](README.md), [`ARCHITECTURE.md`](ARCHITECTURE.md),
   [`ROADMAP.md`](ROADMAP.md). Per-stage contracts: [`specs/`](specs/).
 
@@ -49,7 +48,7 @@ stays green*.
    tests. Prefer property tests for math (invariants) and golden tests for
    anything with a fixed expected output.
 
-## Commands (run from `skinki/`)
+## Commands (run from the repo root)
 
 ```bash
 cargo build
