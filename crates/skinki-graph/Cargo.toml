@@ -1,0 +1,14 @@
+[package]
+name = "skinki-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stage 3 — deterministic GraphRAG (typed-relation multi-hop retrieval), ledger-backed."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+skinki-corpus.workspace = true
+skinki-eval.workspace = true
+skinki-baseline.workspace = true
+skinki-ledger.workspace = true

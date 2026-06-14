@@ -18,7 +18,7 @@ budget breaks, we have the numbers to justify a custom `.kx` codec.
 
 ## 2. Budgets / fitness function (the gate)
 
-Measured by `kortex store-bench` over the Stage 0 synthetic corpus. **Two metrics
+Measured by `skinki store-bench` over the Stage 0 synthetic corpus. **Two metrics
 replace the original single "overhead" metric per review decision.**
 
 | Metric | Budget | Actual (5y, 270/d) |
@@ -35,7 +35,7 @@ replace the original single "overhead" metric per review decision.**
 
 ## 3. Public interface
 
-New crate `kortex-store`. Implement exactly these (names/signatures are the
+New crate `skinki-store`. Implement exactly these (names/signatures are the
 contract; internals are your freedom):
 
 ```rust
@@ -89,7 +89,7 @@ Unit record: `event_id (u64 LE) | byte_start (u32 LE) | byte_end (u32 LE)`.
 - **Segmented append-only files.** `events-000.seg`, `units-000.idx`. Each record:
   little-endian `len: u32` + payload. `EventId`/`UnitId` = byte offset within
   segment.
-- **mmap reads.** Pattern reused from `kortex-vector::store`. `unsafe` only in
+- **mmap reads.** Pattern reused from `skinki-vector::store`. `unsafe` only in
   this module; everything else `#![forbid(unsafe_code)]`.
 - **Content addressing / dedup.** 128-bit hash from two FNV1a-64 passes with
   different seeds. `HashMap<u128, EventId>` in RAM during ingest.
@@ -108,7 +108,7 @@ Unit record: `event_id (u64 LE) | byte_start (u32 LE) | byte_end (u32 LE)`.
 - **Property:** provenance round-trip = 100%; `unit_count` matches `units()` before sync.
 - **Golden:** byte-identical segment files (not just size); locked overhead ratio.
 - **Dedup:** same event → same `EventId`.
-- **Gate:** `cargo run --release -p kortex-harness -- store-bench --years 5 --assert-gate`
+- **Gate:** `cargo run --release -p skinki-harness -- store-bench --years 5 --assert-gate`
 
 ## 6. Task decomposition
 

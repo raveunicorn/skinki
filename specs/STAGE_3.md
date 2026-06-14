@@ -8,7 +8,7 @@
   remains out of scope.
 
 > **Measurement log — round 1 (co-mention MVP).** A deterministic entity+venue
-> **co-mention** graph (1-hop + RRF, `crates/kortex-graph::GraphRetriever`)
+> **co-mention** graph (1-hop + RRF, `crates/skinki-graph::GraphRetriever`)
 > **does not beat BM25**: fused multi-hop recall@10 ties at 0.325; the walk alone
 > is *below* BM25 (0.175) — raw co-occurrence floods candidates and the true
 > hop-B sinks. The join is *reachable* but not *rankable* by co-mention →
@@ -80,7 +80,7 @@ tier must *measurably* lift the residual (coref hops) to justify its cost.
 
 ## 2. Budgets / fitness function (the gate)
 
-Measured by `kortex graph-eval` over the V2 corpus (deterministic; the LLM tier
+Measured by `skinki graph-eval` over the V2 corpus (deterministic; the LLM tier
 is **replayed** from a checked-in artifact-log fixture — never inferred in CI).
 
 | Metric | Budget | How measured |
@@ -103,8 +103,8 @@ the headline "impossible task"; the rest guard the laws and the budget.
 
 ## 3. Public interface
 
-New crate **`kortex-graph`** (`#![forbid(unsafe_code)]`; deps: `serde`,
-`serde_json`, internal `kortex-corpus`/`-store`/`-eval`/`-ledger`).
+New crate **`skinki-graph`** (`#![forbid(unsafe_code)]`; deps: `serde`,
+`serde_json`, internal `skinki-corpus`/`-store`/`-eval`/`-ledger`).
 
 ```rust
 // --- Extraction (tiered; tier is DATA, not code) -------------------------
@@ -168,7 +168,7 @@ impl KnowledgeGraph {
 /// Plugs the graph into the Stage-0 eval harness. May optionally seed from the
 /// Stage-1 vector index (hybrid) behind the same trait.
 pub struct GraphRetriever { /* graph + gazetteer + optional vector seed */ }
-// impl kortex_eval::RetrievalSystem for GraphRetriever { name/index/search/... }
+// impl skinki_eval::RetrievalSystem for GraphRetriever { name/index/search/... }
 
 // --- Replay (AGENTS rule 3) ----------------------------------------------
 /// Append-only artifact log of LLM-tier outputs. `rebuild` is byte-deterministic.
@@ -191,7 +191,7 @@ impl ArtifactLog {
   it decides *which* units go to tier-1 but never *what* tier-1 returns.
 - **Provenance preserved end to end:** every edge carries the `EntryId`(s) /
   `UnitId`(s) that assert it; every retrieved entry is traceable to source bytes.
-- **Ledger-wired:** every edge is recorded as a `kortex_ledger::Derivation`
+- **Ledger-wired:** every edge is recorded as a `skinki_ledger::Derivation`
   (inputs = the asserting units' content hashes; method = the extractor's
   `MethodStamp{ id, version }`), so re-extraction is incremental and staleness
   propagates for free (a changed unit / bumped extractor version flags its
@@ -210,7 +210,7 @@ impl ArtifactLog {
 - **Metric:** `graph-eval` reproduces multi-hop recall@10 / answer-in-top-10 and
   asserts the §2 budgets; prints the BM25 baseline alongside for contrast.
 - **Gate command:**
-  `cargo run --release -p kortex-harness -- graph-eval --assert-gate`
+  `cargo run --release -p skinki-harness -- graph-eval --assert-gate`
 
 ## 6. Task decomposition
 
@@ -221,7 +221,7 @@ the project's Law 2 applied inside the stage.
 | --- | --- | --- | --- |
 | **D1**: retrieval ranking core (seed → ≤2-hop expansion → entry scoring; PPR vs plain traversal decided by measurement) | design | **frontier** | rationale + measured multi-hop recall; algorithm doc |
 | **D2**: tier-1 selection policy + its calibration (which features, what share) | design | **frontier** | ≤5% backfill share with measured residual lift |
-| T1: `kortex-graph` crate skeleton + types/traits above | impl | sonnet | builds; `forbid(unsafe)`; trait objects work |
+| T1: `skinki-graph` crate skeleton + types/traits above | impl | sonnet | builds; `forbid(unsafe)`; trait objects work |
 | T2: deterministic gazetteer NER (entity-name matcher over `entry.text`) | impl | sonnet | unit tests: matches names, robust to case/punct |
 | T3: deterministic relation pattern extractor (the 4 `Relation`s) | impl | sonnet | each pattern's golden surface forms fire; distractors don't |
 | T4: `KnowledgeGraph` (CSR adjacency, typed edges, provenance) + `build`/`extend` + `search_entries` per D1 | impl | sonnet (frontier reviews D1 core) | order-deterministic golden; multi-hop gate |

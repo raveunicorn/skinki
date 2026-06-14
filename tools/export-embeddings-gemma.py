@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Export EmbeddingGemma vectors for kortex's LoCoMo real-text validation.
+"""Export EmbeddingGemma vectors for skinki's LoCoMo real-text validation.
 
 Dev-only helper (NOT part of the Cargo workspace). Runs on a machine that can
-load the model (e.g. an M1 Mac); the kortex sandbox cannot (no GPU/weights, HF
+load the model (e.g. an M1 Mac); the skinki sandbox cannot (no GPU/weights, HF
 blocked). This is the *produce* side of the replay seam: it turns the canonical
-texts kortex dumps into raw float32 vectors kortex loads back to measure the
+texts skinki dumps into raw float32 vectors skinki loads back to measure the
 real semantic lift over BM25.
 
 End-to-end flow
 ---------------
-1. kortex dumps the canonical texts (same order kortex scores them in):
+1. skinki dumps the canonical texts (same order skinki scores them in):
 
-       cargo run --release -p kortex-harness -- locomo-eval \
+       cargo run --release -p skinki-harness -- locomo-eval \
            --path locomo10.json --sample all --dump-texts ./lc
 
    -> ./lc/entries.json  (JSON array of entry texts, entry-id order)
@@ -26,9 +26,9 @@ End-to-end flow
 
    -> ./lc/entries.f32  ./lc/queries.f32  (raw little-endian f32, dim*N row-major)
 
-3. kortex loads them back and prints the semantic-real column:
+3. skinki loads them back and prints the semantic-real column:
 
-       cargo run --release -p kortex-harness -- locomo-eval \
+       cargo run --release -p skinki-harness -- locomo-eval \
            --path locomo10.json --sample all --dim 256 \
            --embeddings-file ./lc/entries.f32 \
            --query-embeddings-file ./lc/queries.f32
@@ -57,13 +57,13 @@ def parse_args() -> argparse.Namespace:
         "--entries",
         required=True,
         type=Path,
-        help="JSON array of document texts (kortex dump: entries.json)",
+        help="JSON array of document texts (skinki dump: entries.json)",
     )
     p.add_argument(
         "--queries",
         type=Path,
         default=None,
-        help="JSON array of query texts (kortex dump: queries.json). Optional, "
+        help="JSON array of query texts (skinki dump: queries.json). Optional, "
         "but required to measure retrieval (docs+queries must share a space).",
     )
     p.add_argument(
@@ -82,7 +82,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=256,
         help="Matryoshka truncation: keep the first DIM components, then "
-        "re-L2-normalize. Must match the kortex --dim. Default: %(default)s.",
+        "re-L2-normalize. Must match the skinki --dim. Default: %(default)s.",
     )
     p.add_argument("--batch-size", type=int, default=32)
     p.add_argument(
@@ -186,9 +186,9 @@ def main() -> int:
     print(f"\nWrote {doc_emb.shape[0]} doc vectors x dim {args.dim} ({mb:.1f} MB)")
     if q_count:
         print(f"Wrote {q_count} query vectors -> {args.out_dir / 'queries.f32'}")
-    print("\nNext (back in the kortex sandbox / repo):")
+    print("\nNext (back in the skinki sandbox / repo):")
     print(
-        "  cargo run --release -p kortex-harness -- locomo-eval --path locomo10.json "
+        "  cargo run --release -p skinki-harness -- locomo-eval --path locomo10.json "
         f"--sample all --dim {args.dim} "
         f"--embeddings-file {args.out_dir / 'entries.f32'} "
         f"--query-embeddings-file {args.out_dir / 'queries.f32'}"

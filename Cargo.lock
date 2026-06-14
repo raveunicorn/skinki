@@ -123,127 +123,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
-name = "kortex-baseline"
-version = "0.1.0"
-dependencies = [
- "kortex-corpus",
- "kortex-eval",
-]
-
-[[package]]
-name = "kortex-corpus"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "kortex-eval"
-version = "0.1.0"
-dependencies = [
- "kortex-corpus",
- "serde",
-]
-
-[[package]]
-name = "kortex-ffi"
-version = "0.1.0"
-dependencies = [
- "kortex-vector",
- "serde_json",
-]
-
-[[package]]
-name = "kortex-graph"
-version = "0.1.0"
-dependencies = [
- "kortex-baseline",
- "kortex-corpus",
- "kortex-eval",
- "kortex-ledger",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "kortex-harness"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "kortex-baseline",
- "kortex-corpus",
- "kortex-eval",
- "kortex-graph",
- "kortex-ledger",
- "kortex-sleep",
- "kortex-store",
- "kortex-telemetry",
- "kortex-vector",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "kortex-ledger"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "kortex-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "kortex-corpus",
- "kortex-eval",
- "kortex-graph",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "kortex-sleep"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "kortex-store"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "libc",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "kortex-telemetry"
-version = "0.1.0"
-dependencies = [
- "libc",
- "serde",
-]
-
-[[package]]
-name = "kortex-vector"
-version = "0.1.0"
-dependencies = [
- "kortex-corpus",
- "kortex-telemetry",
- "libc",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -320,6 +199,127 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "skinki-baseline"
+version = "0.1.0"
+dependencies = [
+ "skinki-corpus",
+ "skinki-eval",
+]
+
+[[package]]
+name = "skinki-corpus"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "skinki-eval"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "skinki-corpus",
+]
+
+[[package]]
+name = "skinki-ffi"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "skinki-vector",
+]
+
+[[package]]
+name = "skinki-graph"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "skinki-baseline",
+ "skinki-corpus",
+ "skinki-eval",
+ "skinki-ledger",
+]
+
+[[package]]
+name = "skinki-harness"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "skinki-baseline",
+ "skinki-corpus",
+ "skinki-eval",
+ "skinki-graph",
+ "skinki-ledger",
+ "skinki-sleep",
+ "skinki-store",
+ "skinki-telemetry",
+ "skinki-vector",
+]
+
+[[package]]
+name = "skinki-ledger"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "skinki-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "skinki-corpus",
+ "skinki-eval",
+ "skinki-graph",
+]
+
+[[package]]
+name = "skinki-sleep"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "skinki-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "skinki-telemetry"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+]
+
+[[package]]
+name = "skinki-vector"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "skinki-corpus",
+ "skinki-telemetry",
 ]
 
 [[package]]

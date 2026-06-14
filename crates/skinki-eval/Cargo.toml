@@ -1,0 +1,10 @@
+[package]
+name = "skinki-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Evaluation harness: RetrievalSystem trait, retrieval/QA/insight metrics, and reports."
+
+[dependencies]
+serde.workspace = true
+skinki-corpus.workspace = true

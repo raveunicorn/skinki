@@ -1,8 +1,8 @@
-# Skinki Exocortex — Architecture
+# skinki Exocortex — Architecture
 
 This document describes the architecture of the **Exocortex**: a portable,
 local-first memory and insight engine. The primary artifact is a headless Rust
-crate (`kortex`); the macOS app ([`apps/skinki-macos/`](apps/skinki-macos/)) is
+crate (`skinki`); the macOS app ([`apps/skinki-macos/`](apps/skinki-macos/)) is
 a secondary consumer wrapper whose own architecture is documented
 [there](apps/skinki-macos/ARCHITECTURE.md).
 
@@ -99,7 +99,7 @@ graph LR
 
 ```mermaid
 graph TD
-  subgraph engine [kortex - headless Rust]
+  subgraph engine [skinki - headless Rust]
     Core["Memory engine: capture, index, graph, sleep, insight, query"]
     FFI["C-ABI / FFI + CLI (Stage 6)"]
   end
@@ -122,10 +122,10 @@ through Swift bindings at Stage 7. A Python binding drives CI and evaluation.
 
 | Layer | Where it lives today |
 | --- | --- |
-| Eval harness (cross-cutting) | [`kortex/crates/kortex-eval`](kortex/crates/kortex-eval), [`kortex-telemetry`](kortex/crates/kortex-telemetry) |
-| Synthetic corpus + ground truth | [`kortex/crates/kortex-corpus`](kortex/crates/kortex-corpus) |
-| Baseline retriever (L2a proxy) | [`kortex/crates/kortex-baseline`](kortex/crates/kortex-baseline) |
-| CLI / orchestration | [`kortex/crates/kortex-harness`](kortex/crates/kortex-harness) |
+| Eval harness (cross-cutting) | [`skinki/crates/skinki-eval`](skinki/crates/skinki-eval), [`skinki-telemetry`](skinki/crates/skinki-telemetry) |
+| Synthetic corpus + ground truth | [`skinki/crates/skinki-corpus`](skinki/crates/skinki-corpus) |
+| Baseline retriever (L2a proxy) | [`skinki/crates/skinki-baseline`](skinki/crates/skinki-baseline) |
+| CLI / orchestration | [`skinki/crates/skinki-harness`](skinki/crates/skinki-harness) |
 | L1-L5 engine | built stage by stage (see [`ROADMAP.md`](ROADMAP.md)) |
 | Consumer wrapper | [`apps/skinki-macos`](apps/skinki-macos) (parked, Stage 7) |
 
@@ -143,5 +143,5 @@ through Swift bindings at Stage 7. A Python binding drives CI and evaluation.
 ## Related documents
 
 - [`ROADMAP.md`](ROADMAP.md) — staged, hypothesis-driven plan with decision gates.
-- [`kortex/README.md`](kortex/README.md) — the engine and the Stage 0 harness.
+- [`skinki/README.md`](skinki/README.md) — the engine and the Stage 0 harness.
 - [`apps/skinki-macos/ARCHITECTURE.md`](apps/skinki-macos/ARCHITECTURE.md) — the macOS wrapper (Stage 7).

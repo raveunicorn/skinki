@@ -7,12 +7,12 @@ stays green*.
 
 ## What this repo is
 
-- `kortex/` — the **primary** artifact: a headless, local-first Rust memory +
+- `skinki/` — the **primary** artifact: a headless, local-first Rust memory +
   insight engine ("FFmpeg for personal knowledge"). All real work happens here.
 - `apps/skinki-macos/` — a **parked** SwiftUI/Tuist consumer wrapper (Stage 7).
   Do not touch unless a task explicitly targets it.
 - Vision and plan: [`README.md`](README.md), [`ARCHITECTURE.md`](ARCHITECTURE.md),
-  [`ROADMAP.md`](ROADMAP.md). Per-stage contracts: [`kortex/specs/`](kortex/specs/).
+  [`ROADMAP.md`](ROADMAP.md). Per-stage contracts: [`skinki/specs/`](skinki/specs/).
 
 ## Golden rules (non-negotiable)
 
@@ -35,12 +35,12 @@ stays green*.
    artifacts; never re-run inference inside a gate. Code that *selects* which
    units go to the LLM stays fully deterministic under rule 2.
 4. **No `unsafe`** except in the quarantined modules that already use it
-   (`kortex-telemetry` for getrusage; `kortex-vector::store` and the
-   `kortex-store` mmap section for mmap/statvfs). Safe crates keep
+   (`skinki-telemetry` for getrusage; `skinki-vector::store` and the
+   `skinki-store` mmap section for mmap/statvfs). Safe crates keep
    `#![forbid(unsafe_code)]` (or the `cfg(not(unix))` variant). Do not add
    `unsafe` elsewhere.
 5. **Minimal dependencies.** Allowed crates: `serde`, `serde_json`, `clap`,
-   `libc`, `anyhow`, and the internal `kortex-*` crates. Adding any new
+   `libc`, `anyhow`, and the internal `skinki-*` crates. Adding any new
    third-party dependency requires explicit human approval and a one-line
    justification in the PR.
 6. **Interface-first.** Implement against the trait/spec defined for the stage.
@@ -49,7 +49,7 @@ stays green*.
    tests. Prefer property tests for math (invariants) and golden tests for
    anything with a fixed expected output.
 
-## Commands (run from `kortex/`)
+## Commands (run from `skinki/`)
 
 ```bash
 cargo build
@@ -57,7 +57,7 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check          # CI enforces formatting; run `cargo fmt` to fix
 # Stage 1 gate (fast CI variant):
-cargo run --release -p kortex-harness -- compress-bench \
+cargo run --release -p skinki-harness -- compress-bench \
     --source synthetic --dim 256 --vectors 4000 --queries 100 --assert-gate
 ```
 
@@ -69,17 +69,17 @@ runs exactly these and will reject a regression.
 
 | Crate | Responsibility |
 | --- | --- |
-| `kortex-corpus` | Deterministic synthetic corpus + planted ground truth. |
-| `kortex-eval` | `RetrievalSystem` trait + retrieval/QA/insight metrics. |
-| `kortex-telemetry` | Latency percentiles + peak RSS. (`unsafe`: getrusage.) |
-| `kortex-baseline` | BM25 lexical baseline (the yardstick). |
-| `kortex-vector` | Stage 1: embeddings, quantizers, two-stage, mmap store. (`unsafe`: mmap.) |
-| `kortex-store` | Stage 2/2B: append-only L0 + unit store, rotation, dedup runs. (`unsafe`: mmap.) |
-| `kortex-harness` | `kortex` CLI: generate / eval / demo / compress-bench / scale-bench / store-bench. |
+| `skinki-corpus` | Deterministic synthetic corpus + planted ground truth. |
+| `skinki-eval` | `RetrievalSystem` trait + retrieval/QA/insight metrics. |
+| `skinki-telemetry` | Latency percentiles + peak RSS. (`unsafe`: getrusage.) |
+| `skinki-baseline` | BM25 lexical baseline (the yardstick). |
+| `skinki-vector` | Stage 1: embeddings, quantizers, two-stage, mmap store. (`unsafe`: mmap.) |
+| `skinki-store` | Stage 2/2B: append-only L0 + unit store, rotation, dedup runs. (`unsafe`: mmap.) |
+| `skinki-harness` | `skinki` CLI: generate / eval / demo / compress-bench / scale-bench / store-bench. |
 
 ## Workflow for a delegated stage
 
-1. Read `kortex/specs/STAGE_<n>.md` (the contract: hypothesis, interface,
+1. Read `skinki/specs/STAGE_<n>.md` (the contract: hypothesis, interface,
    budgets, invariants, test plan, task tickets).
 2. Implement the **impl tickets** behind the defined trait. Leave **design
    tickets** (marked "frontier/human") alone unless assigned.
@@ -92,4 +92,4 @@ runs exactly these and will reject a regression.
 - Comments explain *why* (intent, trade-offs, math), never restate the code.
 - Match existing formatting (`cargo fmt`); no manual alignment that fmt undoes.
 - Prefer small, pure functions; keep hot numeric loops index-based where it
-  mirrors the math (the `needless_range_loop` lint is allowed in `kortex-vector`).
+  mirrors the math (the `needless_range_loop` lint is allowed in `skinki-vector`).

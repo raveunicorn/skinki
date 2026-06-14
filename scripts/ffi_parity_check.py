@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Python `ctypes` parity check for scripts/ffi-gate.sh.
 
-Loads the kortex_ffi cdylib (path via the KORTEX_FFI_LIB env var, set by
+Loads the skinki_ffi cdylib (path via the SKINKI_FFI_LIB env var, set by
 ffi-gate.sh), opens the fixture index built by the `ffi-fixture` helper
-binary, runs `KortexEngine.search`, and asserts the result matches the
+binary, runs `skinkiEngine.search`, and asserts the result matches the
 `expected_ids` from the fixture's JSON dump (computed in Rust via
 `two_stage_search` on the same index/query).
 
@@ -15,7 +15,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "bindings", "python"))
 
-from kortex import KortexEngine  # noqa: E402
+from skinki import skinkiEngine  # noqa: E402
 
 
 def main() -> int:
@@ -32,7 +32,7 @@ def main() -> int:
     query = fixture["query"]
     expected_ids = fixture["expected_ids"]
 
-    engine = KortexEngine.open(index_dir, dim)
+    engine = skinkiEngine.open(index_dir, dim)
     try:
         got_ids = engine.search(query, k)
     finally:

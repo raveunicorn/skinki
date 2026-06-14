@@ -6,7 +6,7 @@ on:
   pull_request:
 
 # The eval gate is law: every PR must keep build/test/clippy/fmt green AND keep
-# the active stage's fitness gate passing. See AGENTS.md and kortex/specs/.
+# the active stage's fitness gate passing. See AGENTS.md and skinki/specs/.
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -54,7 +54,7 @@ jobs:
       # N-independent so a small set still validates the budget.
       - name: Stage 1 compression gate
         run: >
-          cargo run --release --locked -p kortex-harness -- compress-bench
+          cargo run --release --locked -p skinki-harness -- compress-bench
           --source synthetic --dim 256 --vectors 4000 --queries 100 --assert-gate
       # Stage 1 (IVF): the earned next move — per-list 1-bit RaBitQ residual
       # codes. Same three-part budget (recall ≥ 0.95, p95 ≤ 150ms, resident@5M
@@ -63,7 +63,7 @@ jobs:
       # recall is deterministic, so a small N validates correctness for CI.
       - name: Stage 1 IVF gate
         run: >
-          cargo run --release --locked -p kortex-harness -- scale-bench
+          cargo run --release --locked -p skinki-harness -- scale-bench
           --scale 20k --dim 256 --clusters 64 --index ivf --nprobe 12,24
           --refine 1024 --queries 100 --assert-gate
       # Stage 2: storage substrate gate (content overhead ≤ 1.25x;
@@ -71,13 +71,13 @@ jobs:
       # Uses the Stage 0 synthetic corpus — deterministic, no external deps.
       - name: Stage 2 store gate
         run: >
-          cargo run --release --locked -p kortex-harness -- store-bench
+          cargo run --release --locked -p skinki-harness -- store-bench
           --years 5 --assert-gate
       # Stage 4: sleep scheduler policy gate (all six metrics over a scripted
       # week — no work while blocked, full drain, step budget, determinism).
       - name: Stage 4 sleep gate
         run: >
-          cargo run --release --locked -p kortex-harness -- sleep-sim
+          cargo run --release --locked -p skinki-harness -- sleep-sim
           --assert-gate
       # Derivation Ledger: staleness propagation over a derivation DAG built from
       # the corpus's planted contradictions — ledger must reach invalidation
@@ -85,14 +85,14 @@ jobs:
       # baseline that detects nothing. Deterministic; no LLM.
       - name: Derivation Ledger gate
         run: >
-          cargo run --release --locked -p kortex-harness -- ledger-bench
+          cargo run --release --locked -p skinki-harness -- ledger-bench
           --assert-gate
       # Stage 3 (GraphRAG): the typed-relation retriever must clear the multi-hop
       # bars (recall@10 >= 0.50, ans@10 >= 0.60) and not regress single-hop recall
       # below BM25. Deterministic; no inference (the LLM tier is replay-only).
       - name: Stage 3 graph gate
         run: >
-          cargo run --release --locked -p kortex-harness -- graph-eval
+          cargo run --release --locked -p skinki-harness -- graph-eval
           --assert-gate
 
   ffi:
@@ -107,7 +107,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
-      # Stage 6: builds the kortex_ffi cdylib/staticlib, runs the Rust
+      # Stage 6: builds the skinki_ffi cdylib/staticlib, runs the Rust
       # C-ABI/two_stage_search parity + symbol-existence tests, and (since
       # python3 is present here) the Python `ctypes` parity check against the
       # same fixture. Non-zero on any mismatch.

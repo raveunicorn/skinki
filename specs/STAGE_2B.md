@@ -23,7 +23,7 @@ heavy embedded DB and without regressing any Stage 2 budget.
 
 ## 2. Budgets / fitness function (the gate)
 
-Measured by `kortex store-bench` (now also at `--entries-per-day 270`, ~500k
+Measured by `skinki store-bench` (now also at `--entries-per-day 270`, ~500k
 entries / ~894k units). All previous budgets retained, two added:
 
 | Metric | Budget | Actual (5y, 270/d) |
@@ -88,7 +88,7 @@ entries / ~894k units). All previous budgets retained, two added:
 - Counts: `unit_count` correct across reopen with meta, and via full-scan
   fallback without it.
 - Determinism: byte-identical files including runs.
-- Gate: `cargo run --release -p kortex-harness -- store-bench --years 5 --assert-gate`
+- Gate: `cargo run --release -p skinki-harness -- store-bench --years 5 --assert-gate`
 
 ## 6. Out of scope
 

@@ -23,7 +23,7 @@ correct *before* any real job exists.
 
 ## 2. Budgets / fitness function (the gate)
 
-Measured by `kortex sleep-sim` over a scripted signal timeline + synthetic backlog.
+Measured by `skinki sleep-sim` over a scripted signal timeline + synthetic backlog.
 
 | Metric | Budget | How measured |
 | --- | --- | --- |
@@ -38,7 +38,7 @@ Measured by `kortex sleep-sim` over a scripted signal timeline + synthetic backl
 
 ## 3. Public interface
 
-New crate `kortex-sleep`. Contract:
+New crate `skinki-sleep`. Contract:
 
 ```rust
 /// Environmental gating signals. macOS impl behind cfg; FakeSignals for tests/sim.
@@ -111,14 +111,14 @@ pub struct FakeSignals { /* schedule of (tick_range -> signal state) */ }
 - **Sim:** `sleep-sim` builds N stub jobs with known total work over a scripted
   timeline with alternating active/idle and battery/power windows; asserts the
   six gate metrics.
-- **Gate command:** `cargo run --release -p kortex-harness -- sleep-sim --assert-gate`
+- **Gate command:** `cargo run --release -p skinki-harness -- sleep-sim --assert-gate`
 
 ## 6. Task decomposition
 
 | Ticket | Type | Tier | Acceptance |
 | --- | --- | --- | --- |
 | D1: which real jobs + their chunking | design | frontier | Stage 3/5; **not in this hand-off** |
-| T1: `kortex-sleep` crate + `Job`/`StepBudget`/`StepOutcome` traits | impl | cheaper | builds; trait objects work |
+| T1: `skinki-sleep` crate + `Job`/`StepBudget`/`StepOutcome` traits | impl | cheaper | builds; trait objects work |
 | T2: `Scheduler` with priority queue + signal-gated `tick` | impl | cheaper | policy unit tests pass |
 | T3: on-disk checkpoint/restore queue (crash-safe) | impl | cheaper | restore property test passes |
 | T4: `FakeSignals` scripted timeline + deterministic sim driver | impl | cheaper | golden trace stable |

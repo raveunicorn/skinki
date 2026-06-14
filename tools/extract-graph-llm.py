@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""Extract a per-turn knowledge graph from kortex-dumped texts with a local LLM.
+"""Extract a per-turn knowledge graph from skinki-dumped texts with a local LLM.
 
 Dev-only helper (NOT in the Cargo workspace). The *produce* side of the Stage-3
 replay seam for REAL text: where the synthetic corpus is read by hand-written
 intro/rec/venue patterns, real dialogue needs a model. This runs a local
 instruct model over each dumped entry (one chat turn) and writes an append-only
 **artifact log** (JSON-lines) of extracted entities + (subject, relation,
-object) facts. kortex then rebuilds a graph from that log deterministically and
+object) facts. skinki then rebuilds a graph from that log deterministically and
 measures whether the extracted structure beats plain retrieval — proving (or
 not) our unique graph layer on real data.
 
 Flow
 ----
-1. kortex dumps the canonical turn texts (same order kortex scores):
-       cargo run --release -p kortex-harness -- locomo-eval \
+1. skinki dumps the canonical turn texts (same order skinki scores):
+       cargo run --release -p skinki-harness -- locomo-eval \
            --path locomo10.json --sample 0 --dump-texts ./lc0
    (Start with ONE sample: `--sample 0` is ~600 turns / a quick run; `--sample
     all` is 5882 turns and can take hours.)
@@ -22,7 +22,7 @@ Flow
        python3 tools/extract-graph-llm.py \
            --entries ./lc0/entries.json --out ./lc0/graph.artifacts.jsonl
 
-3. (next) kortex rebuilds a graph from graph.artifacts.jsonl and measures it.
+3. (next) skinki rebuilds a graph from graph.artifacts.jsonl and measures it.
 
 Artifact-log record (one JSON object per line, `entry` = index into entries.json):
     {"entry": 12, "entities": ["Caroline","LGBTQ support group"],
@@ -31,7 +31,7 @@ Artifact-log record (one JSON object per line, `entry` = index into entries.json
 
 Determinism: greedy decoding (do_sample=False). The model output is NOT
 bit-reproducible across machines (AGENTS.md rule 3) — that is exactly why it
-goes to a replay log that kortex rebuilds deterministically.
+goes to a replay log that skinki rebuilds deterministically.
 """
 
 import argparse
@@ -69,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    p.add_argument("--entries", required=True, type=Path, help="kortex dump entries.json")
+    p.add_argument("--entries", required=True, type=Path, help="skinki dump entries.json")
     p.add_argument("--out", required=True, type=Path, help="artifact log (.jsonl) to append")
     p.add_argument("--model", default=DEFAULT_MODEL)
     p.add_argument("--limit", type=int, default=None, help="only the first N entries (testing)")

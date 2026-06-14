@@ -1,0 +1,25 @@
+[package]
+name = "skinki-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI to generate the synthetic corpus and run the Stage 0 evaluation."
+
+[[bin]]
+name = "skinki"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+skinki-corpus.workspace = true
+skinki-eval.workspace = true
+skinki-telemetry.workspace = true
+skinki-baseline.workspace = true
+skinki-vector.workspace = true
+skinki-store.workspace = true
+skinki-sleep.workspace = true
+skinki-ledger.workspace = true
+skinki-graph.workspace = true

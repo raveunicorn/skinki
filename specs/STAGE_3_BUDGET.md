@@ -76,7 +76,7 @@ Ticket implications for the Stage 3 spec (when written):
 | --- | --- |
 | Extractor trait | must accept tiered providers; tier is data, not code |
 | Selection policy | pure function of unit features; seeded, testable |
-| Artifact log | reuse `kortex-store` append/rotation/recovery machinery |
+| Artifact log | reuse `skinki-store` append/rotation/recovery machinery |
 | Gate | extraction quality measured on replayed artifacts at both tiers |
 | Bench | `extract-bench` must report units/s per tier + projected backfill days |
 

@@ -1,6 +1,6 @@
-# Kortex — portable local memory + insight engine
+# skinki — portable local memory + insight engine
 
-Kortex is the headless engine at the heart of Skinki: a portable Rust core that
+skinki is the headless engine at the heart of skinki: a portable Rust core that
 ingests a lifetime of raw thoughts (voice/text) and turns them into structured,
 linked, retrievable memory — and, eventually, non-obvious, *cited* insights.
 
@@ -65,14 +65,14 @@ test (`v1_entries_match_legacy_golden`) so the legacy numbers stay reproducible.
 ## Crate map
 
 ```
-kortex/
+skinki/
   crates/
-    kortex-corpus/      deterministic generator + planted ground truth
-    kortex-eval/        RetrievalSystem trait + metrics + Report
-    kortex-telemetry/   latency percentiles + peak RSS (unsafe only here + vector mmap)
-    kortex-baseline/    BM25 lexical retriever (the yardstick)
-    kortex-vector/      Stage 1: embeddings, quantizers (int8/PQ/RaBitQ), two-stage, mmap
-    kortex-harness/     `kortex` CLI: generate / eval / demo / compress-bench
+    skinki-corpus/      deterministic generator + planted ground truth
+    skinki-eval/        RetrievalSystem trait + metrics + Report
+    skinki-telemetry/   latency percentiles + peak RSS (unsafe only here + vector mmap)
+    skinki-baseline/    BM25 lexical retriever (the yardstick)
+    skinki-vector/      Stage 1: embeddings, quantizers (int8/PQ/RaBitQ), two-stage, mmap
+    skinki-harness/     `skinki` CLI: generate / eval / demo / compress-bench
 ```
 
 ## Stage 1 — memory compression (the first "impossible task")
@@ -82,7 +82,7 @@ and latency budget while preserving full-precision nearest neighbors. The gate:
 **recall@10 >= 95% vs exact float32**, with idle RAM < 250 MB at 5M vectors and
 p95 < 150 ms.
 
-We implement the candidate codecs from scratch in `kortex-vector` and bench them
+We implement the candidate codecs from scratch in `skinki-vector` and bench them
 against an exact float32 baseline:
 
 - **int8 scalar** (4x), **Product Quantization** (per-subspace k-means; 16-64x),
@@ -96,17 +96,17 @@ against an exact float32 baseline:
 
 ```bash
 # Codec fidelity matrix (small-N, fast):
-cargo run --release -p kortex-harness -- compress-bench --source corpus --years 5 --entries-per-day 6
-cargo run --release -p kortex-harness -- compress-bench --source synthetic --dim 256 --vectors 4000
+cargo run --release -p skinki-harness -- compress-bench --source corpus --years 5 --entries-per-day 6
+cargo run --release -p skinki-harness -- compress-bench --source synthetic --dim 256 --vectors 4000
 
 # At-scale validation (1M: ~1 GB disk, ~1 min; 5M: ~5 GB disk, ~3 min):
-cargo run --release -p kortex-harness -- scale-bench --scale 1m --assert-gate
-cargo run --release -p kortex-harness -- scale-bench --scale 5m --clusters 1024
+cargo run --release -p skinki-harness -- scale-bench --scale 1m --assert-gate
+cargo run --release -p skinki-harness -- scale-bench --scale 5m --clusters 1024
 
 # Real-embedding validation (dev-only script; see tools/export-embeddings.py):
-#   kortex generate --years 5 --entries-per-day 6 --out /tmp/corpus.json
+#   skinki generate --years 5 --entries-per-day 6 --out /tmp/corpus.json
 #   python3 tools/export-embeddings.py --corpus /tmp/corpus.json --out /tmp/real.f32 --dim 256
-cargo run --release -p kortex-harness -- compress-bench --vectors-file /tmp/real.f32 --dim 256
+cargo run --release -p skinki-harness -- compress-bench --vectors-file /tmp/real.f32 --dim 256
 ```
 
 ### Result, part 1 — codec fidelity (small-N matrix, dim 256)
@@ -130,7 +130,7 @@ hypothesized.
 ### Result, part 2 — at scale, measured instead of projected
 
 The original gate was declared on 4k-20k vectors with RAM *projected* to 5M and
-latency not projected at all. `kortex scale-bench` now builds real 1M-5M-vector
+latency not projected at all. `skinki scale-bench` now builds real 1M-5M-vector
 indexes (streamed to disk, never resident) and measures end to end. On an
 Apple-silicon dev machine (not yet the M1 Air target):
 
@@ -210,7 +210,7 @@ product embedder is wired in.
 ### Result, part 4 — IVF closes the scan-cost gap (the earned next move, gated)
 
 Parts 2-3 named the next move: the flat coarse scan is O(n) and eats ~120 ms of
-the 150 ms budget at 5M *regardless of geometry*. `kortex-vector/src/ivf.rs`
+the 150 ms budget at 5M *regardless of geometry*. `skinki-vector/src/ivf.rs`
 implements it — an inverted-file index that clusters vectors into `nlist` lists
 with their own centroids and quantizes each vector's residual against its
 **list** centroid (not the global one), so the 1-bit codes discriminate
@@ -255,14 +255,14 @@ recall 1.000 within budget, and both are pinned by `--assert-gate` in CI.
 
 ```bash
 # One-shot: generate a corpus in memory and score the BM25 baseline.
-cargo run --release -p kortex-harness -- demo --seed 42 --years 3 --k 10
+cargo run --release -p skinki-harness -- demo --seed 42 --years 3 --k 10
 
 # Stress the scale knob (~1M entries) to exercise latency/RAM telemetry.
-cargo run --release -p kortex-harness -- demo --years 10 --entries-per-day 270
+cargo run --release -p skinki-harness -- demo --years 10 --entries-per-day 270
 
 # Or persist a corpus and evaluate it (writing a JSON report).
-cargo run --release -p kortex-harness -- generate --seed 42 --years 5 --out corpus.json
-cargo run --release -p kortex-harness -- eval --corpus corpus.json --k 10 --report-out report.json
+cargo run --release -p skinki-harness -- generate --seed 42 --years 5 --out corpus.json
+cargo run --release -p skinki-harness -- eval --corpus corpus.json --k 10 --report-out report.json
 
 cargo test   # determinism, ground-truth integrity, metric correctness
 ```
@@ -270,7 +270,7 @@ cargo test   # determinism, ground-truth integrity, metric correctness
 ## Example report (~1M entries, V2 corpus, BM25 baseline)
 
 ```
-=== Kortex Stage 0 — Eval Report ===
+=== skinki Stage 0 — Eval Report ===
 system           : bm25-lexical
 corpus entries   : 987380
 recall@10        : R=0.138  P=0.014  nDCG=0.080  answer-in-topk=0.588  (n=80)

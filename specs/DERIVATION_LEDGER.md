@@ -1,13 +1,13 @@
 # Derivation Ledger — staleness-aware memory via hash-linked reasoning (design note)
 
-- **Status:** **v0 built + gated** (`crates/kortex-ledger` + `kortex
+- **Status:** **v0 built + gated** (`crates/skinki-ledger` + `skinki
   ledger-bench --assert-gate`). The algorithm core (content-addressed DAG +
   deterministic `stale_closure` + the §6 metric), JSON persistence, property/
   golden tests, and a corpus-wired benchmark over the planted contradictions are
   in and green in CI. On the V2 corpus the ledger reaches **invalidation-recall
   1.000 at 0 over-invalidation** versus a provenance-free baseline's **0.000** —
   the silent-staleness gap made into a number. Durable append-only persistence
-  (on `kortex-store`) and Stage-3 integration are the remaining steps; full
+  (on `skinki-store`) and Stage-3 integration are the remaining steps; full
   adoption into the graph/insight path still wants a human go.
 - **Where it touches the stack:** L0 provenance (Stage 2, exists), L2b graph and
   two-tier extraction (Stage 3), the Insight Engine (Stage 5). It is the
@@ -52,7 +52,7 @@ don't cargo-cult sophistication).
   property, and it is exactly what the user described.
 - **Append-only history.** A ledger of derivations is an append-only log — the
   same shape as L0 and the Stage 3 artifact log. We already own this machinery
-  (`kortex-store`: segmented append-only files, rotation, fsync, recovery,
+  (`skinki-store`: segmented append-only files, rotation, fsync, recovery,
   128-bit content hashing for dedup).
 
 **Does NOT transfer — leave it at the door:**
@@ -115,7 +115,7 @@ when it has become wrong**, deterministically, without re-running any inference.
   never consulted to *find* staleness; it is only asked to re-narrate the small
   set that got flagged.
 - **Law 2 (earn invention with a benchmark).** We do **not** invent a new
-  storage engine: the ledger is `kortex-store` reused. The only new thing is the
+  storage engine: the ledger is `skinki-store` reused. The only new thing is the
   derivation record + the propagation algorithm, and §6 makes it falsifiable on
   ground truth before we commit to it.
 - **AGENTS Rule 2 (determinism).** `stale_set(ledger)` is a pure function of the
@@ -131,8 +131,8 @@ when it has become wrong**, deterministically, without re-running any inference.
 It is **cross-cutting**, not a single new stage. Concretely:
 
 - **Foundation (small, buildable early, behind Stage 2 machinery):** a
-  `kortex-ledger` concept — `DerivationRecord`, content-hash pinning, an
-  append-only store (reuse `kortex-store`), and `stale_set` / propagation as
+  `skinki-ledger` concept — `DerivationRecord`, content-hash pinning, an
+  append-only store (reuse `skinki-store`), and `stale_set` / propagation as
   pure functions with property + golden tests. No LLM needed; testable on
   synthetic derivations.
 - **Stage 3 (GraphRAG):** every extracted entity/relation edge and every RAPTOR
