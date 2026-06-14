@@ -31,6 +31,14 @@ fn tokenize(text: &str) -> impl Iterator<Item = &str> {
         .filter(|t| t.len() >= 2)
 }
 
+/// A text -> fixed-dim vector embedder. The swappable seam: ship a static
+/// embedder by default; a real transformer (EmbeddingGemma/nomic) plugs in
+/// behind this same trait via precomputed vectors.
+pub trait Embedder {
+    fn embed(&self, text: &str) -> Vec<f32>;
+    fn dim(&self) -> usize;
+}
+
 /// A static (non-contextual) embedder: token -> seeded random vector, averaged.
 pub struct StaticHashEmbedder {
     dim: usize,
@@ -79,6 +87,16 @@ impl StaticHashEmbedder {
             vs.push(&v);
         }
         vs
+    }
+}
+
+impl Embedder for StaticHashEmbedder {
+    fn embed(&self, text: &str) -> Vec<f32> {
+        StaticHashEmbedder::embed(self, text)
+    }
+
+    fn dim(&self) -> usize {
+        self.dim
     }
 }
 
@@ -188,6 +206,16 @@ mod tests {
         let vs = e.embed_corpus(&c);
         assert_eq!(vs.count(), c.entries.len());
         assert_eq!(vs.dim, 64);
+    }
+
+    #[test]
+    fn embedder_trait_object_usable() {
+        let e = StaticHashEmbedder::new(32);
+        let boxed: &dyn Embedder = &e;
+        assert_eq!(boxed.dim(), 32);
+        let v = boxed.embed("hello world");
+        assert_eq!(v.len(), 32);
+        assert!((dot(&v, &v) - 1.0).abs() < 1e-5);
     }
 
     #[test]
