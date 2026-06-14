@@ -1,14 +1,15 @@
-# Skinki Exocortex — Architecture
+# skinki — Architecture
 
-This document describes the architecture of the **Exocortex**: a portable,
-local-first memory and insight engine. The primary artifact is a headless Rust
-crate (`kortex`); the macOS app ([`apps/skinki-macos/`](apps/skinki-macos/)) is
-a secondary consumer wrapper whose own architecture is documented
-[there](apps/skinki-macos/ARCHITECTURE.md).
+This document describes the architecture of **skinki**: a portable, local-first
+memory engine (a macOS consumer product is a planned Stage 7; this repo is the
+headless engine only).
 
 - **Audience:** contributors.
-- **Status:** living document. Stage 0 (the eval harness) is implemented; later
-  layers are built and benchmarked stage by stage per the [roadmap](ROADMAP.md).
+- **Status:** living document. The substrate layers (capture, units, vector
+  index, storage, sleep scheduler, derivation ledger, the deterministic graph,
+  the C-ABI/MCP surface) are built and gated; what's *validated on real data* vs.
+  only synthetic is tracked honestly in the [README](README.md#honest-status-read-this-first)
+  and [ROADMAP](ROADMAP.md). The insight engine is the remaining keystone.
 
 ## Guiding constraints
 
@@ -99,7 +100,7 @@ graph LR
 
 ```mermaid
 graph TD
-  subgraph engine [kortex - headless Rust]
+  subgraph engine [skinki - headless Rust]
     Core["Memory engine: capture, index, graph, sleep, insight, query"]
     FFI["C-ABI / FFI + CLI (Stage 6)"]
   end
@@ -122,12 +123,12 @@ through Swift bindings at Stage 7. A Python binding drives CI and evaluation.
 
 | Layer | Where it lives today |
 | --- | --- |
-| Eval harness (cross-cutting) | [`kortex/crates/kortex-eval`](kortex/crates/kortex-eval), [`kortex-telemetry`](kortex/crates/kortex-telemetry) |
-| Synthetic corpus + ground truth | [`kortex/crates/kortex-corpus`](kortex/crates/kortex-corpus) |
-| Baseline retriever (L2a proxy) | [`kortex/crates/kortex-baseline`](kortex/crates/kortex-baseline) |
-| CLI / orchestration | [`kortex/crates/kortex-harness`](kortex/crates/kortex-harness) |
+| Eval harness (cross-cutting) | [`crates/skinki-eval`](crates/skinki-eval), [`skinki-telemetry`](crates/skinki-telemetry) |
+| Synthetic corpus + ground truth | [`crates/skinki-corpus`](crates/skinki-corpus) |
+| Baseline retriever (L2a proxy) | [`crates/skinki-baseline`](crates/skinki-baseline) |
+| CLI / orchestration | [`crates/skinki-harness`](crates/skinki-harness) |
 | L1-L5 engine | built stage by stage (see [`ROADMAP.md`](ROADMAP.md)) |
-| Consumer wrapper | [`apps/skinki-macos`](apps/skinki-macos) (parked, Stage 7) |
+| Consumer wrapper | `apps/skinki-macos` (parked, Stage 7) |
 
 ## Why these choices (trade-offs)
 
@@ -143,5 +144,5 @@ through Swift bindings at Stage 7. A Python binding drives CI and evaluation.
 ## Related documents
 
 - [`ROADMAP.md`](ROADMAP.md) — staged, hypothesis-driven plan with decision gates.
-- [`kortex/README.md`](kortex/README.md) — the engine and the Stage 0 harness.
-- [`apps/skinki-macos/ARCHITECTURE.md`](apps/skinki-macos/ARCHITECTURE.md) — the macOS wrapper (Stage 7).
+- [`README.md`](README.md) — the engine and the Stage 0 harness.
+- `apps/skinki-macos/ARCHITECTURE.md` — the macOS wrapper (Stage 7).

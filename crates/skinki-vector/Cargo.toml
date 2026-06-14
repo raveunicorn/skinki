@@ -1,0 +1,17 @@
+[package]
+name = "skinki-vector"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stage 1 memory-compression PoC: embeddings, quantizers (int8/PQ/RaBitQ), exact baseline, two-stage retrieval, and an mmap-backed code store."
+
+[dependencies]
+serde.workspace = true
+skinki-corpus.workspace = true
+skinki-telemetry.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

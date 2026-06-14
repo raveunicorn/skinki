@@ -1,120 +1,179 @@
 <div align="center">
 
-# Skinki — Exocortex
+# skinki
 
-**A portable, local-first memory & insight engine — your second brain that thinks in a dimension you can't.**
+**A portable, local-first memory engine — built to test one idea:
+that intelligence can live in the memory, not the model.**
 
-Capture a lifetime of raw thoughts. Get back structured, linked memory and
-non-obvious, *cited* insights. 100% on-device. No cloud. No subscription.
+100% on-device · 0 bytes of network · embeddable in any language via a stable C-ABI
 
 </div>
 
 ---
 
-## The pivot
+## What this is
 
-Skinki began as a local macOS AI assistant. It has since been refocused around
-its hardest, most valuable core: **the memory**. The thesis is simple —
+`skinki` is a headless Rust engine that ingests text, compresses it to fit
+on a laptop, links it into a knowledge graph, and serves grounded, **cited**
+retrieval — with every fact traceable to its source and a ledger that knows
+when a fact has gone **stale**. Think "FFmpeg for memory": not an app, a
+primitive you embed.
 
-> **Intelligence lives in the memory substrate, not in the model.**
+The bet, stated so it can be proven false:
 
-On an 8 GB M1 Air the "brain" is only a ~4B model. So the leverage is in the
-memory: a substrate that ingests years of voice/text, compresses it, links it
-into a knowledge graph, consolidates it offline ("sleep"), and surfaces grounded
-insights — making a small model punch far above its weight.
+> **Intelligence lives in the memory substrate, not the model.** On an 8 GB
+> laptop the model is small; the leverage is a substrate that does the index,
+> graph, consolidation, and context assembly so the model only has to verbalize.
 
-The primary product is therefore a **headless, embeddable Rust engine**
-(`kortex`) — think "FFmpeg for personal knowledge." The macOS app is a secondary
-consumer wrapper.
+This repo is the honest attempt to test that bet, with a reproducible benchmark
+gate behind every claim. **It is not finished, and it does not all work** — see
+the next section, which is the whole point.
 
-## Two laws of the architecture
+## Honest status (read this first)
 
-1. **Intelligence lives in the memory, not the model.** All the heavy lifting —
-   index, graph, consolidation, context assembly — happens in the substrate.
-2. **You earn the right to invent with a benchmark.** We push the best existing
-   building blocks (RaBitQ, Model2Vec, Lance/Cozo, LightRAG/HippoRAG 2) against
-   hard budgets first, and invent a new format/algorithm only where they
-   objectively break. Maximum with minimum means.
+Everything here is measured, not asserted. The good and the bad:
 
-## Repository layout (monorepo)
+**Validated, gated in CI:**
+- **Compression** — 5M vectors searchable at recall 1.000, p95 ~2.6 ms, <250 MB
+  RAM (Matryoshka-256 + 1-bit RaBitQ → float rerank, IVF). Measured, not projected.
+- **Storage** — pure-Rust append-only log + content-addressed units, mmap,
+  crash recovery, within hard byte budgets.
+- **Graph (synthetic)** — a typed-relation multi-hop retriever beats BM25 by
+  **2.5–3×** on the synthetic corpus, ledger-wired, RAM-budgeted.
+- **Derivation Ledger** — store the *reasoning chain*, hash-pin its premises;
+  a changed premise breaks the link and every dependent conclusion is flagged.
+  On planted contradictions: **catches 100% of stale conclusions vs 0% for a
+  provenance-free baseline**, 0 false flags.
+- **Portability** — a stable **C-ABI** (`skinki.h`), a pure-`ctypes` Python
+  binding, and an **MCP server** (memory for agents) — cross-language search
+  parity gated in CI.
 
-```
-Skinki/
-  kortex/              # PRIMARY: headless Rust memory + insight engine
-    crates/
-      kortex-corpus/      deterministic synthetic corpus + planted ground truth
-      kortex-eval/        RetrievalSystem trait + metrics + Report
-      kortex-telemetry/   latency p50/p95 + peak RSS (M1 Air budgets)
-      kortex-baseline/    BM25 lexical baseline (the yardstick)
-      kortex-harness/     `kortex` CLI: generate / eval / demo
-  apps/
-    skinki-macos/      # SECONDARY: parked SwiftUI/Tuist consumer wrapper (Stage 7)
-  ARCHITECTURE.md      # Exocortex layered architecture (this repo)
-  ROADMAP.md           # staged, hypothesis-driven plan (Stage 0 → 7)
-```
+**Measured and *failed* on real data (the honest part):**
+- On the real **LoCoMo** conversation benchmark, a good **semantic embedder
+  (EmbeddingGemma)** beats BM25 by ~39% — but that win is the *embedder*, which
+  any RAG can use.
+- Our **graph**, given a real LLM extractor (Qwen-2.5-3B), **does not beat
+  BM25** on real dialogue — worse in every category, including multi-hop. The
+  synthetic graph win did **not** transfer. The hand-crafted structure the
+  synthetic benchmark rewarded doesn't generalize. Recorded, not hidden.
 
-- Engine: [`kortex/`](kortex/) — see [`kortex/README.md`](kortex/README.md).
-- App: [`apps/skinki-macos/`](apps/skinki-macos/) — see its [README](apps/skinki-macos/README.md).
+So: the substrate (compression, storage, provenance/staleness, portability) is
+real and useful today; the claim that our *graph* beats baselines is **true on
+synthetic, false on real data so far**. The unique bets — staleness on evolving
+real data, and an insight engine — are **not yet proven**. That's the open work.
 
-## Hard budgets (worst-case ~10 years, ~5M memory units)
-
-| Budget | Target on M1 Air 8 GB |
-| --- | --- |
-| Idle engine RAM (model unloaded) | < 250 MB (mmap, not all in RAM) |
-| Retrieval latency (vector + 1-2 graph hops) | p50 < 50 ms, p95 < 150 ms |
-| Cold start to first result | < 1 s (mmap) |
-| Recall after compression | >= 95% vs full-precision |
-| False-insight rate / uncited claims | < 5% / **0** |
-| Network | 0 bytes |
-
-## Status
-
-**Stage 0 — the measuring stick (done, hardened to V2).** A reproducible eval
-harness with a deterministic synthetic corpus, retrieval/QA/insight metrics,
-latency+RAM telemetry, and a BM25 baseline. The default **V2 corpus** adds
-paraphrase banks, coreference, apophenia traps (planted *negative* bridges),
-distractors, and topic drift, so lexical overlap no longer saturates any metric
-(BM25 recall@10 = 0.138 at ~1M entries vs 1.000 on the legacy V1) — the
-benchmark now discriminates semantic retrieval, relational reasoning, and
-grounded discovery instead of rewarding grep.
-
-**Stage 1 — memory compression (done; re-validated at real scale).**
-From-scratch codecs (int8/PQ/RaBitQ) benchmarked against exact float32, then
-re-validated on real 1M-5M-vector indexes streamed to disk (`scale-bench`) —
-measured numbers, not projections. The winning config — Matryoshka-256 +
-two-stage (1-bit RaBitQ popcount scan -> float rerank from mmap) — delivers
-**1M: recall@10 = 1.000 / p95 32.9 ms / 38 MB resident; 5M: recall 1.000 /
-p95 119 ms / 190.7 MB resident** (budget 250 MB) on mild geometry. On
-adversarial geometry (huge dense clusters) recall 1.000 at 5M costs p95
-157.7 ms — ~5% over the 150 ms budget — which maps the flat scan's limit and
-makes IVF-style partitioning the earned next move (with Stage 3). See
-[`kortex/README.md`](kortex/README.md#stage-1--memory-compression-the-first-impossible-task).
+## Quickstart
 
 ```bash
-cd kortex
-cargo run --release -p kortex-harness -- demo --years 10 --entries-per-day 270   # Stage 0
-cargo run --release -p kortex-harness -- compress-bench --source corpus          # Stage 1
-cargo run --release -p kortex-harness -- scale-bench --scale 1m --assert-gate    # Stage 1 at scale
-cargo test
+git clone https://github.com/raveunicorn/skinki && cd skinki
+cargo build --release
+
+# Generate a synthetic corpus and score the BM25 baseline:
+./target/release/skinki demo --seed 42 --years 3 --k 10
+
+# Run any of the gates that guard a claim above:
+./target/release/skinki compress-bench --source synthetic --dim 256 \
+    --vectors 4000 --queries 100 --assert-gate          # compression
+./target/release/skinki ledger-bench --assert-gate       # staleness propagation
+./target/release/skinki graph-eval  --assert-gate        # graph multi-hop (synthetic)
 ```
 
-See [`ROADMAP.md`](ROADMAP.md) for all stages and their decision gates.
+Every gate is deterministic (seeded SplitMix64; same seed → byte-identical
+output) and runs with no network access.
 
-## Contributing & delegation
+## Use it
 
-Every stage is built against a fixed interface and a machine-checkable fitness
-gate, so work can be delegated safely — the gate decides correctness, not
-reviewer taste.
+**As memory for an AI agent (MCP)** — register the server with any MCP host
+(Claude Code, Cursor, …):
 
-- [`AGENTS.md`](AGENTS.md) — hard rules for any coding agent/model (the gate is
-  law, determinism, no `unsafe` outside quarantine, minimal deps).
-- [`kortex/specs/`](kortex/specs/) — per-stage contracts (hypothesis, interface,
-  budgets, test plan, task tickets) written from a [template](kortex/specs/TEMPLATE.md),
-  plus which model tier each stage needs.
-- [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — CI runs build, tests,
-  `clippy -D warnings`, `cargo fmt --check`, and the active stage gate
-  (`compress-bench --assert-gate`) on every push/PR.
+```json
+{ "mcpServers": { "skinki-memory": {
+    "command": "skinki-mcp", "args": ["--corpus", "/path/to/corpus.json"] } } }
+```
+
+It exposes `search` (graph multi-hop retrieval) and `assemble_context` (a
+budgeted, cited, dated context package — feed *that* to the model instead of raw
+chunks). The agent reasons; skinki remembers.
+
+**Embedded in any language (C-ABI)** — the thing cloud memory APIs can't do.
+Drop in `libskinki_ffi` + `crates/skinki-ffi/include/skinki.h`:
+
+```c
+sk_engine* e; sk_open("./index", &e);
+uint32_t ids[10]; size_t n;
+sk_search(e, query, dim, 10, ids, &n);
+sk_free_engine(e);
+```
+
+Pure-`ctypes` Python binding in [`bindings/python/skinki.py`](bindings/python/skinki.py)
+— no PyO3, no build step. Cross-language results are byte-identical to the Rust
+path (gated by `scripts/ffi-gate.sh`).
+
+## Where this fits
+
+This is about the engine's *shape*, not proven deployments — it's early. But
+"local, embeddable, 0-network, stable C-ABI" is a shape cloud memory APIs can't
+take, which is exactly where it's interesting:
+
+- **Memory for AI agents** — persistent, private recall across sessions over MCP.
+- **Embedded / edge / games** — one library + header into a C/C++/Rust/legacy
+  codebase, no backend, deterministic (NPC memory, on-device assistants, sensors).
+- **On-prem / regulated** — air-gapped knowledge with provenance, where data
+  legally can't leave the box (the staleness/ledger angle is built for this).
+- **Big-data pipelines** — a fast, deterministic, dependency-light memory
+  primitive you embed rather than a service you call.
+
+If none of these is you but the benchmark discipline is, the repo is also just an
+honest case study in building a memory engine from scratch.
+
+## What's inside
+
+| crate | role |
+| --- | --- |
+| `skinki-corpus` | deterministic synthetic corpus + planted ground truth |
+| `skinki-eval` | `RetrievalSystem` trait + retrieval/QA/insight metrics |
+| `skinki-baseline` | BM25 — the yardstick every layer must beat |
+| `skinki-vector` | compression: quantizers, two-stage search, mmap, IVF |
+| `skinki-store` | append-only L0 log + content-addressed unit store |
+| `skinki-graph` | typed-relation GraphRAG + budgeted context assembler |
+| `skinki-ledger` | hash-linked derivation DAG + staleness propagation |
+| `skinki-sleep` | interruptible/resumable offline consolidation scheduler |
+| `skinki-ffi` | the stable C-ABI (the only `unsafe`, quarantined + reviewed) |
+| `skinki-mcp` | MCP server — search + context assembly over stdio |
+| `skinki-harness` | the `skinki` CLI: generate / eval / all the `*-bench` gates |
+
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the layered design and
+[`ROADMAP.md`](ROADMAP.md) for the staged, hypothesis-driven plan.
+
+## Open problems (come help)
+
+This is where the crowd matters more than one person:
+
+1. **Make the graph earn its place on real text.** Entity co-mention loses to
+   lexical/semantic retrieval. Does fact-precise matching + coreference
+   resolution + true path-finding beat a *semantic* baseline on a recognized
+   multi-hop benchmark? Unknown.
+2. **Validate staleness on evolving real data.** The ledger catches planted
+   contradictions; show it catches real ones a retriever misses.
+3. **The insight engine** — proactive, *statistically validated*, cited
+   discovery of non-obvious links, with **zero** uncited claims. The hardest and
+   most valuable piece; unbuilt.
+
+If you can break a gate, beat a baseline, or kill/confirm one of these — open an
+issue or PR. The benchmark decides, not opinion.
+
+## Principles
+
+- **Local & private.** 0 bytes of network. Every claim traceable to source bytes.
+- **Determinism is law.** Seeded RNG only; same seed → identical output. (LLM
+  outputs are *replayable* via an append-only artifact log, not bit-reproducible.)
+- **Earn invention with a benchmark.** Push the best existing building block
+  against a hard budget first; invent only where it *measurably* breaks.
+- **Minimal dependencies.** `serde`, `serde_json`, `clap`, `libc`, `anyhow` — and
+  that's nearly all of it.
 
 ## License
 
-MIT OR Apache-2.0.
+Licensed under either of [Apache-2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT) at
+your option. Unless you explicitly state otherwise, any contribution you submit
+for inclusion shall be dual-licensed as above, with no additional terms.

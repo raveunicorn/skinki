@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/skinki-corpus",
+    "crates/skinki-eval",
+    "crates/skinki-telemetry",
+    "crates/skinki-baseline",
+    "crates/skinki-vector",
+    "crates/skinki-store",
+    "crates/skinki-sleep",
+    "crates/skinki-ledger",
+    "crates/skinki-harness",
+    "crates/skinki-graph",
+    "crates/skinki-ffi",
+    "crates/skinki-mcp",
+]
+
+# skinki — the portable local memory + insight engine (Stage 0: eval harness).
+# Philosophy: maximum with minimum means. Dependencies are kept deliberately
+# small; the synthetic corpus uses a hand-rolled deterministic PRNG so the
+# ground truth is byte-reproducible across platforms and CI.
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+rust-version = "1.80"
+repository = "https://github.com/raveunicorn/skinki"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+anyhow = "1"
+skinki-corpus = { path = "crates/skinki-corpus" }
+skinki-eval = { path = "crates/skinki-eval" }
+skinki-telemetry = { path = "crates/skinki-telemetry" }
+skinki-baseline = { path = "crates/skinki-baseline" }
+skinki-vector = { path = "crates/skinki-vector" }
+skinki-store = { path = "crates/skinki-store" }
+skinki-sleep = { path = "crates/skinki-sleep" }
+skinki-ledger = { path = "crates/skinki-ledger" }
+skinki-graph = { path = "crates/skinki-graph" }
+skinki-ffi = { path = "crates/skinki-ffi" }
+skinki-mcp = { path = "crates/skinki-mcp" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,419 @@
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "met", "Mel"]], "entry": 0, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Melanie", "asked", "what's up with Caroline"]], "entry": 1, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "LGBTQ support group"], "facts": [["Caroline", "attended", "LGBTQ support group"], ["LGBTQ support group", "was", "powerful"]], "entry": 2, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Melanie", "asked about", "inspiring stories from Caroline's experience at the LGBTQ support group"]], "entry": 3, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "felt", "inspired by transgender stories"], ["Caroline", "felt", "happy"], ["Caroline", "felt", "thankful for support"]], "entry": 4, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "painting", "LGBTQ support group"], "facts": [["Melanie", "praised", "painting"], ["Melanie", "asked_question", "what_it_done_for_her"]], "entry": 5, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "support group"], "facts": [["Caroline", "felt", "accepted"], ["Caroline", "felt", "courage"], ["Caroline", "embraced", "myself"]], "entry": 6, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "LGBTQ support group"], "facts": [["Melanie", "asked", "what to do next after attending the support group"]], "entry": 7, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "will continue", "edu"], ["Caroline", "will check out", "career options"]], "entry": 8, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [], "entry": 9, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "has interest in", "counseling or working in mental health"]], "entry": 10, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [["Melanie", "mentioned", "this"]], "entry": 11, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "painting"], "facts": [["Caroline", "thanked", "Melanie"], ["Melanie", "showed", "painting"]], "entry": 12, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": [], "facts": [], "entry": 13, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "painting"], "facts": [["Caroline", "noticed", "colors blend nicely on painting"], ["Caroline", "thought", "painting is an outlet"]], "entry": 14, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Painting"], "facts": [["Melanie", "thinks", "Painting is a fun way to express feelings and get creative"]], "entry": 15, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "is going to", "do some research"]], "entry": 16, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "swimming"], "facts": [["Melanie", "is going to", "swimming"], ["Melanie", "talking to", "Caroline"]], "entry": 17, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "mental health", "race"], "facts": [["Melanie", "participated in", "charity race"]], "entry": 18, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "charity race", "mental health"], "facts": [["Caroline", "pride herself on", "participating in charity race"]], "entry": 19, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "self-care", "family"], "facts": [["Melanie", "acknowledged", "thought-provoking event"], ["Melanie", "realized", "importance of self-care"], ["Melanie", "began", "journey of self-care"], ["Melanie", "benefits", "better ability to look after family"]], "entry": 20, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "agrees with", "Melanie"], ["Caroline", "prioritizes", "self-care"]], "entry": 21, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "me-time", "running", "reading", "violin", "fam"], "facts": [["Melanie", "carves out", "me-time"], ["Melanie", "refreshes", "self"]], "entry": 22, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "praised", "Mel"], ["Mel", "is taking care of", "herself and her family"]], "entry": 23, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "kids", "summer break", "camping"], "facts": [["Melanie", "is excited", "about summer break"], ["Melanie", "has plans", "for the summer"]], "entry": 24, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "adoption agencies", "kids"], "facts": [["Caroline", "has a dream", "to adopt kids"]], "entry": 25, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "kids in need", "future family"], "facts": [["Caroline", "is known for", "helping kids in need"], ["Caroline", "will have a family", "in the future"]], "entry": 26, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "friends and mentors", "adoption agency"], "facts": [["Caroline", "is grateful to", "friends and mentors"], ["Caroline", "has a goal", "to give kids a loving home"], ["Caroline", "feels hopeful and optimistic", "about turning her dream into a reality"]], "entry": 27, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "agency"], "facts": [["Melanie", "asked", "what made someone pick an agency"]], "entry": 28, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "LGBTQ support group", "adoption", "inclusivity", "support"], "facts": [["Caroline", "chose", "LGBTQ support group"], ["LGBTQ support group", "help", "LGBTQ+ folks with adoption"], ["LGBTQ support group", "have", "inclusivity"], ["LGBTQ support group", "have", "support"]], "entry": 29, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [["Caroline", "is excited about", "something in the adoption process"]], "entry": 30, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [], "entry": 31, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "kids"], "facts": [["Melanie", "praises", "efforts of creating a family"]], "entry": 32, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "kids"], "facts": [["Caroline", "acknowledged", "kind words"], ["Caroline", "will", "ensure safety and love for kids"]], "entry": 33, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "LGBTQ support group"], "facts": [["Melanie", "praises", "Caroline's caring heart"], ["Caroline", "will receive", "love and stability"]], "entry": 34, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "transgender journey", "school event", "LGBTQ community", "I"], "facts": [], "entry": 35, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "transition", "LGBTQ community"], "facts": [["Melanie", "mentioned", "Caroline's transition"], ["Caroline", "spread awareness", "LGBTQ community"]], "entry": 36, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "trans community"], "facts": [["Caroline", "felt", "super powerful"], ["Caroline", "gave", "talk"], ["Caroline", "shared", "journey"], ["Caroline", "had", "struggles"], ["Caroline", "developed", "since coming out"], ["Caroline", "audience", "related to what she said"], ["Caroline", "audience", "inspired to be better allies"], ["Caroline", "conversations", "gender identity and inclusion"], ["Caroline", "thankful", "to be able to give a voice to the trans community"]], "entry": 37, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "trans community"], "facts": [["Melanie", "praises", "Caroline"], ["Caroline", "is", "inspiring others"], ["Caroline", "is", "part of inclusivity and acceptance"], ["Caroline", "affects", "many"], ["Caroline", "speaks up for", "trans community"]], "entry": 38, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "shared", "experiences"], ["Caroline", "received", "love and support"], ["Caroline", "builds", "community of hope"]], "entry": 39, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [["Melanie", "praises", "Caroline"], ["Caroline", "shares", "stories"]], "entry": 40, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "expresses gratitude", "for sharing her story"], ["Caroline", "desires to make a change", "and lift others up"], ["Caroline", "commits to using her voice", "to make a change"]], "entry": 41, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [["Melanie", "expresses gratitude to", "Caroline"], ["Caroline", "makes a difference", "unknown"], ["Melanie", "motivates", "Caroline"], ["Caroline", "helps each other out", "Melanie"], ["Melanie", "makes a real impact", "unknown"]], "entry": 42, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "encouraged", "Mel"], ["Mel", "received", "support"]], "entry": 43, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "family"], "facts": [["Melanie", "acknowledges", "Caroline's courage"], ["Caroline", "is", "inspiring"], ["Melanie", "wants", "to be courageous"], ["Melanie", "is motivated by", "her family"], ["Caroline", "is motivated by", "her family"]], "entry": 44, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "friends", "family", "mentors"], "facts": [["Caroline", "acknowledged", "Mel"], ["Caroline", "has", "friends"], ["Caroline", "has", "family"], ["Caroline", "has", "mentors"], ["Caroline", "met", "friends"]], "entry": 45, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [["Melanie", "asked", "how long someone has had a great support system"]], "entry": 46, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "friends"], "facts": [["Caroline", "has friends who support her", "since she moved from her home country"], ["Caroline", "had a tough breakup", "who their love and help have been important"]], "entry": 47, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "husband", "kids"], "facts": [["Melanie", "has", "husband"], ["Melanie", "has", "kids"]], "entry": 48, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "family pic"], "facts": [["Caroline", "has", "family pic"]], "entry": 49, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "dress"], "facts": [["Melanie", "remembered", "time passing"], ["Melanie", "received", "dress by Caroline"]], "entry": 50, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "wedding"], "facts": [], "entry": 51, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "family", "moments"], "facts": [["Melanie", "appreciate", "kind words"], ["Melanie", "look forward to", "happy years"]], "entry": 52, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "asked", "how the person did at the event"]], "entry": 53, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "family"], "facts": [], "entry": 54, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "Cherish"], "facts": [["Caroline", "mentioned", "Mel"], ["Caroline", "expressed", "greetings to Mel"]], "entry": 55, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Melanie", "cherishes", "time with family"]], "entry": 56, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "family"], "facts": [["Caroline", "agrees with", "Mel"], ["Caroline", "feels", "hanging with loved ones brings much happiness"], ["Caroline", "feels", "those moments make her thankful"], ["Caroline", "thinks", "family is everything"]], "entry": 57, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "a lot's been going on in my life"], "facts": [["Caroline", "talked to", "Melanie"]], "entry": 58, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "necklace"], "facts": [["Melanie", "asked about", "special meaning of necklace"]], "entry": 59, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "necklace", "grandma", "Sweden", "love", "faith", "strength", "roots", "family"], "facts": [["Caroline", "gave", "necklace"]], "entry": 60, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "necklace"], "facts": [], "entry": 61, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "hand-painted bowl", "friend"], "facts": [["Caroline", "has", "hand-painted bowl"], ["Caroline", "bought", "hand-painted bowl ten years ago"], ["Caroline", "birthday", "hand-painted bowl ten years ago"]], "entry": 62, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "fam", "mountains"], "facts": [["Melanie", "mentioned", "camping trip"], ["Melanie", "family", "had nice time"]], "entry": 63, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "family mems"], "facts": [], "entry": 64, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "nature", "campfire", "hike", "view", "kids"], "facts": [["Melanie", "had", "awesome time"], ["Melanie", "explored", "nature"], ["Melanie", "roasted", "marshmallows"]], "entry": 65, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "family moments"], "facts": [["Caroline", "mentioned", "family moments"]], "entry": 66, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "family"], "facts": [], "entry": 67, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "wants_to_become", "counselor_or_mental_health_professional"]], "entry": 68, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [["Melanie", "asked", "what kind of counseling and mental health services Caroline wants to pursue"]], "entry": 69, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "trans people", "LGBTQ+ counseling workshop"], "facts": [["Caroline", "attended", "LGBTQ+ counseling workshop"], ["Caroline", "is thinking of", "working with trans people"]], "entry": 70, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "motivated", "to pursue counseling"], ["Melanie", "expressed", "inspiration"]], "entry": 71, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "acknowledged", "support from Melanie"], ["Caroline", "had", "journey"], ["Caroline", "got", "support"], ["Caroline", "made", "difference"], ["Caroline", "wants", "help others"], ["Caroline", "saw", "improvement in life"], ["Caroline", "started", "caring more about mental health"], ["Caroline", "understood", "herself"], ["Caroline", "is", "passionate"], ["Caroline", "created", "safe, inviting place"]], "entry": 72, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Melanie", "praises", "Caroline's passion and hard work"], ["Caroline", "has made an impact", "through her efforts"]], "entry": 73, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "received", "kind words"]], "entry": 74, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Melanie", "congratulates", "Caroline"]], "entry": 75, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "LGBTQ+ pride parade"], "facts": [["Caroline", "attended", "LGBTQ+ pride parade"]], "entry": 76, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "parade", "LGBTQ+ community"], "facts": [["Caroline", "attended", "parade"], ["Caroline", "has been influenced by", "experience with LGBTQ support group"]], "entry": 77, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "counseling and mental health"], "facts": [["Caroline", "was motivated", "talking to the community"], ["Caroline", "wants to help others", "by sharing her story"], ["Caroline", "plans to give back", "through counseling and mental health"]], "entry": 78, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "pottery class", "Caroline"], "facts": [["Melanie", "found", "activities"], ["Melanie", "participated", "pottery class"]], "entry": 79, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "is learning", "piano"], ["Melanie", "tried", "pottery"]], "entry": 80, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "pottery"], "facts": [["Melanie", "is a fan of", "pottery"], ["Melanie", "finds", "pottery creative and skilled"]], "entry": 81, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "bowl"], "facts": [["Caroline", "described", "black and white design of bowl"]], "entry": 82, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "bowl", "class"], "facts": [["Melanie", "made", "bowl"], ["Melanie", "proud of", "bowl"]], "entry": 83, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "praised", "creativity"]], "entry": 84, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Pottery"], "facts": [["Melanie", "values", "kind words"], ["Melanie", "enjoys", "Pottery"]], "entry": 85, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "art"], "facts": [["Caroline", "expresses", "herself"], ["Caroline", "brings", "joy"], ["Caroline", "encourages", "Mel"]], "entry": 86, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "pottery"], "facts": [["Melanie", "is looking forward to", "pottery"]], "entry": 87, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "transgender conference", "community", "advocacy"], "facts": [["Caroline", "is going to", "transgender conference"], ["Caroline", "is excited about", "meeting other people in the community"], ["Caroline", "is excited about", "learning more about advocacy"]], "entry": 88, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [], "entry": 89, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [], "entry": 90, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [["Melanie", "said farewell to", "Caroline"]], "entry": 91, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "met", "Mel"]], "entry": 92, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Melanie", "asked", "anything new from Caroline"]], "entry": 93, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "has interest in", "counseling or mental health work"], ["Caroline", "feels", "helping people and making a positive impact is rewarding"]], "entry": 94, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "kids", "museum"], "facts": [["Melanie", "took", "kids"], ["Melanie", "visited", "museum"]], "entry": 95, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": [], "facts": [], "entry": 96, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "dinosaur exhibit"], "facts": [["Melanie", "liked", "dinosaur exhibit"], ["Melanie", "is", "mom"]], "entry": 97, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "is", "mom"]], "entry": 98, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "library"], "facts": [["Melanie", "asked about", "books in her library"]], "entry": 99, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "has", "lots of kids' books"]], "entry": 100, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Charlotte's Web"], "facts": [["Melanie", "read", "Charlotte's Web"], ["Charlotte's Web", "explores", "friendship and compassion"]], "entry": 101, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "friends and family"], "facts": [["Caroline", "appreciates", "friends and family"], ["Caroline", "had", "picnic"]], "entry": 102, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": [], "facts": [], "entry": 103, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "support network"], "facts": [["Caroline", "appreciated", "support network"], ["support network", "provided", "love"], ["support network", "provided", "guidance"], ["support network", "provided", "acceptance"]], "entry": 104, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Melanie", "expresses", "sympathy for Caroline"]], "entry": 105, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "has", "support system"], ["Caroline", "accepts", "true self"], ["Caroline", "grows", "through support system"], ["Caroline", "transition", "with support system"]], "entry": 106, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "family", "beach"], "facts": [["Melanie", "showed", "pic"], ["Melanie", "love", "family"], ["family", "enjoy", "camping at beach"]], "entry": 107, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "LGBTQ conference", "trans rights"], "facts": [["Caroline", "attended", "LGBTQ conference"], ["Caroline", "felt", "welcoming environment"], ["Caroline", "met", "people who've gone through similar journeys"]], "entry": 108, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Melanie", "expresses", "sympathy and encouragement towards Caroline"]], "entry": 109, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "noticed", "progress to be made"], ["Caroline", "wants to", "make a difference"]], "entry": 110, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Melanie", "remarked on", "Caroline's drive"]], "entry": 111, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mell"], "facts": [["Caroline", "thanked", "Mell"], ["Caroline", "is looking into", "counseling and mental health jobs"], ["Caroline", "wants to help", "people have someone to talk to"]], "entry": 112, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "is", "inspiring"]], "entry": 113, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "realized", "importance of support systems"], ["Caroline", "started looking into", "counseling and mental health career options"], ["Caroline", "wanted to help", "other people"]], "entry": 114, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "book"], "facts": [["Melanie", "encouraged", "Caroline"], ["Caroline", "pursued", "dreams"]], "entry": 115, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "books"], "facts": [["Caroline", "appreciate", "love of reading"], ["Caroline", "be guided", "books"], ["Caroline", "be motivated", "books"], ["Caroline", "discover", "who she is"], ["Caroline", "be a part of", "her journey"], ["Caroline", "remind", "to keep going"]], "entry": 116, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [["Melanie", "complimented", "Books"]], "entry": 117, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Becoming Nicole", "Amy Ellis Nutt", "trans girl", "family", "own path"], "facts": [["Caroline", "read", "Becoming Nicole"], ["Becoming Nicole", "is about", "a trans girl and her family"], ["Caroline", "highly recommends", "Becoming Nicole"]], "entry": 118, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [["Melanie", "asked", "what was taken away from the event"]], "entry": 119, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "LGBTQ support group", "pets"], "facts": [["Caroline", "learned", "self-acceptance"], ["Caroline", "learned", "how to find support"], ["Caroline", "learned", "tough times don't last"], ["Caroline", "learned", "hope and love exist"], ["Caroline", "brought joy", "pets"]], "entry": 120, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "lessons", "pets"], "facts": [["Melanie", "agrees with", "Caroline about lessons being great"], ["Melanie", "states", "self-acceptance and finding support are key"], ["Melanie", "states", "pets are awesome for joy and comfort"]], "entry": 121, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "has_pet", "unknown"]], "entry": 122, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "pup", "kitty", "dog", "cat"], "facts": [["Melanie", "has", "pup"], ["Melanie", "has", "cat"]], "entry": 123, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "pets"], "facts": [["Caroline", "mention", "pets"]], "entry": 124, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Luna", "Oliver", "shoes"], "facts": [["Melanie", "mentioned", "Luna and Oliver"], ["Luna and Oliver", "are", "sweet and playful"], ["Melanie", "bought", "new shoes"]], "entry": 125, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "purple"], "facts": [["Caroline", "liked", "purple"]], "entry": 126, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "running", "LGBTQ support group"], "facts": [["Melanie", "thanks", "Caroline"], ["Melanie", "has been", "running longer since last chat"]], "entry": 127, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "asked", "What got someone into running?"]], "entry": 128, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [["Melanie", "been doing", "running farther"]], "entry": 129, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "encouraged", "Melanie"]], "entry": 130, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [["Melanie", "appreciates", "help from Caroline"], ["Melanie", "will continue", "support group"]], "entry": 131, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [], "entry": 132, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Melanie", "expresses gratitude to", "Caroline"], ["Melanie", "values", "mental health"], ["mental health", "has improved for", "Melanie"]], "entry": 133, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "said", "it helped Melanie"]], "entry": 134, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "asked about", "Mel"]], "entry": 135, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "pottery workshop", "kids"], "facts": [["Melanie", "mentioned", "pottery workshop"], ["Melanie", "took", "kids to activity"]], "entry": 136, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "kids"], "facts": [["Caroline", "asked", "Mel about kids' experience"]], "entry": 137, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "kids", "clay"], "facts": [["Melanie", "mentioned", "kids' enjoyment"], ["kids", "were excited about", "making something with clay"]], "entry": 138, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "kids", "cute cup", "art", "pottery"], "facts": [["Caroline", "noticed", "cute cup"], ["Caroline", "commented on", "kids' personalities through art"]], "entry": 139, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [["Melanie", "like", "painting together"]], "entry": 140, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "painting"], "facts": [["Caroline", "praised", "painting"], ["Caroline", "determined", "Y'all worked on painting together"]], "entry": 141, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "painting", "flowers"], "facts": [["Melanie", "helped with", "painting"], ["Melanie", "bonded with", "Melanie"], ["Melanie", "chatted about", "nature"], ["Melanie", "found", "flowers"]], "entry": 142, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "adoption", "children"], "facts": [["Caroline", "admired", "photo"], ["Caroline", "bonded", "nature"], ["Caroline", "attended", "council meeting"], ["Caroline", "felt", "inspired and emotional"], ["Caroline", "was", "determined to adopt"]], "entry": 143, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "fam", "these"], "facts": [["Caroline", "thought_of", "these"]], "entry": 144, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "blue vase", "sunflowers", "roses"], "facts": [["Caroline", "likes", "blue"]], "entry": 145, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "flowers"], "facts": [["Melanie", "represent", "joy"], ["flowers", "represent", "growth"], ["flowers", "represent", "beauty"], ["flowers", "represent", "reminding us to appreciate the small moments"], ["flowers", "part of", "Melanie's wedding decor"]], "entry": 146, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "wished_to_know", "you_back_then"]], "entry": 147, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "love", "joy", "everyone"], "facts": [["Melanie", "mentioned", "Caroline"], ["Melanie", "felt", "amazing"], ["Melanie", "described", "day as full of love and joy"], ["everyone", "was", "loved by Melanie"]], "entry": 148, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "asked", "what everyone's favorite part was"]], "entry": 149, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "partner"], "facts": [["Melanie", "promised", "to be together forever"]], "entry": 150, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "pride parade"], "facts": [["Caroline", "showed", "pic"]], "entry": 151, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "LGBTQ support group"], "facts": [["Melanie", "asked about", "LGBTQ support group"]], "entry": 152, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "felt", "accepted and happy"], ["Caroline", "attended", "LGBTQ support group"]], "entry": 153, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [["Melanie", "asked", "how it made Caroline feel"]], "entry": 154, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "felt", "proud and grateful"], ["Caroline", "experienced", "amazing vibes"], ["Caroline", "found", "a great community"]], "entry": 155, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": [], "facts": [], "entry": 156, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "LGBTQ support group"], "facts": [["Caroline", "was inspired by", "people at LGBTQ support group"]], "entry": 157, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "friends and community"], "facts": [["Melanie", "asked", "what's been the best part of it"]], "entry": 158, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "had", "realization"], ["Caroline", "expressed", "myself"], ["Caroline", "received", "support"]], "entry": 159, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [["Melanie", "encouraged", "Caroline"]], "entry": 160, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "thanks", "Melanie"]], "entry": 161, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "family", "Creativity"], "facts": [["Melanie", "feel", "at peace"]], "entry": 162, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "move"], "facts": [], "entry": 163, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "fam"], "facts": [["Melanie", "has supportive family", "fam"]], "entry": 164, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "praised", "family love and support"]], "entry": 165, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "family", "camping"], "facts": [["Melanie", "received", "love and support"], ["Melanie", "went on", "camping trip"]], "entry": 166, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "family"], "facts": [], "entry": 167, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "mountains", "forests", "nature"], "facts": [["Melanie", "enjoy", "hiking"]], "entry": 168, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "praised", "Mel's experience"]], "entry": 169, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "LGBTQ support group"], "facts": [["Melanie", "mention", "Caroline's attendance at LGBTQ support group"], ["Melanie", "mention", "Caroline's attendance at LGBTQ support group"]], "entry": 170, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "thanked", "Melanie"], ["Caroline", "shared", "journey"], ["Melanie", "is", "friend"]], "entry": 171, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Melanie", "appreciated", "support from Caroline"]], "entry": 172, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "expresses appreciation to", "Mel"]], "entry": 173, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "fam", "kids"], "facts": [["Melanie", "had", "quiet weekend"], ["Melanie", "went camping", "with fam"], ["Melanie", "unplugged", "during camping trip"]], "entry": 174, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "mentorship program", "LGBTQ youth"], "facts": [["Caroline", "mentioned", "Melanie"], ["Caroline", "joined", "mentorship program"], ["Caroline", "helped", "community"]], "entry": 175, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "is helping out at", "LGBTQ support group"]], "entry": 176, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "mentoring", "some amazing young folks"], ["Caroline", "felt", "inspired by young folks"]], "entry": 177, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Young people"], "facts": [["Caroline", "told stories to", "Young people"]], "entry": 178, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "transgender teen", "LGBTQ support group", "LGBT pride event"], "facts": [["Caroline", "mentors", "transgender teen"], ["Caroline", "participates in", "LGBTQ support group"], ["Caroline", "attends", "LGBT pride event"]], "entry": 179, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [], "entry": 180, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "pride event"], "facts": [["Caroline", "found", "event enjoyable"], ["Caroline", "was", "surrounded by love and acceptance"]], "entry": 181, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [["Melanie", "asked", "what's the best part you remember from it"]], "entry": 182, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "mentee"], "facts": [["Caroline", "felt", "special"], ["Caroline", "noticed", "mentee's reaction"]], "entry": 183, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "LGBTQ support group", "Melanie"], "facts": [], "entry": 184, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "LGBTQ art show"], "facts": [["Caroline", "is having", "LGBTQ art show"]], "entry": 185, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "art"], "facts": [["Melanie", "asked about", "preview of Caroline's art"]], "entry": 186, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "art show"], "facts": [["Caroline", "showed", "painting"]], "entry": 187, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "painting"], "facts": [["Melanie", "praised", "Caroline's painting"], ["Caroline", "was", "inspired by something"]], "entry": 188, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "LGBTQ center"], "facts": [["Caroline", "wanted_to_capture", "everyone's unity and strength"]], "entry": 189, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [["Melanie", "mentioned", "Caroline's piece"]], "entry": 190, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "said_hi_to", "Melanie"]], "entry": 191, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Melanie", "asked", "what's up"], ["Melanie", "asked", "anything new"]], "entry": 192, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "LGBTQ activist group"], "facts": [["Caroline", "joined", "LGBTQ activist group"], ["Caroline", "is meeting", "cool people"], ["Caroline", "is passionate", "about rights and community support"]], "entry": 193, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "LGBTQ support group"], "facts": [["Caroline", "found", "LGBTQ support group"]], "entry": 194, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "LGBTQ support group", "Connected LGBTQ Activists"], "facts": [["Caroline", "thanked", "Melanie"], ["Connected LGBTQ Activists", "is made up of", "all kinds of people"]], "entry": 195, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "participated_in", "LGBTQ support group event"]], "entry": 196, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "city", "pride parade"], "facts": [["Caroline", "attended", "pride parade"]], "entry": 197, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "beach"], "facts": [["Melanie", "mentioned", "atmosphere of LGBTQ support group"], ["Melanie", "went to", "beach"]], "entry": 198, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "kids", "LGBTQ support group"], "facts": [["Caroline", "asked", "what the best part was"], ["Caroline", "asked", "if Caroline does it often"]], "entry": 199, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "kids", "beach"], "facts": [["Melanie", "made", "kids happy"], ["Melanie", "spend time with", "kids"], ["Melanie", "chill with", "kids"]], "entry": 200, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "has", "summer traditions"]], "entry": 201, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "family camping trip"], "facts": [["Melanie", "look forward to", "family camping trip"], ["family camping trip", "include", "roast marshmallows"], ["family camping trip", "include", "tell stories around the campfire"], ["family camping trip", "include", "enjoy each other's company"]], "entry": 202, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [], "entry": 203, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "camping trip", "Perseid meteor shower"], "facts": [["Melanie", "remembered", "camping trip"], ["Melanie", "saw", "Perseid meteor shower"]], "entry": 204, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "asked", "what the LGBTQ support group looked like"]], "entry": 205, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "meteor shower"], "facts": [["Melanie", "observed", "meteor shower"]], "entry": 206, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "expressed", "breathtaking experience"]], "entry": 207, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": [], "facts": [], "entry": 208, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [], "entry": 209, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "youngest"], "facts": [["Melanie", "witnessed", "youngest's first steps"]], "entry": 210, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "mentioned", "milestones"], ["Mel", "was", "mentioned"]], "entry": 211, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "family", "love"], "facts": [["Melanie", "appreciate", "life"], ["Melanie", "be with", "family"], ["Melanie", "have", "love"]], "entry": 212, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "family"], "facts": [["Caroline", "expressed", "admiration for Melanie's family"]], "entry": 213, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "family"], "facts": [["Melanie", "acknowledges", "family"]], "entry": 214, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "daughter", "concert", "music", "summer breeze"], "facts": [["Melanie", "celebrated", "her daughter's birthday"], ["Melanie", "felt", "joy"], ["Melanie", "was", "surrounded by music"], ["Melanie", "enjoyed", "the warm summer breeze"], ["Melanie", "saw", "her kids' smiles"]], "entry": 215, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "kids", "concert", "advocacy event"], "facts": [["Caroline", "praises", "Caroline's love for kids"], ["Caroline", "attended", "concert"], ["Caroline", "attended", "advocacy event"]], "entry": 216, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Matt Patterson"], "facts": [["Melanie", "mentioned", "Matt Patterson"], ["Matt Patterson", "has", "amazing voice and songs"]], "entry": 217, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "pride parade"], "facts": [["Caroline", "attended", "pride parade"], ["Caroline", "felt", "awesome"], ["Caroline", "was", "proud"]], "entry": 218, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "LGBTQ support group"], "facts": [["Melanie", "asked", "how it felt for Caroline to be part of the community"]], "entry": 219, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "LGBTQ rights"], "facts": [["Caroline", "was inspired by", "crowd at LGBTQ support group"], ["Caroline", "is fighting for", "LGBTQ rights"]], "entry": 220, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "LGBTQ support group", "kids", "artist"], "facts": [["Melanie", "mentioned", "LGBTQ support group"]], "entry": 221, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "inclusivity", "diversity", "art", "LGBTQ+ community"], "facts": [["Caroline", "uses", "recent painting"], ["Caroline", "represents", "inclusivity and diversity in her art"], ["Caroline", "speaks up for", "LGBTQ+ community"], ["Caroline", "pushes for", "acceptance"]], "entry": 222, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [["Melanie", "asked", "main idea of art"]], "entry": 223, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "trans community"], "facts": [["Caroline", "creates", "art"], ["Caroline", "uses", "art to express trans experience"], ["Caroline", "uses", "art to show story"], ["Caroline", "uses", "art to help people understand trans community"]], "entry": 224, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "trans folks"], "facts": [["Melanie", "praises", "Caroline's art"], ["Caroline", "uses", "art to tell stories"], ["Caroline", "teaches", "people about trans folks"]], "entry": 225, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "painting"], "facts": [["Caroline", "created", "painting"], ["Caroline", "aimed_to_represent", "warmth, love and self-acceptance"]], "entry": 226, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [], "entry": 227, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": [], "facts": [], "entry": 228, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": [], "facts": [], "entry": 229, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [], "entry": 230, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [["Melanie", "said", "feel free to reach out"]], "entry": 231, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "religious conservatives", "hike", "LGBTQ rights"], "facts": [["Caroline", "met", "Mel"], ["Caroline", "had", "negative experience on hike"], ["Caroline", "was", "upset by religious conservatives on hike"], ["Caroline", "thought", "much work still needed for LGBTQ rights"], ["Caroline", "felt", "support from friends"]], "entry": 232, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "pottery"], "facts": [["Melanie", "mentioned", "closed-mindedness"], ["Melanie", "finished", "pottery project"]], "entry": 233, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "pottery project"], "facts": [["Caroline", "encouraged", "Melanie"], ["Melanie", "found", "happiness"]], "entry": 234, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": [], "facts": [], "entry": 235, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "bowl"], "facts": [["Caroline", "asked about", "idea for colors and patterns on bowl"]], "entry": 236, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [["Melanie", "is obsessed with", "LGBTQ support groups"]], "entry": 237, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "praised", "effort and passion"], ["Caroline", "noted", "creativity"], ["Caroline", "highlighted", "self-expression and growth"], ["Caroline", "encouraged", "killing it"]], "entry": 238, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "art", "sanctuary", "fulfillment"], "facts": [["Melanie", "has", "connection to art"], ["Melanie", "feels", "sanctuary from"], ["Melanie", "feels", "source of comfort from"], ["Melanie", "feels", "happiness from"], ["Melanie", "feels", "fulfillment from"]], "entry": 239, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "expressed", "joy"]], "entry": 240, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [["Melanie", "agrees with", "Caroline"]], "entry": 241, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "reminded", "Mel"], ["Mel", "provided", "happy moments"]], "entry": 242, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [["Melanie", "agreed_with", "Caroline"]], "entry": 243, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "appreciates", "friendship with Melanie"]], "entry": 244, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Melanie", "appreciate", "Caroline's friendship"]], "entry": 245, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "Pride fest"], "facts": [["Caroline", "is supportive of", "Mel"], ["Caroline", "had a good time", "Pride fest"]], "entry": 246, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "family"], "facts": [["Melanie", "suggested", "family outing"]], "entry": 247, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "suggested", "outing"], ["Caroline", "suggested", "special event"], ["Caroline", "suggested", "catching up"]], "entry": 248, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Melanie", "suggested", "something special"]], "entry": 249, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "mentioned", "Mel"]], "entry": 250, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [["Melanie", "mentioned", "Caroline"]], "entry": 251, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "mentioned", "Mel"]], "entry": 252, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "adoption agencies", "adoption advice/assistance group"], "facts": [["Caroline", "did", "apply to adoption agencies"], ["Caroline", "got help from", "adoption advice/assistance group"]], "entry": 253, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "felt", "proud of Caroline"], ["Melanie", "asked", "how Caroline felt"]], "entry": 254, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "Oscar", "guinea pig"], "facts": [["Caroline", "thanks", "Mel"], ["Caroline", "feels", "excited"], ["Caroline", "feels", "nerve-wracking"], ["Caroline", "describes", "parenting as a big responsibility"], ["Caroline", "has", "Oscar as a pet"], ["Oscar", "is", "a guinea pig"], ["Oscar", "has been", "great"]], "entry": 255, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "cat", "Oliver", "Oscar"], "facts": [["Melanie", "mentioned", "another cat named Bailey"], ["Melanie", "showed", "a picture of Oliver"], ["Melanie", "asked", "for a picture of Oscar"]], "entry": 256, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Oliver", "parsley"], "facts": [["Caroline", "describes", "Oliver as cute"], ["Caroline", "asks", "what the funniest thing Oliver has done"], ["Caroline", "shows", "a picture of Oliver eating parsley"], ["Caroline", "states", "parsley is Oliver's favorite veggie"]], "entry": 257, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Oliver", "horse"], "facts": [["Melanie", "mentioned", "Oliver"], ["Melanie", "did", "feed a horse a carrot"]], "entry": 258, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "horses", "dad", "fields", "wind"], "facts": [["Caroline", "had experience", "horseback riding with dad"], ["Caroline", "loves", "horses"]], "entry": 259, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "horse painting"], "facts": [["Melanie", "showed", "photo of horse painting"]], "entry": 260, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "horse"], "facts": [["Caroline", "praised", "Melanie"], ["Melanie", "got", "horse"]], "entry": 261, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "horses", "paint"], "facts": [["Melanie", "like", "horses"], ["Melanie", "like", "paint"]], "entry": 262, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "self-portrait"], "facts": [["Caroline", "created", "self-portrait"]], "entry": 263, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "blue"], "facts": [["Caroline", "felt", "powerful while painting blue"], ["Melanie", "asked", "how Caroline felt while painting blue"]], "entry": 264, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "identity", "true to self"], "facts": [["Caroline", "felt", "liberated and empowered"], ["Caroline", "did", "painting"]], "entry": 265, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Art", "LGBTQ support group", "Art"], "facts": [["Caroline", "helps", "LGBTQ support group"]], "entry": 266, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "Art", "LGBTQ rights"], "facts": [["Caroline", "appreciates", "Melanie"], ["Caroline", "feels free", "Art"], ["Caroline", "feels supported", "supportive people"]], "entry": 267, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [], "entry": 268, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "thanked", "Melanie"], ["Caroline", "is", "excited"]], "entry": 269, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [], "entry": 270, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": [], "facts": [], "entry": 271, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "apologized to", "someone"]], "entry": 272, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "plate"], "facts": [["Caroline", "thanked", "Melanie"]], "entry": 273, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "pottery"], "facts": [["Melanie", "took part in", "pottery class"], ["Melanie", "enjoys", "pottery"]], "entry": 274, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": [], "facts": [], "entry": 275, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [["Caroline", "idea for painting", "not specified"], ["Melanie", "response to Caroline's painting", "positive"]], "entry": 276, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "beach", "sun"], "facts": [["Caroline", "created", "painting"], ["Caroline", "visited", "beach"], ["Caroline", "felt", "calm"]], "entry": 277, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "beach", "art", "sunset"], "facts": [["Melanie", "was inspired by", "beach"], ["Melanie", "felt serenity from", "art"], ["Melanie", "perceived peace in", "sunset"]], "entry": 278, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "appreciate", "kind words"], ["Mel", "sense of peace", "makes Caroline feel connected"]], "entry": 279, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "fam", "homeless shelter"], "facts": [["Melanie", "feel", "same"], ["Melanie", "like", "Art"], ["Melanie", "remember", "volunteering"], ["Melanie", "with", "fam"], ["Melanie", "spending", "day"], ["Melanie", "at", "homeless shelter"]], "entry": 280, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "praises", "Mel"]], "entry": 281, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": [], "facts": [], "entry": 282, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "community", "mural"], "facts": [["Caroline", "has found", "community"], ["Caroline", "has been accepted", "by community"], ["Caroline", "has been loved", "by community"], ["Caroline", "has been supported", "by community"], ["Caroline", "has benefited", "from community"], ["Caroline", "has seen", "mural"]], "entry": 283, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "LGBTQ support group"], "facts": [["Caroline", "found", "supportive community"], ["Melanie", "was", "glad for Caroline"]], "entry": 284, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "rainbow flag mural", "eagle"], "facts": [["Caroline", "symbolizes", "courage and strength of the trans community"], ["Caroline", "symbolizes", "resilience"], ["Caroline", "represents", "resilience"]], "entry": 285, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "trans person"], "facts": [["Melanie", "expresses", "awe"], ["Melanie", "asks", "about art"]], "entry": 286, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "made", "stained glass window"]], "entry": 287, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": [], "facts": [], "entry": 288, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "local church", "transgender woman"], "facts": [["Caroline", "made", "show"], ["Caroline", "shared", "journey"], ["Caroline", "accepted", "growth"]], "entry": 289, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "colors", "story"], "facts": [["Melanie", "expressed", "inspiration about Caroline's colors"]], "entry": 290, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "acknowledged", "Mel's liking"], ["Caroline", "expressed", "intentions to create"]], "entry": 291, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "it"], "facts": [["Melanie", "asked_where", "it_was_found"]], "entry": 292, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "rainbow sidewalk", "Pride Month"], "facts": [["Caroline", "discovered", "rainbow sidewalk"], ["Caroline", "took picture of", "rainbow sidewalk"]], "entry": 293, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [["Melanie", "expressed", "support for Caroline"]], "entry": 294, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "someone"], "facts": [["Caroline", "agrees with", "Mel about art being a mood-booster"], ["someone", "created", "art on the ground"]], "entry": 295, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "colors", "flowers", "Art"], "facts": [["Melanie", "mentioned", "colors"], ["Melanie", "mentioned", "flowers"], ["Melanie", "praised", "Art"]], "entry": 296, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "art", "bouquet of flowers"], "facts": [["Caroline", "thanked", "Mel"]], "entry": 297, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "that"], "facts": [["Melanie", "noticed", "realness of something"]], "entry": 298, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "likes", "drawing flowers"], ["Caroline", "thinks", "appreciating nature and sharing it is great"]], "entry": 299, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [["Melanie", "likes", "painting landscapes and still life"], ["Melanie", "has", "recently painted a landscape or still life"]], "entry": 300, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [], "entry": 301, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [], "entry": 302, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "LGBTQ art show"], "facts": [["Caroline", "is putting together", "LGBTQ art show"], ["Caroline", "will show", "paintings"]], "entry": 303, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "LGBTQ community"], "facts": [["Melanie", "expresses enthusiasm for", "show"], ["LGBTQ community", "benefits from", "show"]], "entry": 304, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "LGBTQ artists", "understanding", "acceptance"], "facts": [["Caroline", "invited", "Mel"], ["Caroline", "intended", "event success"], ["Caroline", "intended", "spread understanding"], ["Caroline", "intended", "increase acceptance"]], "entry": 305, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "we"], "facts": [["Caroline", "asked", "how Melanie was doing"]], "entry": 306, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "park", "kids", "outdoors", "you"], "facts": [["Melanie", "mentioned", "park"], ["Melanie", "mentioned", "kids"], ["Melanie", "had", "fun"]], "entry": 307, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "kids", "outdoors", "ambitions", "volunteer", "LGBTQ+ youth center", "support"], "facts": [["Caroline", "mentioned", "kids' fun at the park"], ["Caroline", "had", "ambitions"], ["Caroline", "volunteered", "at an LGBTQ+ youth center"], ["Caroline", "talked to", "similar young people"], ["Caroline", "felt", "gratified"], ["Caroline", "remembered", "the importance of being kind and showing support"]], "entry": 308, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [], "entry": 309, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "felt", "fulfilled"], ["Caroline", "shared", "story"], ["Caroline", "felt", "powerful and emotional"]], "entry": 310, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "young folks", "LGBTQ support group"], "facts": [["Melanie", "asked", "Was connecting with those young folks meaningful for you?"]], "entry": 311, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "felt", "special"], ["Caroline", "remembered", "struggles in the past"], ["Caroline", "felt", "alone"], ["Caroline", "shared", "story"], ["Caroline", "offered", "support"], ["Caroline", "felt", "like she could make a difference"]], "entry": 312, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "LGBTQ support group"], "facts": [["Melanie", "asked", "what Caroline hopes to do next time"]], "entry": 313, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "youth center"], "facts": [["Caroline", "volunteered", "youth center"], ["Caroline", "believes", "community is important"], ["Caroline", "makes", "strong connections"]], "entry": 314, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "is interested in", "specific projects or activities at LGBTQ support group"]], "entry": 315, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "talent show"], "facts": [["Caroline", "is looking forward to", "seeing how much fun everyone has and how proud they'll feel of their talents"]], "entry": 316, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "live music", "LGBTQ support group"], "facts": [["Melanie", "likes", "live music"]], "entry": 317, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "band"], "facts": [["Caroline", "saw", "band"]], "entry": 318, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "show"], "facts": [["Melanie", "went to", "show"]], "entry": 319, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "band"], "facts": [["Caroline", "asked about", "band"]], "entry": 320, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Summer Sounds"], "facts": [["Summer Sounds", "played", "pop song"], ["Summer Sounds", "made", "everyone dancing and singing"], ["Summer Sounds", "was", "fun and lively"]], "entry": 321, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "likes", "music"]], "entry": 322, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [["Melanie", "play", "type of music"]], "entry": 323, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Guitar"], "facts": [["Caroline", "plays", "Guitar"]], "entry": 324, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "guitar"], "facts": [["Melanie", "asked about", "type of guitar"], ["Melanie", "asked about", "how long someone has been playing"]], "entry": 325, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "acoustic guitar"], "facts": [["Caroline", "began_playing", "acoustic guitar five years ago"], ["Caroline", "uses", "acoustic guitar to express herself"], ["Caroline", "uses", "acoustic guitar to escape into her emotions"]], "entry": 326, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [["Melanie", "mentioned", "music"]], "entry": 327, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Sara Bareilles", "Brave"], "facts": [["Caroline", "thinks_of_song_meaning", "paths she's taken and progress she's made"]], "entry": 328, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [["Melanie", "praised", "song"], ["Caroline", "has", "journey"], ["Caroline", "has", "determination"]], "entry": 329, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "thanked", "Melanie"], ["Melanie", "play", "instrument"]], "entry": 330, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "clarinet"], "facts": [["Melanie", "plays", "clarinet"]], "entry": 331, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [], "entry": 332, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Bach", "Mozart", "Ed Sheeran", "Perfect"], "facts": [["Melanie", "likes", "classical music"], ["Melanie", "likes", "modern music"]], "entry": 333, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "gang", "biking", "stuff", "pic"], "facts": [["Caroline", "chatted with", "Mel"], ["Caroline", "went", "biking"], ["Caroline", "saw", "cool stuff"], ["Caroline", "sent", "a picture"]], "entry": 334, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "pic", "colors", "biking", "kids", "camping", "forest", "hiking", "soul"], "facts": [["Melanie", "mentioned", "Caroline"], ["Melanie", "praised", "colorfulness of picture"]], "entry": 335, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "yellow leaves"], "facts": [["Caroline", "praised", "photo"], ["Caroline", "shared", "excitement about seeing others' enthusiasm"]], "entry": 336, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "kids", "marshmallows", "campfire"], "facts": [["Melanie", "inspires", "herself"], ["Melanie", "shared", "stories"]], "entry": 337, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "LGBTQ+ community", "friends", "family", "mentors", "art"], "facts": [["Caroline", "feels", "inspired"], ["Caroline", "realizes", "helping create a more loving world"], ["Caroline", "plans to continue", "making art"]], "entry": 338, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Caroline", "has attended", "LGBTQ support group"], ["Melanie", "expresses admiration", "Caroline's art"]], "entry": 339, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [], "entry": 340, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "pottery"], "facts": [["Melanie", "discovered", "painting and pottery"], ["Melanie", "created", "pottery creation"]], "entry": 341, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": [], "facts": [], "entry": 342, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [["Melanie", "appreciates", "LGBTQ support group"]], "entry": 343, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "made", "piece"]], "entry": 344, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "painting", "red", "blue"], "facts": [["Melanie", "praised", "painting"]], "entry": 345, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "trans woman"], "facts": [["Caroline", "made", "painting"], ["Caroline", "showed", "painting"], ["painting", "contains", "red and blue"], ["painting", "contains", "mix of colors"], ["painting", "is", "reminder"], ["painting", "reminds", "to love authentic self"]], "entry": 346, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "painting"], "facts": [["Melanie", "praised", "progress of Caroline's painting"], ["Melanie", "expressed", "proudness of Caroline"], ["Caroline", "asked", "effect of journey on her relationships"]], "entry": 347, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "friends"], "facts": [["Caroline", "felt", "happier"], ["Caroline", "has", "more genuine relationships"]], "entry": 348, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "changes", "cultural shifts", "LGBTQ support group", "café"], "facts": [["Melanie", "encourages", "Caroline"], ["Caroline", "participated", "LGBTQ support group"], ["Melanie", "had", "good time at café"], ["café", "had", "thoughtful signs"]], "entry": 349, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "sign"], "facts": [["Caroline", "asked_about", "status_of_sign"], ["Caroline", "asked_Mel", "about_sign"]], "entry": 350, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "sign"], "facts": [["Melanie", "received", "concern"], ["Melanie", "had", "great time"]], "entry": 351, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "park"], "facts": [["Caroline", "had", "good time at park"]], "entry": 352, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [["Melanie", "expressed", "joyful moments"]], "entry": 353, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "adoption"], "facts": [["Caroline", "contacted", "mentor"], ["Caroline", "is", "ready to be a mom"]], "entry": 354, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Melanie", "congratulated", "Caroline"]], "entry": 355, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "adoption", "kids"], "facts": [["Caroline", "is excited about", "new chapter"], ["Caroline", "has adopted", "kids"], ["Caroline", "needs help finding resources", "adoption"]], "entry": 356, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "adoption"], "facts": [["Melanie", "mentioned", "adoption"]], "entry": 357, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "friend", "family"], "facts": [["Caroline", "mentioned", "friend"], ["Caroline", "encouraged", "friend"], ["Caroline", "offered", "help"]], "entry": 358, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Melanie", "asked", "tips"], ["Caroline", "provided", "tips"]], "entry": 359, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "adoption agency", "lawyer"], "facts": [["Caroline", "recommended", "adoption agency"], ["Caroline", "recommended", "lawyer"], ["Caroline", "provided", "info about adoption process"], ["Caroline", "mentioned", "documents needed for process"], ["Caroline", "encouraged", "emotional preparation"], ["Caroline", "stated", "it's worth it"]], "entry": 360, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "pottery"], "facts": [["Melanie", "had setback", "recently"], ["Melanie", "use", "pottery for self-expression and peace"]], "entry": 361, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "Pottery"], "facts": [["Caroline", "offered", "help"], ["Caroline", "knows", "Melanie"]], "entry": 362, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "book", "painting"], "facts": [["Melanie", "received", "book recommendation"], ["Melanie", "is keeping busy", "painting"]], "entry": 363, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "paintings"], "facts": [["Caroline", "has", "creative outlets"], ["Caroline", "has", "paintings"]], "entry": 364, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "sunsets", "artistical activities"], "facts": [["Melanie", "did", "artistic activity last week"]], "entry": 365, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": [], "facts": [], "entry": 366, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [["Melanie", "painted", "it"], ["Melanie", "painted", "an abstract painting"]], "entry": 367, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "asks", "what feelings were hoped to be portrayed"]], "entry": 368, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [["Melanie", "wanted", "painting with blue streaks"]], "entry": 369, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "poetry reading"], "facts": [["Caroline", "attended", "poetry reading"], ["Caroline", "went to", "Friday event"]], "entry": 370, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "LGBTQ support group"], "facts": [["Melanie", "asked about", "LGBTQ support group"]], "entry": 371, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "transgender poetry reading", "self-expression", "identities"], "facts": [["Caroline", "was at", "transgender poetry reading"], ["transgender poetry reading", "took place in", "downtown"], ["transgender poetry reading", "included", "sharing of stories through poetry"], ["transgender poetry reading", "was", "safe place for self-expression"], ["transgender poetry reading", "was", "empowering to hear others share and celebrate their identities"]], "entry": 372, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "LGBTQ support group"], "facts": [["Melanie", "asked about", "event at LGBTQ support group"]], "entry": 373, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "LGBTQ support group"], "facts": [["Caroline", "felt", "inspired to make some art"]], "entry": 374, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [["Caroline", "drew", "something"]], "entry": 375, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "freedom", "womanhood"], "facts": [["Caroline", "thanked", "Melanie"], ["Caroline", "created", "drawing"], ["drawing", "stands_for", "freedom and being real"], ["drawing", "nudges", "to stay true to self"], ["drawing", "embraces", "womanhood"]], "entry": 376, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [], "entry": 377, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "LGBTQ support group"], "facts": [["Caroline", "mentioned", "Melanie"]], "entry": 378, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline"], "facts": [["Melanie", "mentioned", "Caroline"], ["Caroline", "attended", "LGBTQ support group"]], "entry": 379, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "my son"], "facts": [["Melanie", "mentioned", "roadtrip"], ["Melanie", "described", "accident involving her son"]], "entry": 380, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": [], "facts": [], "entry": 381, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": [], "facts": [], "entry": 382, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "family"], "facts": [["Caroline", "mentioned", "Melanie"], ["Caroline", "reiterated", "importance of family"]], "entry": 383, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Family", "Grand Canyon"], "facts": [["Melanie", "thought", "Family is important"], ["Melanie", "thought", "accident happened"], ["Melanie", "was thankful to", "Family"], ["Family", "enjoyed", "Grand Canyon"]], "entry": 384, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel", "kids"], "facts": [["Caroline", "mention", "kids"], ["Caroline", "observe", "kids look cute"]], "entry": 385, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "brother", "kids"], "facts": [["Melanie", "reassured", "scared kids"], ["Melanie", "explained", "brother would be OK"]], "entry": 386, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "mentioned", "resilience in kids"]], "entry": 387, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "LGBTQ support group"], "facts": [["Melanie", "thought", "support group is amazing"], ["Melanie", "wishes", "she was as resilient as them"]], "entry": 388, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "give", "strength"]], "entry": 389, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "support"], "facts": [["Melanie", "agrees with", "Caroline"], ["Melanie", "is motivated by", "support"]], "entry": 390, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": [], "facts": [], "entry": 391, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "LGBTQ support group"], "facts": [["Melanie", "appreciate", "support from Caroline at LGBTQ support group"]], "entry": 392, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "LGBTQ support group"], "facts": [["Caroline", "supports", "Melanie"], ["Melanie", "benefits", "support from people"]], "entry": 393, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "fam", "hard times"], "facts": [["Melanie", "supports", "fam"], ["fam", "helps", "Melanie"], ["hard times", "gets easier", "with fam"]], "entry": 394, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "posted", "pic"]], "entry": 395, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "kids", "road trip"], "facts": [["Melanie", "mentioned", "yesterday"], ["Melanie", "mentioned", "the kids"], ["Melanie", "did", "a road trip"]], "entry": 396, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "R&R", "nature"], "facts": [["Caroline", "noticed", "refreshing effect of nature"]], "entry": 397, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "fam", "nature"], "facts": [["Melanie", "finds", "reset and recharge"], ["Melanie", "likes", "camping trips"], ["Melanie", "enjoys", "nature"]], "entry": 398, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "fam"], "facts": [["Caroline", "love", "camping with family"]], "entry": 399, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [["Melanie", "feels", "refreshed by the sound of birds and the smell of fresh air"]], "entry": 400, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "family"], "facts": [["Caroline", "finds", "peaceful"], ["Caroline", "visualizes", "nature"]], "entry": 401, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Nature", "quality time"], "facts": [["Melanie", "acknowledged", "thanks"]], "entry": 402, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "LGBTQ support group"], "facts": [["Caroline", "attended", "LGBTQ support group"]], "entry": 403, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "adoption agency"], "facts": [["Caroline", "passed", "adoption agency interviews"], ["Caroline", "is", "excited"], ["Caroline", "is", "thankful"]], "entry": 404, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "family", "figurines", "future"], "facts": [["Melanie", "happy for", "Caroline"], ["Melanie", "bought", "figurines"]], "entry": 405, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "family", "kids", "adoption"], "facts": [["Caroline", "appreciates", "Melanie's beauty"], ["Caroline", "believes", "love exists in families"], ["Caroline", "wants to build", "own family"], ["Caroline", "hopes to provide", "roof for kids without one"], ["Caroline", "intends to adopt", "kids who don't have one"], ["Caroline", "aims to show", "love and acceptance through adoption"]], "entry": 406, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "kids"], "facts": [["Melanie", "praised", "Caroline"], ["Caroline", "adopted", "kids"]], "entry": 407, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "kids"], "facts": [["Caroline", "has dream", "create a safe and loving home"], ["Caroline", "believes", "love and acceptance should be everyone's right"]], "entry": 408, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie", "Caroline", "kids"], "facts": [["Melanie", "agreed with", "Caroline"], ["Caroline", "is passionate about", "helping kids"]], "entry": 409, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Mel"], "facts": [["Caroline", "offered", "love and support"], ["Caroline", "made", "positive difference"]], "entry": 410, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [], "entry": 411, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie", "transitioning", "friends", "family", "people I looked up to", "anyone who needs it", "comfort", "growth"], "facts": [["Caroline", "received", "help"], ["Caroline", "found out", "who she really is"], ["Caroline", "wants to pass", "support"], ["Caroline", "brings", "comfort"], ["Caroline", "finds joy", "in helping others grow"]], "entry": 412, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline", "Melanie"], "facts": [["Melanie", "expresses happiness for", "Caroline"]], "entry": 413, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": [], "facts": [], "entry": 414, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Melanie"], "facts": [["Melanie", "said", "we can always be there for each other"]], "entry": 415, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "appreciate", "support of close friends"], ["close friends", "encourage", "Caroline"]], "entry": 416, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": [], "facts": [], "entry": 417, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}
+{"entities": ["Caroline"], "facts": [["Caroline", "feel", "acceptance"]], "entry": 418, "model": "Qwen/Qwen2.5-3B-Instruct", "v": 1}

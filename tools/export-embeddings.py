@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Export real sentence-embeddings for a kortex corpus to a raw f32 file.
+"""Export real sentence-embeddings for a skinki corpus to a raw f32 file.
 
 Dev-only helper, NOT part of the Cargo workspace. Takes a corpus produced by
-`kortex generate --out ...` (JSON: {"meta":..., "entries":[{"id":.., "text":..}],
+`skinki generate --out ...` (JSON: {"meta":..., "entries":[{"id":.., "text":..}],
 "ground_truth":...}), embeds the entry texts with a sentence-transformers
 model, optionally Matryoshka-truncates + re-normalizes, and writes raw
 little-endian float32 row-major data ready for:
 
-    cargo run --release -p kortex-harness -- compress-bench --vectors-file <out> --dim <dim>
-    cargo run --release -p kortex-harness -- scale-bench    --vectors-file <out> --dim <dim>
+    cargo run --release -p skinki-harness -- compress-bench --vectors-file <out> --dim <dim>
+    cargo run --release -p skinki-harness -- scale-bench    --vectors-file <out> --dim <dim>
 """
 
 import argparse
@@ -24,7 +24,7 @@ def parse_args() -> argparse.Namespace:
         "--corpus",
         required=True,
         type=Path,
-        help="Path to corpus JSON produced by `kortex generate --out ...`",
+        help="Path to corpus JSON produced by `skinki generate --out ...`",
     )
     p.add_argument(
         "--out",
@@ -156,7 +156,7 @@ def main() -> int:
     print(f"Sidecar metadata -> {meta_path}")
     print("\nNext:")
     print(
-        f"  cargo run --release -p kortex-harness -- compress-bench "
+        f"  cargo run --release -p skinki-harness -- compress-bench "
         f"--vectors-file {args.out} --dim {dim}"
     )
     return 0

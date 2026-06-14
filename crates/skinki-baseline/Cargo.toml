@@ -1,0 +1,10 @@
+[package]
+name = "skinki-baseline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A BM25 lexical baseline retriever — the yardstick every real engine must beat."
+
+[dependencies]
+skinki-corpus.workspace = true
+skinki-eval.workspace = true

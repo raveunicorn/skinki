@@ -44,13 +44,17 @@ Models/
 .env
 .env.*
 
-# Rust (kortex engine)
+# Rust (skinki engine)
 target/
 **/*.rs.bk
-# Keep Cargo.lock: the workspace ships a binary (kortex-harness).
+# Keep Cargo.lock: the workspace ships a binary (skinki-harness).
 
 # Cursor IDE (local session plans/artifacts)
 .cursor/
 
 # Misc
 *.log
+
+# Python bytecode
+__pycache__/
+*.pyc
