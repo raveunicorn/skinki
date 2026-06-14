@@ -17,7 +17,7 @@ env:
 
 defaults:
   run:
-    working-directory: kortex
+    working-directory: .
 
 jobs:
   check:
@@ -30,7 +30,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: kortex
+          workspaces: .
       - name: Formatting
         run: cargo fmt --check
       - name: Clippy (warnings are errors)
@@ -48,7 +48,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: kortex
+          workspaces: .
       # Stage 1: compression gate (recall >= 95% within the M1 Air RAM budget).
       # Synthetic source keeps it fast and deterministic; the verdict is
       # N-independent so a small set still validates the budget.
@@ -103,7 +103,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: kortex
+          workspaces: .
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
