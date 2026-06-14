@@ -10,6 +10,26 @@
 //! Deliberately minimal: we navigate `serde_json::Value` rather than modeling
 //! the full LoCoMo schema (which carries fields — `img_url`, summaries,
 //! per-category metadata — irrelevant to retrieval eval).
+//!
+//! ## Measured (the first real-data result)
+//!
+//! LoCoMo10, all 10 samples (5882 entries, 1977 queries), k=10, dim 256:
+//!
+//! | retriever | recall@10 | answer@10 |
+//! | --- | --- | --- |
+//! | bm25 | 0.484 | 0.378 |
+//! | semantic-static (lexical hash) | 0.183 | 0.292 |
+//! | graph (deterministic) | 0.484 | 0.378 |
+//! | **semantic-real (EmbeddingGemma-300m)** | **0.673** | **0.446** |
+//!
+//! EmbeddingGemma beats BM25 by **+0.189 recall (~+39%)** on real dialogue —
+//! the first validated win on non-synthetic text, and proof the pluggable
+//! [`crate`]/`Embedder` seam works end to end (produced on an M1 via
+//! `tools/export-embeddings-gemma.py`, replayed through `--embeddings-file` /
+//! `--query-embeddings-file`; reproduce with that runbook). Honest caveat: this
+//! lift is the *embedder*, not our graph — `graph == bm25` here because the
+//! deterministic intro/rec/venue patterns don't fire on conversation, so our
+//! unique graph layer still awaits a real LLM extractor for dialogue.
 
 use std::collections::HashMap;
 use std::path::Path;
