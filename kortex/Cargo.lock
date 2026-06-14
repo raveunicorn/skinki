@@ -194,6 +194,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "kortex-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "kortex-corpus",
+ "kortex-eval",
+ "kortex-graph",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kortex-sleep"
 version = "0.1.0"
 dependencies = [
