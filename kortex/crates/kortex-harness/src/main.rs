@@ -256,11 +256,21 @@ enum Cmd {
         /// Embedding dimension for the static (lexical) semantic retriever.
         #[arg(long, default_value_t = 256)]
         dim: usize,
-        /// Optional precomputed embeddings: flat little-endian f32, `dim * N`
-        /// floats, one row per corpus entry in entry-id order (the future
+        /// Optional precomputed entry embeddings: flat little-endian f32,
+        /// `dim * N` floats, one row per corpus entry in entry-id order (the
         /// real-model replay slot, e.g. EmbeddingGemma).
         #[arg(long)]
         embeddings_file: Option<PathBuf>,
+        /// Optional precomputed QUERY embeddings (same format), one row per
+        /// recall query in query order. Required alongside `--embeddings-file`
+        /// to score `semantic-real` (docs and queries must share a space).
+        #[arg(long)]
+        query_embeddings_file: Option<PathBuf>,
+        /// Dump the canonical entry/query texts as JSON arrays to this dir
+        /// (`entries.json`, `queries.json`) and exit — the input to
+        /// `tools/export-embeddings-gemma.py`. No eval is run.
+        #[arg(long)]
+        dump_texts: Option<PathBuf>,
     },
 }
 
@@ -723,10 +733,22 @@ fn main() -> Result<()> {
             sample,
             dim,
             embeddings_file,
+            query_embeddings_file,
+            dump_texts,
         } => {
             let sample = parse_locomo_sample(&sample)?;
             let corpus = load_locomo(&path, sample)?;
-            run_locomo_eval(&corpus, k, dim, embeddings_file.as_deref())?;
+            if let Some(dir) = dump_texts {
+                dump_locomo_texts(&corpus, &dir)?;
+            } else {
+                run_locomo_eval(
+                    &corpus,
+                    k,
+                    dim,
+                    embeddings_file.as_deref(),
+                    query_embeddings_file.as_deref(),
+                )?;
+            }
         }
     }
     Ok(())
@@ -2338,17 +2360,13 @@ fn print_ledger_bench(r: &LedgerBenchReport) {
 
 /// Cosine-similarity nearest-neighbor retriever over a fixed set of
 /// per-entry embeddings, generic over [`Embedder`]. Vectors produced by
-/// [`StaticHashEmbedder`] are already L2-normalized, so cosine == dot.
-///
-/// Also supports a "precomputed" mode ([`SemanticRetriever::from_precomputed`])
-/// for replaying embeddings from a real transformer model: build the vectors
-/// out-of-band, then `search` ranks against them exactly the same way. In
-/// that mode `index` is a no-op (vectors/ids are already set).
+/// [`StaticHashEmbedder`] are already L2-normalized, so cosine == dot. The
+/// real-transformer path (where both docs and queries are precomputed) is
+/// scored directly by [`locomo_score_precomputed`], not through this type.
 struct SemanticRetriever<E: Embedder> {
     embedder: E,
     vectors: Vec<Vec<f32>>,
     ids: Vec<EntryId>,
-    precomputed: bool,
     name: String,
 }
 
@@ -2358,29 +2376,6 @@ impl<E: Embedder> SemanticRetriever<E> {
             embedder,
             vectors: Vec::new(),
             ids: Vec::new(),
-            precomputed: false,
-            name: name.to_string(),
-        }
-    }
-
-    /// Build a retriever from precomputed vectors (e.g. a real transformer's
-    /// embeddings replayed from a flat little-endian f32 file). `index` is a
-    /// no-op for this instance — `vectors`/`ids` are used as-is. The query is
-    /// still embedded with `embedder` at search time, so for a genuine
-    /// semantic-real run `embedder` must match the model that produced
-    /// `vectors` (or the query embedding must also be precomputed and the
-    /// search adapted accordingly — out of scope for this dev tool).
-    fn from_precomputed(
-        embedder: E,
-        vectors: Vec<Vec<f32>>,
-        ids: Vec<EntryId>,
-        name: &str,
-    ) -> Self {
-        SemanticRetriever {
-            embedder,
-            vectors,
-            ids,
-            precomputed: true,
             name: name.to_string(),
         }
     }
@@ -2392,9 +2387,6 @@ impl<E: Embedder> RetrievalSystem for SemanticRetriever<E> {
     }
 
     fn index(&mut self, corpus: &Corpus) {
-        if self.precomputed {
-            return;
-        }
         self.vectors.clear();
         self.ids.clear();
         self.vectors.reserve(corpus.entries.len());
@@ -2449,6 +2441,75 @@ fn read_embeddings_file(path: &std::path::Path, dim: usize, n: usize) -> Result<
     Ok(out)
 }
 
+/// Dump the canonical entry texts and query texts as JSON arrays (entry-id
+/// order / query order) — the exact order kortex scores them in, so the
+/// embeddings a model produces from these line up byte-for-byte on reload.
+fn dump_locomo_texts(corpus: &Corpus, dir: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    let entries: Vec<&str> = corpus.entries.iter().map(|e| e.text.as_str()).collect();
+    let queries: Vec<&str> = corpus
+        .ground_truth
+        .recall
+        .iter()
+        .map(|q| q.question.as_str())
+        .collect();
+    let ep = dir.join("entries.json");
+    let qp = dir.join("queries.json");
+    std::fs::write(&ep, serde_json::to_vec(&entries)?)?;
+    std::fs::write(&qp, serde_json::to_vec(&queries)?)?;
+    println!(
+        "dumped {} entry texts -> {}\ndumped {} query texts -> {}\n\nNext: embed them with tools/export-embeddings-gemma.py, then re-run with\n  --embeddings-file <dir>/entries.f32 --query-embeddings-file <dir>/queries.f32",
+        entries.len(),
+        ep.display(),
+        queries.len(),
+        qp.display()
+    );
+    Ok(())
+}
+
+/// Score precomputed query vectors against precomputed entry vectors directly
+/// (cosine == dot on L2-normalized rows): the real-model path, where BOTH sides
+/// come from the same embedder. `query_vecs[i]` corresponds to
+/// `corpus.ground_truth.recall[i]`; `entry_vecs[j]` to `corpus.entries[j]`.
+fn locomo_score_precomputed(
+    entry_vecs: &[Vec<f32>],
+    query_vecs: &[Vec<f32>],
+    corpus: &Corpus,
+    k: usize,
+) -> RetrievalScores {
+    let queries = &corpus.ground_truth.recall;
+    let (mut recall, mut ndcg, mut precision, mut answer_hits) = (0.0, 0.0, 0.0, 0.0);
+    for (qi, q) in queries.iter().enumerate() {
+        let qv = &query_vecs[qi];
+        let mut scored: Vec<(f32, EntryId)> = entry_vecs
+            .iter()
+            .zip(corpus.entries.iter())
+            .map(|(v, e)| (dot(qv, v), e.id))
+            .collect();
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.1.cmp(&b.1))
+        });
+        let retrieved: Vec<EntryId> = scored.into_iter().take(k).map(|(_, id)| id).collect();
+        recall += recall_at_k(&retrieved, &q.relevant_entries, k);
+        precision += precision_at_k(&retrieved, &q.relevant_entries, k);
+        ndcg += ndcg_at_k(&retrieved, &q.relevant_entries, k);
+        if answer_in_entries(corpus, &retrieved, &q.answer) {
+            answer_hits += 1.0;
+        }
+    }
+    let n = queries.len().max(1) as f64;
+    RetrievalScores {
+        queries: queries.len(),
+        k,
+        recall_at_k: recall / n,
+        precision_at_k: precision / n,
+        ndcg_at_k: ndcg / n,
+        answer_in_topk: answer_hits / n,
+    }
+}
+
 /// Score `system` on `corpus.ground_truth.recall` and return the aggregate.
 fn locomo_score(system: &dyn RetrievalSystem, corpus: &Corpus, k: usize) -> RetrievalScores {
     let items: Vec<QItem> = corpus
@@ -2470,6 +2531,7 @@ fn run_locomo_eval(
     k: usize,
     dim: usize,
     embeddings_file: Option<&std::path::Path>,
+    query_embeddings_file: Option<&std::path::Path>,
 ) -> Result<()> {
     println!("\n=== Kortex — locomo-eval (LoCoMo10 real-conversation benchmark) ===");
     println!(
@@ -2490,19 +2552,21 @@ fn run_locomo_eval(
     graph.index(corpus);
     let graph_scores = locomo_score(&graph, corpus, k);
 
-    let real_scores = match embeddings_file {
-        Some(path) => {
-            let vectors = read_embeddings_file(path, dim, corpus.entries.len())?;
-            let ids: Vec<EntryId> = corpus.entries.iter().map(|e| e.id).collect();
-            let semantic_real = SemanticRetriever::from_precomputed(
-                StaticHashEmbedder::new(dim),
-                vectors,
-                ids,
-                "semantic-real",
-            );
-            Some(locomo_score(&semantic_real, corpus, k))
+    // `semantic-real` needs BOTH entry and query embeddings from the same model
+    // (a precomputed doc space is meaningless if queries are embedded by a
+    // different embedder). Require both files; score them directly.
+    let real_scores = match (embeddings_file, query_embeddings_file) {
+        (Some(epath), Some(qpath)) => {
+            let entry_vecs = read_embeddings_file(epath, dim, corpus.entries.len())?;
+            let query_vecs =
+                read_embeddings_file(qpath, dim, corpus.ground_truth.recall.len())?;
+            Some(locomo_score_precomputed(&entry_vecs, &query_vecs, corpus, k))
         }
-        None => None,
+        (Some(_), None) => anyhow::bail!(
+            "--embeddings-file requires --query-embeddings-file too (docs and queries must share an embedding space); dump both with --dump-texts and embed via tools/export-embeddings-gemma.py"
+        ),
+        (None, Some(_)) => anyhow::bail!("--query-embeddings-file requires --embeddings-file too"),
+        (None, None) => None,
     };
 
     if let Some(real) = &real_scores {
