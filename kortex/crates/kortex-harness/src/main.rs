@@ -277,6 +277,10 @@ enum Cmd {
         /// by rebuilding an entity graph from the log (the real-text graph path).
         #[arg(long)]
         graph_artifacts: Option<PathBuf>,
+        /// Only score QA of this LoCoMo category (e.g. 2 = multi-hop — the
+        /// regime the graph is meant to help). Default: all categories.
+        #[arg(long)]
+        category: Option<i64>,
     },
 }
 
@@ -742,9 +746,10 @@ fn main() -> Result<()> {
             query_embeddings_file,
             dump_texts,
             graph_artifacts,
+            category,
         } => {
             let sample = parse_locomo_sample(&sample)?;
-            let corpus = load_locomo(&path, sample)?;
+            let corpus = load_locomo(&path, sample, category)?;
             if let Some(dir) = dump_texts {
                 dump_locomo_texts(&corpus, &dir)?;
             } else {

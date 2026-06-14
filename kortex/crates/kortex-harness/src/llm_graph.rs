@@ -110,11 +110,19 @@ impl LlmGraphRetriever {
     }
 
     /// Entities from the vocabulary that appear (as a substring) in `query`.
-    /// `>= 3` chars avoids matching tiny tokens that collide with everything.
+    /// `>= 3` chars avoids matching tiny tokens that collide with everything;
+    /// entities mentioned in more than a quarter of all turns are conversational
+    /// hubs (the speakers in a 2-person dialogue, generic nouns) — they carry no
+    /// retrieval signal and only flood, so they are dropped as query anchors.
     fn query_entities(&self, query_lower: &str) -> BTreeSet<String> {
+        let hub_df = (self.n_entries / 4).max(1);
         self.vocab
             .iter()
-            .filter(|e| e.len() >= 3 && query_lower.contains(e.as_str()))
+            .filter(|e| {
+                e.len() >= 3
+                    && query_lower.contains(e.as_str())
+                    && self.entity_postings.get(*e).map_or(0, |p| p.len()) <= hub_df
+            })
             .cloned()
             .collect()
     }

@@ -27,9 +27,32 @@
 //! [`crate`]/`Embedder` seam works end to end (produced on an M1 via
 //! `tools/export-embeddings-gemma.py`, replayed through `--embeddings-file` /
 //! `--query-embeddings-file`; reproduce with that runbook). Honest caveat: this
-//! lift is the *embedder*, not our graph — `graph == bm25` here because the
-//! deterministic intro/rec/venue patterns don't fire on conversation, so our
-//! unique graph layer still awaits a real LLM extractor for dialogue.
+//! lift is the *embedder*, not our graph.
+//!
+//! ## Measured (the graph on real text — a decisive negative)
+//!
+//! We then gave the graph a real LLM extractor: Qwen2.5-3B-Instruct extracted
+//! entities + facts per turn (`tools/extract-graph-llm.py`), rebuilt into an
+//! entity-co-mention graph ([`crate::llm_graph`]) fused with BM25. On LoCoMo
+//! sample 0 (419 turns) it is **worse than BM25 in every category**, including
+//! multi-hop — the regime it was designed for:
+//!
+//! | category | bm25 recall@10 | llm-graph+bm25 recall@10 |
+//! | --- | --- | --- |
+//! | 1 single-hop | 0.180 | 0.169 |
+//! | 2 **multi-hop** | **0.784** | **0.703** |
+//! | 3 temporal | 0.227 | 0.045 |
+//! | 4 open-domain | 0.536 | 0.464 |
+//! | all | 0.536 | 0.453 |
+//!
+//! Verdict: **LLM entity-co-mention does not beat lexical retrieval on real
+//! dialogue** — the same failure mode as the synthetic co-mention round 1
+//! (`kortex_graph` docs). Speaker hubs + noisy 3B entities + unresolved
+//! coreference ("Mel" vs "Melanie") add candidates that RRF lets displace BM25's
+//! good hits. The synthetic 2.5–3× graph win was specific to *templated typed
+//! relations + temporal joins*, which do not transfer to co-mention over messy
+//! extraction. On real text so far the retrieval win is the embedder; the graph
+//! moat, in this form, is **not** validated — recorded honestly per Law 2.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -52,7 +75,7 @@ pub enum LocomoSample {
 /// chosen sample(s). Conversation turns become [`Entry`]s (in session order,
 /// sequential ids); QA items with non-empty `evidence` become
 /// [`RecallQuery`]s in `ground_truth.recall`.
-pub fn load_locomo(path: &Path, sample: LocomoSample) -> Result<Corpus> {
+pub fn load_locomo(path: &Path, sample: LocomoSample, category: Option<i64>) -> Result<Corpus> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("reading LoCoMo dataset at {}", path.display()))?;
     let data: Vec<Value> = serde_json::from_str(&raw).context("parsing LoCoMo JSON")?;
@@ -130,6 +153,11 @@ pub fn load_locomo(path: &Path, sample: LocomoSample) -> Result<Corpus> {
         // QA -> RecallQuery, dropping items with empty/unmapped evidence.
         if let Some(qa_list) = sample_val.get("qa").and_then(|v| v.as_array()) {
             for qa in qa_list {
+                if let Some(cat) = category {
+                    if qa.get("category").and_then(|v| v.as_i64()) != Some(cat) {
+                        continue;
+                    }
+                }
                 let Some(evidence) = qa.get("evidence").and_then(|v| v.as_array()) else {
                     continue;
                 };
@@ -255,7 +283,7 @@ mod tests {
     #[test]
     fn loads_entries_and_resolves_evidence() {
         let f = write_fixture();
-        let corpus = load_locomo(&f.path, LocomoSample::All).unwrap();
+        let corpus = load_locomo(&f.path, LocomoSample::All, None).unwrap();
 
         // 4 turns total across 2 sessions.
         assert_eq!(corpus.entries.len(), 4);
@@ -287,13 +315,13 @@ mod tests {
     #[test]
     fn one_sample_selects_single_index() {
         let f = write_fixture();
-        let corpus = load_locomo(&f.path, LocomoSample::One(0)).unwrap();
+        let corpus = load_locomo(&f.path, LocomoSample::One(0), None).unwrap();
         assert_eq!(corpus.entries.len(), 4);
     }
 
     #[test]
     fn out_of_range_sample_errors() {
         let f = write_fixture();
-        assert!(load_locomo(&f.path, LocomoSample::One(5)).is_err());
+        assert!(load_locomo(&f.path, LocomoSample::One(5), None).is_err());
     }
 }
