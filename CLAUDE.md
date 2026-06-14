@@ -36,8 +36,11 @@ kortex/                      PRIMARY — the engine (all real work)
     kortex-store/     Stage 2/2B: append-only L0 + unit store, rotation, dedup (unsafe: mmap)
     kortex-sleep/     Stage 4: interruptible/resumable consolidation scheduler + macOS signals
     kortex-ledger/    Derivation Ledger: hash-linked reasoning DAG + deterministic staleness propagation
-    kortex-graph/     Stage 3: deterministic GraphRAG (typed IntroEdge/RecEdge + relation-aware multi-hop walk)
+    kortex-graph/     Stage 3: deterministic GraphRAG (typed IntroEdge/RecEdge walk + 3C context assembler), ledger-backed
+    kortex-ffi/       Stage 6: C-ABI (cdylib/staticlib) over Stage-1 search (unsafe: all in ffi.rs, R1-reviewed)
+    kortex-mcp/       Stage 6: MCP server over stdio — search + assemble_context for agents (safe, hand-rolled JSON-RPC)
     kortex-harness/   `kortex` CLI: generate/eval/demo/compress-bench/scale-bench/store-bench/sleep-sim/ledger-bench/graph-eval
+  bindings/python/    pure-ctypes binding over the C-ABI (no PyO3)
   specs/              per-stage delegation contracts (STAGE_<n>.md from TEMPLATE.md)
 apps/skinki-macos/    PARKED Stage-7 SwiftUI wrapper — do not touch
 ARCHITECTURE.md  ROADMAP.md  AGENTS.md   the vision, the staged plan, the rules
@@ -54,10 +57,10 @@ L3 sleep consolidation → L4 insight engine → L5 agent/query) is in
 | 0 | Eval harness + synthetic corpus (V2) | **Done** |
 | 1 | Memory compression (Matryoshka-256 + two-stage 1-bit RaBitQ → float rerank; IVF) | **Done**; IVF closes the scan-cost gap (1M mild: recall 1.000 @ p95 2.6 ms), gated |
 | 2 / 2B | Storage substrate + durability (pure Rust, mmap, append-only) | **Done** |
-| 3 | Incremental local GraphRAG (two-tier; see `STAGE_3.md`) | **In progress** — deterministic tier done + gated (multi-hop 2.5–3× BM25); LLM tier next |
+| 3 | Incremental local GraphRAG (two-tier; see `STAGE_3.md`) | **Deterministic tier done + gated** (multi-hop 2.5–3× BM25, ledger-wired, 3C assembler); LLM tier measured = not earned |
 | 4 | "Sleep" consolidation scheduler | **Done** (policy proven in sim; real jobs plug in at Stage 3/5) |
 | 5 | Insight Engine (anti-hallucination keystone) | Planned — frontier-only, the "soul" |
-| 6 | Portable `kortex` (C-ABI/FFI + Swift/Python bindings, MCP server) | Spec ready (`STAGE_6.md`) |
+| 6 | Portable `kortex` (C-ABI/FFI + Python binding; MCP server) | **Done** — C-ABI + Python parity gated; `kortex-mcp` ships to agents (Swift → Stage 7) |
 | 7 | Skinki macOS product | Parked |
 
 **IVF (Stage 1 close-out, done):** `kortex-vector/src/ivf.rs` adds an **IVF
@@ -99,8 +102,13 @@ cargo run --release -p kortex-harness -- compress-bench \
 cargo run --release -p kortex-harness -- store-bench --years 5 --assert-gate   # Stage 2
 cargo run --release -p kortex-harness -- sleep-sim --assert-gate               # Stage 4
 cargo run --release -p kortex-harness -- ledger-bench --assert-gate            # Derivation Ledger
-cargo run --release -p kortex-harness -- graph-eval --assert-gate              # Stage 3 GraphRAG
+cargo run --release -p kortex-harness -- graph-eval --assert-gate              # Stage 3 GraphRAG + 3C
+bash scripts/ffi-gate.sh                                                        # Stage 6 C-ABI/Python parity
 ```
+
+The Stage-1 IVF gate (`scale-bench --index ivf ... --assert-gate`) and the
+`ffi` job run in CI too — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)
+for the exact set.
 
 A change is correct **iff** build + test + clippy + fmt + the relevant
 `--assert-gate` all pass. Never weaken a gate to make it pass; if a budget is
@@ -146,7 +154,8 @@ genuinely wrong, raise it with the human first.
 Each `kortex/specs/STAGE_<n>.md` is a contract: hypothesis, fixed trait
 interface, budgets/invariants, test plan, and a ticket table splitting **design
 tickets** (subtle — keep on a frontier model) from **impl tickets** (mechanical
-— safe to delegate). The gate decides correctness, not reviewer taste. Stages 2
-and 4 were built this way (done); **Stage 6** (`STAGE_6.md`) is spec'd and
-delegatable next; Stages 3 and 5 are the "soul" and stay on a frontier model
-with heavy review.
+— safe to delegate). The gate decides correctness, not reviewer taste. Stages 2,
+4, and 6 were built this way (done — Stage 6's `unsafe` FFI boundary frontier-
+reviewed); Stage 3's mechanical tickets were delegated behind a frontier-owned
+spec while its algorithm cores stayed frontier. **Stage 5** (Insight Engine) is
+the remaining "soul" — frontier-only, heavy review, no hand-off.

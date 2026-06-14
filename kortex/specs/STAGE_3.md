@@ -1,8 +1,11 @@
 # Stage 3 — Incremental local GraphRAG (SPEC)
 
-- **Status:** in-progress (deterministic tier done + gated; **T7 ledger, T8
-  telemetry, T6 replay + D2 selection all done**; live-LLM integration deferred —
-  the oracle ceiling shows the tier isn't earned on this corpus)
+- **Status:** **deterministic tier done + gated** — typed-relation multi-hop
+  (T1–T5), ledger wiring (T7), RAM telemetry (T8), replay + selection (T6/D2),
+  **and the 3C context assembler** all landed and gated by `graph-eval
+  --assert-gate`. Live-LLM integration deferred (the oracle ceiling shows the
+  tier isn't earned on this corpus); 3B (communities/RAPTOR/PPR-at-scale)
+  remains out of scope.
 
 > **Measurement log — round 1 (co-mention MVP).** A deterministic entity+venue
 > **co-mention** graph (1-hop + RRF, `crates/kortex-graph::GraphRetriever`)
