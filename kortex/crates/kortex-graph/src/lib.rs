@@ -828,6 +828,91 @@ impl RetrievalSystem for RelationRetriever {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Stage 3C — context assembler
+// ---------------------------------------------------------------------------
+//
+// The L5 surface a small model verbalizes from: not "top-k chunks" but a
+// small, dense, CITED, dated package that fits a fixed token budget. This is
+// generic over `RetrievalSystem` so the same assembler builds both the graph
+// package (the system under test) and a naive top-k "dump" baseline (BM25 at
+// the same budget) for an apples-to-apples context-sufficiency comparison.
+
+/// A single cited, dated fact in an assembled context package.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CitedFact {
+    pub entry: EntryId,
+    pub date: String,
+    pub text: String,
+}
+
+/// A budgeted, cited context package (the L5 surface a small model verbalizes).
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct ContextPackage {
+    pub facts: Vec<CitedFact>,
+    pub est_tokens: usize,
+}
+
+impl ContextPackage {
+    /// Does any cited fact contain `answer` (case-insensitive substring)? The
+    /// context-sufficiency proxy on the synthetic corpus.
+    pub fn contains_answer(&self, answer: &str) -> bool {
+        let needle = answer.to_lowercase();
+        self.facts
+            .iter()
+            .any(|f| f.text.to_lowercase().contains(&needle))
+    }
+}
+
+/// Rough token estimate of a string: ~4 chars/token + a small per-fact overhead.
+pub fn est_tokens(text: &str) -> usize {
+    text.chars().count() / 4 + 2
+}
+
+/// Assemble a budgeted context package for `query` from ANY retrieval system:
+/// take its top entries in rank order, add each as a [`CitedFact`] (date +
+/// text) while the running token estimate stays within `token_budget`; stop
+/// before exceeding it.
+///
+/// Deterministic: `ids` come from `system.search` (already deterministic per
+/// AGENTS rule 2), the entry lookup is a `BTreeMap` built once from the
+/// corpus's entries (ascending `EntryId`), and iteration order over `ids` is
+/// preserved (rank order) — no `HashMap`/unordered iteration anywhere.
+pub fn assemble_context(
+    system: &dyn RetrievalSystem,
+    corpus: &Corpus,
+    query: &str,
+    token_budget: usize,
+) -> ContextPackage {
+    let by_id: BTreeMap<EntryId, &kortex_corpus::Entry> =
+        corpus.entries.iter().map(|e| (e.id, e)).collect();
+
+    let ids = system.search(query, 64);
+
+    let mut facts = Vec::new();
+    let mut running = 0usize;
+    for id in ids {
+        let Some(entry) = by_id.get(&id) else {
+            continue;
+        };
+        let f = est_tokens(&entry.date) + est_tokens(&entry.text);
+        if running + f > token_budget {
+            break;
+        }
+        facts.push(CitedFact {
+            entry: id,
+            date: entry.date.clone(),
+            text: entry.text.clone(),
+        });
+        running += f;
+    }
+
+    ContextPackage {
+        facts,
+        est_tokens: running,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1365,5 +1450,44 @@ mod tests {
             r1.rec[r1.rec.iter().position(|e| e.entry == 1).unwrap()].by,
             r2.rec[r2.rec.iter().position(|e| e.entry == 1).unwrap()].by
         );
+    }
+
+    // --- Stage 3C: context assembler ----------------------------------------
+
+    #[test]
+    fn assembler_includes_answer_bearing_entry_within_budget() {
+        let corpus = two_hop_corpus();
+        let query = "What book did the person Anna introduced me to recommend?";
+
+        let mut graph = GraphRetriever::new();
+        graph.index(&corpus);
+
+        let pkg = assemble_context(&graph, &corpus, query, 512);
+        assert!(
+            pkg.contains_answer("Dune"),
+            "expected the assembled package to contain the answer 'Dune': {pkg:?}"
+        );
+        assert!(pkg.est_tokens <= 512);
+        assert!(!pkg.facts.is_empty());
+    }
+
+    #[test]
+    fn tiny_budget_admits_only_top_fact() {
+        let corpus = two_hop_corpus();
+        let query = "What book did the person Anna introduced me to recommend?";
+
+        let mut graph = GraphRetriever::new();
+        graph.index(&corpus);
+
+        // Budget large enough for exactly one fact (the top entry's est_tokens
+        // is well under this), but too small for two.
+        let top_id = graph.search(query, 1)[0];
+        let top_entry = corpus.entries.iter().find(|e| e.id == top_id).unwrap();
+        let one_fact_tokens = est_tokens(&top_entry.date) + est_tokens(&top_entry.text);
+
+        let pkg = assemble_context(&graph, &corpus, query, one_fact_tokens);
+        assert_eq!(pkg.facts.len(), 1, "expected exactly the top fact: {pkg:?}");
+        assert!(pkg.est_tokens <= one_fact_tokens);
+        assert_eq!(pkg.facts[0].entry, top_id);
     }
 }

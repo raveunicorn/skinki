@@ -28,7 +28,9 @@ use kortex_vector::quant::{RaBitQ, RaBitQBuilder};
 use kortex_vector::search::{ivf_two_stage_search, recall as recall_overlap, two_stage_search};
 use kortex_vector::store::{available_disk_bytes, FloatMmapStore};
 
-use kortex_graph::{ArtifactLog, GraphRetriever, LlmExtraction, RelationRetriever};
+use kortex_graph::{
+    assemble_context, ArtifactLog, GraphRetriever, LlmExtraction, RelationRetriever,
+};
 use kortex_ledger::{score_staleness, ContentHash, Derivation, Ledger, MethodStamp};
 use kortex_sleep::{check_gate, run_sim, SimConfig, SimResult, StubJob};
 use kortex_vector::{dot, VectorSet};
@@ -927,6 +929,37 @@ fn run_graph_eval(corpus: &Corpus, k: usize, assert_gate: bool) -> anyhow::Resul
         graph_5m_mb
     );
 
+    // --- Stage 3C: context-sufficiency at a fixed token budget ---------
+    //
+    // Instead of dumping top-k chunks, assemble a small, dense, cited, dated
+    // package within `TOKEN_BUDGET` and measure whether the planted answer is
+    // derivable from it (proxy: substring match, same as `answer_in_topk`,
+    // but against the *budgeted package* rather than the raw top-k). Compare
+    // the relation-graph assembler against a naive top-k BM25 "dump" at the
+    // SAME budget.
+    const TOKEN_BUDGET: usize = 512;
+    let mut rel_hits = 0usize;
+    let mut bm25_hits = 0usize;
+    let mut rel_tokens_sum = 0usize;
+    for mh in &corpus.ground_truth.multi_hop {
+        let rel_pkg = assemble_context(&relation, corpus, &mh.question, TOKEN_BUDGET);
+        let bm25_pkg = assemble_context(&bm25, corpus, &mh.question, TOKEN_BUDGET);
+        if rel_pkg.contains_answer(&mh.answer) {
+            rel_hits += 1;
+        }
+        if bm25_pkg.contains_answer(&mh.answer) {
+            bm25_hits += 1;
+        }
+        rel_tokens_sum += rel_pkg.est_tokens;
+    }
+    let mh_n = corpus.ground_truth.multi_hop.len().max(1) as f64;
+    let rel_sufficiency = rel_hits as f64 / mh_n;
+    let bm25_sufficiency = bm25_hits as f64 / mh_n;
+    let rel_mean_tokens = rel_tokens_sum as f64 / mh_n;
+    println!(
+        "context ({TOKEN_BUDGET} tok): sufficiency relation={rel_sufficiency:.3} vs bm25-dump={bm25_sufficiency:.3} (mean pkg {rel_mean_tokens:.0} tok)"
+    );
+
     if assert_gate {
         // Stage 3 gate: the relation retriever must clear the multi-hop bars and
         // not regress single-hop recall below BM25 (the deterministic-tier
@@ -942,26 +975,34 @@ fn run_graph_eval(corpus: &Corpus, k: usize, assert_gate: bool) -> anyhow::Resul
         // `mh_lift`, not a pass/fail. The gate guards the deterministic tier and
         // the tier-1 cost.
         const TIER1_SHARE_MAX: f64 = 0.05;
+        // Stage 3C: the relation context package must be at least as sufficient
+        // as a naive BM25 dump at the same budget, clear a 50% floor, and stay
+        // within the token budget on average.
+        const CTX_SUFFICIENCY_MIN: f64 = 0.50;
         let mh_recall = relation_multihop.recall_at_k;
         let mh_ans = relation_multihop.answer_in_topk;
         let sh_ok = relation_recall.recall_at_k >= bm25_recall.recall_at_k;
         let ram_ok = graph_5m_mb <= GRAPH_RAM_5M_MAX_MB;
         let tier1_ok = tier1_share <= TIER1_SHARE_MAX;
+        let ctx_ok = rel_sufficiency >= CTX_SUFFICIENCY_MIN
+            && rel_sufficiency >= bm25_sufficiency
+            && rel_mean_tokens <= TOKEN_BUDGET as f64;
         if mh_recall >= MULTIHOP_RECALL_MIN
             && mh_ans >= MULTIHOP_ANS_MIN
             && sh_ok
             && ram_ok
             && tier1_ok
+            && ctx_ok
         {
             println!(
-                "\nGATE: PASS (relation multi-hop recall@{k}={mh_recall:.3} ans@{k}={mh_ans:.3}; single-hop recall {:.3} >= bm25 {:.3}; graph {graph_5m_mb:.1} MB @5M; tier-1 share {:.4} <= {TIER1_SHARE_MAX}; LLM-tier lift {mh_lift:+.3} — informational, not earned)",
+                "\nGATE: PASS (relation multi-hop recall@{k}={mh_recall:.3} ans@{k}={mh_ans:.3}; single-hop recall {:.3} >= bm25 {:.3}; graph {graph_5m_mb:.1} MB @5M; tier-1 share {:.4} <= {TIER1_SHARE_MAX}; LLM-tier lift {mh_lift:+.3} — informational, not earned; context sufficiency relation={rel_sufficiency:.3} >= bm25-dump={bm25_sufficiency:.3} >= {CTX_SUFFICIENCY_MIN}, mean pkg {rel_mean_tokens:.0} <= {TOKEN_BUDGET} tok)",
                 relation_recall.recall_at_k,
                 bm25_recall.recall_at_k,
                 tier1_share,
             );
         } else {
             anyhow::bail!(
-                "Stage 3 gate FAILED: relation multi-hop recall@{k}={mh_recall:.3} (want >={MULTIHOP_RECALL_MIN}), ans@{k}={mh_ans:.3} (want >={MULTIHOP_ANS_MIN}), single-hop recall {:.3} vs bm25 {:.3} (no regress), graph {graph_5m_mb:.1} MB @5M (want <={GRAPH_RAM_5M_MAX_MB}), tier-1 share {:.4} (want <={TIER1_SHARE_MAX})",
+                "Stage 3 gate FAILED: relation multi-hop recall@{k}={mh_recall:.3} (want >={MULTIHOP_RECALL_MIN}), ans@{k}={mh_ans:.3} (want >={MULTIHOP_ANS_MIN}), single-hop recall {:.3} vs bm25 {:.3} (no regress), graph {graph_5m_mb:.1} MB @5M (want <={GRAPH_RAM_5M_MAX_MB}), tier-1 share {:.4} (want <={TIER1_SHARE_MAX}), context sufficiency relation={rel_sufficiency:.3} (want >={CTX_SUFFICIENCY_MIN} and >= bm25-dump={bm25_sufficiency:.3}), mean pkg {rel_mean_tokens:.0} tok (want <={TOKEN_BUDGET})",
                 relation_recall.recall_at_k,
                 bm25_recall.recall_at_k,
                 tier1_share,
