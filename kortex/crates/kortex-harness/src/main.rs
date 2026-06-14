@@ -35,6 +35,7 @@ use kortex_ledger::{score_staleness, ContentHash, Derivation, Ledger, MethodStam
 use kortex_sleep::{check_gate, run_sim, SimConfig, SimResult, StubJob};
 use kortex_vector::{dot, VectorSet};
 
+mod llm_graph;
 mod locomo;
 use locomo::{load_locomo, LocomoSample};
 
@@ -271,6 +272,11 @@ enum Cmd {
         /// `tools/export-embeddings-gemma.py`. No eval is run.
         #[arg(long)]
         dump_texts: Option<PathBuf>,
+        /// Optional LLM extraction artifact log (JSON-lines from
+        /// `tools/extract-graph-llm.py`): adds an `llm-graph+bm25` column built
+        /// by rebuilding an entity graph from the log (the real-text graph path).
+        #[arg(long)]
+        graph_artifacts: Option<PathBuf>,
     },
 }
 
@@ -735,6 +741,7 @@ fn main() -> Result<()> {
             embeddings_file,
             query_embeddings_file,
             dump_texts,
+            graph_artifacts,
         } => {
             let sample = parse_locomo_sample(&sample)?;
             let corpus = load_locomo(&path, sample)?;
@@ -747,6 +754,7 @@ fn main() -> Result<()> {
                     dim,
                     embeddings_file.as_deref(),
                     query_embeddings_file.as_deref(),
+                    graph_artifacts.as_deref(),
                 )?;
             }
         }
@@ -2532,6 +2540,7 @@ fn run_locomo_eval(
     dim: usize,
     embeddings_file: Option<&std::path::Path>,
     query_embeddings_file: Option<&std::path::Path>,
+    graph_artifacts: Option<&std::path::Path>,
 ) -> Result<()> {
     println!("\n=== Kortex — locomo-eval (LoCoMo10 real-conversation benchmark) ===");
     println!(
@@ -2540,82 +2549,73 @@ fn run_locomo_eval(
         corpus.ground_truth.recall.len()
     );
 
+    // Collect (column name, scores) so the table grows with whatever real-model
+    // artifacts the caller supplies.
+    let mut cols: Vec<(String, RetrievalScores)> = Vec::new();
+
     let mut bm25 = Bm25::new();
     bm25.index(corpus);
-    let bm25_scores = locomo_score(&bm25, corpus, k);
+    cols.push(("bm25".into(), locomo_score(&bm25, corpus, k)));
 
     let mut semantic = SemanticRetriever::new(StaticHashEmbedder::new(dim), "semantic-static");
     semantic.index(corpus);
-    let semantic_scores = locomo_score(&semantic, corpus, k);
+    cols.push(("semantic-static".into(), locomo_score(&semantic, corpus, k)));
 
     let mut graph = GraphRetriever::new();
     graph.index(corpus);
-    let graph_scores = locomo_score(&graph, corpus, k);
+    cols.push(("graph".into(), locomo_score(&graph, corpus, k)));
 
     // `semantic-real` needs BOTH entry and query embeddings from the same model
     // (a precomputed doc space is meaningless if queries are embedded by a
     // different embedder). Require both files; score them directly.
-    let real_scores = match (embeddings_file, query_embeddings_file) {
+    match (embeddings_file, query_embeddings_file) {
         (Some(epath), Some(qpath)) => {
             let entry_vecs = read_embeddings_file(epath, dim, corpus.entries.len())?;
-            let query_vecs =
-                read_embeddings_file(qpath, dim, corpus.ground_truth.recall.len())?;
-            Some(locomo_score_precomputed(&entry_vecs, &query_vecs, corpus, k))
+            let query_vecs = read_embeddings_file(qpath, dim, corpus.ground_truth.recall.len())?;
+            cols.push((
+                "semantic-real".into(),
+                locomo_score_precomputed(&entry_vecs, &query_vecs, corpus, k),
+            ));
         }
         (Some(_), None) => anyhow::bail!(
             "--embeddings-file requires --query-embeddings-file too (docs and queries must share an embedding space); dump both with --dump-texts and embed via tools/export-embeddings-gemma.py"
         ),
         (None, Some(_)) => anyhow::bail!("--query-embeddings-file requires --embeddings-file too"),
-        (None, None) => None,
-    };
-
-    if let Some(real) = &real_scores {
-        println!(
-            "\n{:<16} {:>10} {:>16} {:>10} {:>14}",
-            "metric", "bm25", "semantic-static", "graph", "semantic-real"
-        );
-        println!(
-            "{:<16} {:>10.3} {:>16.3} {:>10.3} {:>14.3}",
-            "recall@k",
-            bm25_scores.recall_at_k,
-            semantic_scores.recall_at_k,
-            graph_scores.recall_at_k,
-            real.recall_at_k
-        );
-        println!(
-            "{:<16} {:>10.3} {:>16.3} {:>10.3} {:>14.3}",
-            "answer@k",
-            bm25_scores.answer_in_topk,
-            semantic_scores.answer_in_topk,
-            graph_scores.answer_in_topk,
-            real.answer_in_topk
-        );
-    } else {
-        println!(
-            "\n{:<16} {:>10} {:>16} {:>10}",
-            "metric", "bm25", "semantic-static", "graph"
-        );
-        println!(
-            "{:<16} {:>10.3} {:>16.3} {:>10.3}",
-            "recall@k",
-            bm25_scores.recall_at_k,
-            semantic_scores.recall_at_k,
-            graph_scores.recall_at_k
-        );
-        println!(
-            "{:<16} {:>10.3} {:>16.3} {:>10.3}",
-            "answer@k",
-            bm25_scores.answer_in_topk,
-            semantic_scores.answer_in_topk,
-            graph_scores.answer_in_topk
-        );
+        (None, None) => {}
     }
 
+    // The real-text graph path: rebuild an entity graph from the LLM extraction
+    // artifact log (fused with BM25 via RRF) and score it.
+    if let Some(path) = graph_artifacts {
+        let mut llm_graph = llm_graph::LlmGraphRetriever::from_artifacts(path, true)?;
+        llm_graph.index(corpus);
+        cols.push(("llm-graph+bm25".into(), locomo_score(&llm_graph, corpus, k)));
+    }
+
+    // Print: one column per system, one row per metric.
+    let w = 16usize;
+    print!("\n{:<10}", "metric");
+    for (name, _) in &cols {
+        print!(" {name:>w$}");
+    }
+    println!();
+    print!("{:<10}", "recall@k");
+    for (_, s) in &cols {
+        print!(" {:>w$.3}", s.recall_at_k);
+    }
+    println!();
+    print!("{:<10}", "answer@k");
+    for (_, s) in &cols {
+        print!(" {:>w$.3}", s.answer_in_topk);
+    }
+    println!();
+
     println!(
-        "\nNote: semantic-static is a lexical (hash-of-tokens) embedder — its lift over \
-         bm25 is expected to be small/noise-level on real dialogue. The real semantic \
-         lift requires precomputed transformer embeddings (--embeddings-file), e.g. an \
-         EmbeddingGemma replay through the same SemanticRetriever seam."
+        "\nNote: semantic-static is a lexical (hash-of-tokens) embedder (≈ bm25 on real \
+         dialogue). The real semantic lift needs precomputed transformer embeddings \
+         (--embeddings-file/--query-embeddings-file, e.g. EmbeddingGemma); the real-text \
+         GRAPH lift needs an LLM extraction log (--graph-artifacts, from \
+         tools/extract-graph-llm.py)."
     );
 
     Ok(())
