@@ -94,3 +94,22 @@ jobs:
         run: >
           cargo run --release --locked -p kortex-harness -- graph-eval
           --assert-gate
+
+  ffi:
+    name: ffi gate (C-ABI / Python parity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: kortex
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      # Stage 6: builds the kortex_ffi cdylib/staticlib, runs the Rust
+      # C-ABI/two_stage_search parity + symbol-existence tests, and (since
+      # python3 is present here) the Python `ctypes` parity check against the
+      # same fixture. Non-zero on any mismatch.
+      - name: Stage 6 FFI gate
+        run: bash scripts/ffi-gate.sh

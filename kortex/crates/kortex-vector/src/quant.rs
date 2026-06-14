@@ -734,6 +734,14 @@ impl RaBitQ {
         self
     }
 
+    /// Original (unrotated) vector dimensionality. Persisted in `rabitq.idx`
+    /// (see [`RaBitQ::save`]/[`RaBitQ::load`]), so a loaded index is
+    /// self-describing — the Stage 6 FFI `kx_open` uses this to open the
+    /// matching `base.f32` rerank store without the caller passing `dim`.
+    pub fn dim(&self) -> usize {
+        self.in_dim
+    }
+
     /// The packed code bytes (without the per-vector ranking factors). Used by
     /// the bench to exercise the mmap store on the bulk of the index.
     pub fn code_bytes(&self) -> &[u8] {

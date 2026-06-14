@@ -147,6 +147,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kortex-ffi"
+version = "0.1.0"
+dependencies = [
+ "kortex-vector",
+ "serde_json",
+]
+
+[[package]]
 name = "kortex-graph"
 version = "0.1.0"
 dependencies = [
