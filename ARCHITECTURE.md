@@ -122,10 +122,10 @@ through Swift bindings at Stage 7. A Python binding drives CI and evaluation.
 
 | Layer | Where it lives today |
 | --- | --- |
-| Eval harness (cross-cutting) | [`skinki/crates/skinki-eval`](skinki/crates/skinki-eval), [`skinki-telemetry`](skinki/crates/skinki-telemetry) |
-| Synthetic corpus + ground truth | [`skinki/crates/skinki-corpus`](skinki/crates/skinki-corpus) |
-| Baseline retriever (L2a proxy) | [`skinki/crates/skinki-baseline`](skinki/crates/skinki-baseline) |
-| CLI / orchestration | [`skinki/crates/skinki-harness`](skinki/crates/skinki-harness) |
+| Eval harness (cross-cutting) | [`crates/skinki-eval`](crates/skinki-eval), [`skinki-telemetry`](crates/skinki-telemetry) |
+| Synthetic corpus + ground truth | [`crates/skinki-corpus`](crates/skinki-corpus) |
+| Baseline retriever (L2a proxy) | [`crates/skinki-baseline`](crates/skinki-baseline) |
+| CLI / orchestration | [`crates/skinki-harness`](crates/skinki-harness) |
 | L1-L5 engine | built stage by stage (see [`ROADMAP.md`](ROADMAP.md)) |
 | Consumer wrapper | [`apps/skinki-macos`](apps/skinki-macos) (parked, Stage 7) |
 
@@ -143,5 +143,5 @@ through Swift bindings at Stage 7. A Python binding drives CI and evaluation.
 ## Related documents
 
 - [`ROADMAP.md`](ROADMAP.md) — staged, hypothesis-driven plan with decision gates.
-- [`skinki/README.md`](skinki/README.md) — the engine and the Stage 0 harness.
+- [`README.md`](README.md) — the engine and the Stage 0 harness.
 - [`apps/skinki-macos/ARCHITECTURE.md`](apps/skinki-macos/ARCHITECTURE.md) — the macOS wrapper (Stage 7).

@@ -12,7 +12,7 @@ stays green*.
 - `apps/skinki-macos/` — a **parked** SwiftUI/Tuist consumer wrapper (Stage 7).
   Do not touch unless a task explicitly targets it.
 - Vision and plan: [`README.md`](README.md), [`ARCHITECTURE.md`](ARCHITECTURE.md),
-  [`ROADMAP.md`](ROADMAP.md). Per-stage contracts: [`skinki/specs/`](skinki/specs/).
+  [`ROADMAP.md`](ROADMAP.md). Per-stage contracts: [`specs/`](specs/).
 
 ## Golden rules (non-negotiable)
 
@@ -79,7 +79,7 @@ runs exactly these and will reject a regression.
 
 ## Workflow for a delegated stage
 
-1. Read `skinki/specs/STAGE_<n>.md` (the contract: hypothesis, interface,
+1. Read `specs/STAGE_<n>.md` (the contract: hypothesis, interface,
    budgets, invariants, test plan, task tickets).
 2. Implement the **impl tickets** behind the defined trait. Leave **design
    tickets** (marked "frontier/human") alone unless assigned.

@@ -151,7 +151,7 @@ genuinely wrong, raise it with the human first.
 
 ## How to delegate / pick up a stage
 
-Each `skinki/specs/STAGE_<n>.md` is a contract: hypothesis, fixed trait
+Each `specs/STAGE_<n>.md` is a contract: hypothesis, fixed trait
 interface, budgets/invariants, test plan, and a ticket table splitting **design
 tickets** (subtle — keep on a frontier model) from **impl tickets** (mechanical
 — safe to delegate). The gate decides correctness, not reviewer taste. Stages 2,

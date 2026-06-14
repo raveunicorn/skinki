@@ -18,7 +18,7 @@ layered design and budgets.
 | 0 | Eval harness + synthetic corpus (the measuring stick) | **Done** |
 | 1 | Memory compression PoC (RaBitQ + Model2Vec, two-stage, mmap) | **Done** (re-validated at scale; IVF closes the scan-cost gap, gated) |
 | 2 | Storage substrate (Lance/Cozo) + append-only L0; maybe a `.kx` codec | **Done** (+ 2B durability) |
-| 3 | Incremental local GraphRAG (deterministic-first, two-tier; venue-anchored multi-hop) | **Deterministic tier done + gated** — multi-hop 2.5–3× BM25, ledger-wired, RAM-budgeted, 3C context assembler; LLM tier measured via oracle = *not earned* (live-LLM deferred) ([`STAGE_3.md`](skinki/specs/STAGE_3.md)) |
+| 3 | Incremental local GraphRAG (deterministic-first, two-tier; venue-anchored multi-hop) | **Deterministic tier done + gated** — multi-hop 2.5–3× BM25, ledger-wired, RAM-budgeted, 3C context assembler; LLM tier measured via oracle = *not earned* (live-LLM deferred) ([`STAGE_3.md`](specs/STAGE_3.md)) |
 | 4 | "Sleep" consolidation engine (idle + on-power background jobs) | **Done** (policy proven in simulation; real jobs land at Stage 3/5) |
 | 5 | Insight Engine (deterministic discovery + FDR + cite-or-silence) | Planned |
 | 6 | Portable `skinki` (C-ABI/FFI + Python binding; MCP server) | **Done** (C-ABI + Python parity gated; `skinki-mcp` ships search + context-assembler to agents; Swift → Stage 7) |
@@ -33,7 +33,7 @@ layered design and budgets.
   contradictions, insight "needles") as an honest proxy for real cognition.
 - **Built:** deterministic synthetic generator + metrics (recall@k, nDCG,
   multi-hop QA, **insight-precision** and **false-insight rate**) + latency/RAM
-  telemetry + a BM25 baseline. See [`skinki/README.md`](skinki/README.md).
+  telemetry + a BM25 baseline. See [`README.md`](README.md).
 - **Gate (met):** the harness reproducibly measures the budgets and both
   dimensions (recall + insight), and cleanly separates recall (BM25 solves it)
   from multi-hop and insight discovery (BM25 fails them) — establishing the
@@ -49,7 +49,7 @@ layered design and budgets.
 
 - **Hypothesis:** 5M units are searchable within the RAM/latency budget via
   **RaBitQ + Model2Vec first-pass**, with recall >= 95% vs full-precision.
-- **Built:** from-scratch codecs in [`skinki/crates/skinki-vector`](skinki/crates/skinki-vector)
+- **Built:** from-scratch codecs in [`crates/skinki-vector`](crates/skinki-vector)
   — int8 scalar, Product Quantization (per-subspace k-means), and RaBitQ (random
   rotation via sign-flip + Walsh-Hadamard, then 1-bit/multi-bit codes with the
   unbiased estimator) — plus a two-stage retriever, an mmap-backed code store,
@@ -100,7 +100,7 @@ layered design and budgets.
   recovery, and a persisted sorted-run dedup index → reopen scans at most one
   segment tail instead of the whole history. New budgets met: durable ingest
   (fsync per event) ~240 events/s (budget ≥ 100); cold reopen 80 ms at ~894k
-  units (budget < 1 s). See [`skinki/specs/STAGE_2B.md`](skinki/specs/STAGE_2B.md).
+  units (budget < 1 s). See [`specs/STAGE_2B.md`](specs/STAGE_2B.md).
 
 ## Stage 3 — Graph & retrieval quality
 
@@ -112,7 +112,7 @@ layered design and budgets.
   construction** (deterministic tier over everything; LLM tier only for a
   selected ≤~5% on backfill), and all LLM outputs go to an append-only artifact
   log (replayable; AGENTS.md rule 3). Arithmetic and ticket implications:
-  [`skinki/specs/STAGE_3_BUDGET.md`](skinki/specs/STAGE_3_BUDGET.md).
+  [`specs/STAGE_3_BUDGET.md`](specs/STAGE_3_BUDGET.md).
 - **Tests:** 4B entity/relation extraction (quality + speed, both tiers);
   incremental updates without rebuild; PPR vs traversal vs PathRAG-pruning;
   hybrid vector+graph; RAPTOR summaries; **salience/reconsolidation** (use
@@ -202,7 +202,7 @@ layered design and budgets.
   baseline's **0.000**. Cross-cuts L0 provenance, Stage 3 graph, and the Stage 5
   keystone. Remaining: durable persistence (on `skinki-store`) and Stage-3
   integration. See
-  [`skinki/specs/DERIVATION_LEDGER.md`](skinki/specs/DERIVATION_LEDGER.md).
+  [`specs/DERIVATION_LEDGER.md`](specs/DERIVATION_LEDGER.md).
 - External validation of the architecture's core pattern: DeepSeek V4's
   CSA/HCA attention (query-dependent selection over compressed entries +
   heavily-compressed global context) is the same "compress + select" shape we
