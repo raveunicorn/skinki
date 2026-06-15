@@ -1,9 +1,8 @@
-<div align="center">
+<img width="2190" height="551" alt="skinki-header" src="https://github.com/user-attachments/assets/8e3eacf8-8ffb-4895-a41e-bbcdfad15d48" />
 
-# skinki
 
-**A portable, local-first memory engine — built to test one idea:
-that intelligence can live in the memory, not the model.**
+# skinki — a portable, local-first memory engine
+## built to test one idea: that intelligence can live in the memory, not the model.
 
 100% on-device · 0 bytes of network · embeddable in any language via a stable C-ABI
 
@@ -28,6 +27,10 @@ The bet, stated so it can be proven false:
 This repo is the honest attempt to test that bet, with a reproducible benchmark
 gate behind every claim. **It is not finished, and it does not all work** — see
 the next section, which is the whole point.
+
+</div>
+
+---
 
 ## Honest status (read this first)
 
@@ -62,7 +65,10 @@ real and useful today; the claim that our *graph* beats baselines is **true on
 synthetic, false on real data so far**. The unique bets — staleness on evolving
 real data, and an insight engine — are **not yet proven**. That's the open work.
 
+
 ## Quickstart
+
+<img width="2190" height="551" alt="skinki-quickstart" src="https://github.com/user-attachments/assets/6c9151b5-21de-46d2-93b6-0505dfce7214" />
 
 ```bash
 git clone https://github.com/raveunicorn/skinki && cd skinki
@@ -109,7 +115,14 @@ Pure-`ctypes` Python binding in [`bindings/python/skinki.py`](bindings/python/sk
 — no PyO3, no build step. Cross-language results are byte-identical to the Rust
 path (gated by `scripts/ffi-gate.sh`).
 
+</div>
+
+---
+
 ## Where this fits
+
+<img width="2190" height="551" alt="skinki-for-devs" src="https://github.com/user-attachments/assets/5f37a561-506b-44ad-8b0c-de270cd0b2f7" />
+
 
 This is about the engine's *shape*, not proven deployments — it's early. But
 "local, embeddable, 0-network, stable C-ABI" is a shape cloud memory APIs can't
@@ -144,6 +157,7 @@ honest case study in building a memory engine from scratch.
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the layered design and
 [`ROADMAP.md`](ROADMAP.md) for the staged, hypothesis-driven plan.
+
 
 ## Open problems (come help)
 
