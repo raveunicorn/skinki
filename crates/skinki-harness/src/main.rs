@@ -273,8 +273,10 @@ enum Cmd {
         #[arg(long)]
         dump_texts: Option<PathBuf>,
         /// Optional LLM extraction artifact log (JSON-lines from
-        /// `tools/extract-graph-llm.py`): adds an `llm-graph+bm25` column built
-        /// by rebuilding an entity graph from the log (the real-text graph path).
+        /// `tools/extract-graph-llm.py`): adds two graph columns built from the
+        /// same log — `llm-graph+bm25` (entity co-mention, the honest negative)
+        /// and `llm-facts+bm25` (typed-fact walk + coref + structural gate, the
+        /// real-text analogue of the synthetic `RelationRetriever` win).
         #[arg(long)]
         graph_artifacts: Option<PathBuf>,
         /// Only score QA of this LoCoMo category (e.g. 2 = multi-hop — the
@@ -2595,6 +2597,19 @@ fn run_locomo_eval(
         let mut llm_graph = llm_graph::LlmGraphRetriever::from_artifacts(path, true)?;
         llm_graph.index(corpus);
         cols.push(("llm-graph+bm25".into(), locomo_score(&llm_graph, corpus, k)));
+
+        // The typed-fact variant: same artifact log, but the walk hops through
+        // typed-fact endpoints (the `facts` field) instead of bare co-mention,
+        // with prefix-merge coref and a structural no-regression gate. This is
+        // the real-text analogue of the synthetic `RelationRetriever` win —
+        // measured here against the co-mention column above (the honest
+        // negative) and BM25.
+        let mut facts_graph = llm_graph::FactsGraphRetriever::from_artifacts(path, true)?;
+        facts_graph.index(corpus);
+        cols.push((
+            "llm-facts+bm25".into(),
+            locomo_score(&facts_graph, corpus, k),
+        ));
     }
 
     // Print: one column per system, one row per metric.
@@ -2620,7 +2635,8 @@ fn run_locomo_eval(
          dialogue). The real semantic lift needs precomputed transformer embeddings \
          (--embeddings-file/--query-embeddings-file, e.g. EmbeddingGemma); the real-text \
          GRAPH lift needs an LLM extraction log (--graph-artifacts, from \
-         tools/extract-graph-llm.py)."
+         tools/extract-graph-llm.py). `llm-graph+bm25` is co-mention (the honest \
+         negative); `llm-facts+bm25` is the typed-fact walk + coref + gate variant."
     );
 
     Ok(())
