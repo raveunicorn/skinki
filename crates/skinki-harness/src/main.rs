@@ -37,7 +37,9 @@ use skinki_vector::{dot, VectorSet};
 
 mod llm_graph;
 mod locomo;
+mod longmemeval;
 use locomo::{load_locomo, LocomoSample};
+use longmemeval::{load_longmemeval, LongMemEvalInstance, QUESTION_TYPES};
 
 #[derive(Parser)]
 #[command(
@@ -281,6 +283,28 @@ enum Cmd {
         /// regime the graph is meant to help). Default: all categories.
         #[arg(long)]
         category: Option<i64>,
+    },
+    /// DEV-ONLY: score BM25 on the LongMemEval real-conversation benchmark
+    /// (ICLR 2025). Each of 500 questions has its own compiled haystack of
+    /// timestamped sessions; we build a fresh corpus per instance and average.
+    /// No gate: this is a measurement instrument. The `multi-session`
+    /// question-type is the multi-hop analogue — the regime where BM25 is
+    /// expected to leave a real gap (unlike LoCoMo, where it didn't).
+    LongmemevalEval {
+        /// Path to longmemeval_s_cleaned.json / _m_cleaned.json / _oracle.json.
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long, default_value_t = 10)]
+        k: usize,
+        /// Filter to one LongMemEval question type. Default: all types.
+        /// One of: single-session-user, single-session-assistant,
+        /// single-session-preference, multi-session, temporal-reasoning,
+        /// knowledge-update.
+        #[arg(long)]
+        question_type: Option<String>,
+        /// Only score the first N instances (testing). Default: all.
+        #[arg(long)]
+        limit: Option<usize>,
     },
 }
 
@@ -762,6 +786,15 @@ fn main() -> Result<()> {
                     graph_artifacts.as_deref(),
                 )?;
             }
+        }
+        Cmd::LongmemevalEval {
+            path,
+            k,
+            question_type,
+            limit,
+        } => {
+            let instances = load_longmemeval(&path, question_type.as_deref(), limit)?;
+            run_longmemeval_eval(&instances, k)?;
         }
     }
     Ok(())
@@ -2621,6 +2654,108 @@ fn run_locomo_eval(
          (--embeddings-file/--query-embeddings-file, e.g. EmbeddingGemma); the real-text \
          GRAPH lift needs an LLM extraction log (--graph-artifacts, from \
          tools/extract-graph-llm.py)."
+    );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// longmemeval-eval — per-instance BM25 measurement on LongMemEval
+// ---------------------------------------------------------------------------
+//
+// The minimum instrument to answer: does BM25 leave a real multi-hop gap on
+// LongMemEval (unlike LoCoMo, where it didn't)? Each instance gets its own
+// fresh corpus (the official benchmark semantics), BM25 is indexed per
+// instance, and per-instance recall@k / answer@k / nDCG@k are averaged. No
+// graph path yet — if BM25 doesn't fail here, there's no gap for the graph to
+// close; if it does, the typed-fact graph (PR #3) gets a real regime to be
+// measured on (a follow-up PR adds the per-instance LLM extraction flow).
+
+fn run_longmemeval_eval(instances: &[LongMemEvalInstance], k: usize) -> Result<()> {
+    println!("\n=== skinki — longmemeval-eval (LongMemEval real-conversation benchmark) ===");
+    println!("instances: {} (k={k})", instances.len());
+
+    // Per-type breakdown: collect scores grouped by question_type so the
+    // multi-session category (the multi-hop analogue) is visible alongside
+    // the rest. Instances are pre-filtered by the caller if `--question-type`
+    // was passed, but we still group here for the all-types case.
+    let mut by_type: std::collections::BTreeMap<String, (usize, f64, f64, f64)> =
+        std::collections::BTreeMap::new();
+
+    let (mut all_recall, mut all_answer, mut all_ndcg, mut n_scored) = (0.0, 0.0, 0.0, 0usize);
+    for inst in instances {
+        let corpus = inst.to_corpus();
+        // Skip instances with no relevant entries (no evidence to retrieve).
+        let q = match corpus.ground_truth.recall.first() {
+            Some(q) if !q.relevant_entries.is_empty() => q,
+            _ => continue,
+        };
+
+        let mut bm25 = Bm25::new();
+        bm25.index(&corpus);
+        let retrieved = bm25.search(&q.question, k);
+
+        let r = recall_at_k(&retrieved, &q.relevant_entries, k);
+        let n = ndcg_at_k(&retrieved, &q.relevant_entries, k);
+        let a = if answer_in_entries(&corpus, &retrieved, &q.answer) {
+            1.0
+        } else {
+            0.0
+        };
+
+        all_recall += r;
+        all_ndcg += n;
+        all_answer += a;
+        n_scored += 1;
+
+        let e = by_type
+            .entry(inst.question_type.clone())
+            .or_insert((0, 0.0, 0.0, 0.0));
+        e.0 += 1;
+        e.1 += r;
+        e.2 += a;
+        e.3 += n;
+    }
+
+    if n_scored == 0 {
+        println!("\nNo scoreable instances (all had empty evidence).");
+        return Ok(());
+    }
+
+    let n = n_scored as f64;
+    println!("\n--- aggregate (all scored instances) ---");
+    println!(
+        "recall@{k}: {:.3}  answer@{k}: {:.3}  ndcg@{k}: {:.3}  (n={n_scored})",
+        all_recall / n,
+        all_answer / n,
+        all_ndcg / n
+    );
+
+    if by_type.len() > 1 {
+        println!("\n--- per question_type ---");
+        println!(
+            "{:<32} {:>8} {:>10} {:>10} {:>10}",
+            "question_type", "n", "recall@k", "answer@k", "ndcg@k"
+        );
+        for (qt, (cnt, r, a, nd)) in &by_type {
+            let c = *cnt as f64;
+            println!(
+                "{:<32} {:>8} {:>10.3} {:>10.3} {:>10.3}",
+                qt,
+                cnt,
+                r / c,
+                a / c,
+                nd / c
+            );
+        }
+    }
+
+    println!(
+        "\nNote: BM25-only measurement. The `multi-session` question_type is the multi-hop \
+         analogue — the regime where, if BM25 leaves a real gap (recall well below the \
+         all-types average), the typed-fact graph (PR #3) gets a real regime to earn its \
+         place on. Available types: {}.",
+        QUESTION_TYPES.join(", ")
     );
 
     Ok(())
