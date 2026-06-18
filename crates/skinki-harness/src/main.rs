@@ -307,6 +307,19 @@ enum Cmd {
         /// Only score the first N instances (testing). Default: all.
         #[arg(long)]
         limit: Option<usize>,
+        /// Dump the per-instance turn texts as JSON arrays to this dir
+        /// (`<dir>/manifest.json` + `<dir>/<instance_id>/entries.json` per
+        /// scoreable instance) and exit — the input to
+        /// `tools/extract-graph-llm-longmemeval.py`. No eval is run.
+        #[arg(long)]
+        dump_texts: Option<PathBuf>,
+        /// Score the graph retrievers (co-mention + typed-facts) per instance,
+        /// reading per-instance artifact logs from this dir (produced by
+        /// `tools/extract-graph-llm-longmemeval.py` into
+        /// `<dir>/<instance_id>/graph.artifacts.jsonl`). Adds `llm-graph+bm25`
+        /// and `llm-facts+bm25` columns alongside BM25.
+        #[arg(long)]
+        graph_artifacts_dir: Option<PathBuf>,
     },
 }
 
@@ -794,9 +807,15 @@ fn main() -> Result<()> {
             k,
             question_type,
             limit,
+            dump_texts,
+            graph_artifacts_dir,
         } => {
             let instances = load_longmemeval(&path, question_type.as_deref(), limit)?;
-            run_longmemeval_eval(&instances, k)?;
+            if let Some(dir) = dump_texts {
+                dump_longmemeval_texts(&instances, &dir)?;
+            } else {
+                run_longmemeval_eval(&instances, k, graph_artifacts_dir.as_deref())?;
+            }
         }
     }
     Ok(())
@@ -2676,61 +2695,217 @@ fn run_locomo_eval(
 }
 
 // ---------------------------------------------------------------------------
-// longmemeval-eval — per-instance BM25 measurement on LongMemEval
+// longmemeval-eval — per-instance measurement on LongMemEval
 // ---------------------------------------------------------------------------
 //
-// The minimum instrument to answer: does BM25 leave a real multi-hop gap on
-// LongMemEval (unlike LoCoMo, where it didn't)? Each instance gets its own
-// fresh corpus (the official benchmark semantics), BM25 is indexed per
-// instance, and per-instance recall@k / answer@k / nDCG@k are averaged. No
-// graph path yet — if BM25 doesn't fail here, there's no gap for the graph to
-// close; if it does, the typed-fact graph (PR #3) gets a real regime to be
-// measured on (a follow-up PR adds the per-instance LLM extraction flow).
+// The instrument to answer two questions:
+//  1. Does BM25 leave a real multi-hop gap on LongMemEval? (The `multi-session`
+//     question_type is the multi-hop analogue.)
+//  2. If yes, does the typed-fact graph (PR #3) close any of it?
+//
+// Each instance gets its own fresh corpus (the official benchmark semantics).
+// BM25 is always scored; if `--graph-artifacts-dir` is passed, the co-mention
+// graph (`LlmGraphRetriever`, the honest negative) and the typed-fact graph
+// (`FactsGraphRetriever`, PR #3) are rebuilt per-instance from that instance's
+// artifact log and scored alongside. Per-instance scores are averaged and
+// broken down by `question_type`.
 
-fn run_longmemeval_eval(instances: &[LongMemEvalInstance], k: usize) -> Result<()> {
-    println!("\n=== skinki — longmemeval-eval (LongMemEval real-conversation benchmark) ===");
-    println!("instances: {} (k={k})", instances.len());
+/// Sanitize a LongMemEval `question_id` into a filesystem-safe directory name.
+/// IDs look like "two_hop_1" or "single_session_user_5"; replace any char not
+/// alphanumeric/underscore/hyphen with `_` so the per-instance dump dirs are
+/// safe across platforms.
+fn safe_instance_id(qid: &str) -> String {
+    qid.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
 
-    // Per-type breakdown: collect scores grouped by question_type so the
-    // multi-session category (the multi-hop analogue) is visible alongside
-    // the rest. Instances are pre-filtered by the caller if `--question-type`
-    // was passed, but we still group here for the all-types case.
-    let mut by_type: std::collections::BTreeMap<String, (usize, f64, f64, f64)> =
-        std::collections::BTreeMap::new();
+/// Dump the per-instance turn texts as JSON arrays for offline LLM extraction.
+/// Writes `<dir>/manifest.json` (array of `{instance_id, safe_id, question_type,
+/// n_entries}`) plus `<dir>/<safe_id>/entries.json` (array of turn-text strings
+/// in entry-id order, matching `to_corpus()`). The extraction script
+/// (`tools/extract-graph-llm-longmemeval.py`) consumes the manifest and writes
+/// `<dir>/<safe_id>/graph.artifacts.jsonl` per instance.
+fn dump_longmemeval_texts(instances: &[LongMemEvalInstance], dir: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
 
-    let (mut all_recall, mut all_answer, mut all_ndcg, mut n_scored) = (0.0, 0.0, 0.0, 0usize);
+    let mut manifest: Vec<serde_json::Value> = Vec::new();
+    let mut dumped = 0usize;
     for inst in instances {
         let corpus = inst.to_corpus();
-        // Skip instances with no relevant entries (no evidence to retrieve).
+        // Skip instances with no evidence — nothing to extract or score.
         let q = match corpus.ground_truth.recall.first() {
             Some(q) if !q.relevant_entries.is_empty() => q,
             _ => continue,
         };
+        let _ = q; // evidence presence is the gate; entries are dumped regardless
 
+        let safe = safe_instance_id(&inst.question_id);
+        let inst_dir = dir.join(&safe);
+        std::fs::create_dir_all(&inst_dir)
+            .with_context(|| format!("creating {}", inst_dir.display()))?;
+
+        let texts: Vec<&str> = corpus.entries.iter().map(|e| e.text.as_str()).collect();
+        let ep = inst_dir.join("entries.json");
+        std::fs::write(&ep, serde_json::to_vec(&texts)?)?;
+
+        manifest.push(serde_json::json!({
+            "instance_id": inst.question_id,
+            "safe_id": safe,
+            "question_type": inst.question_type,
+            "n_entries": corpus.entries.len(),
+        }));
+        dumped += 1;
+    }
+
+    let mp = dir.join("manifest.json");
+    std::fs::write(&mp, serde_json::to_vec_pretty(&manifest)?)?;
+    println!(
+        "dumped {} instances -> {}\nmanifest -> {}\n\nNext: extract per-instance graphs with\n  python3 tools/extract-graph-llm-longmemeval.py --dump-dir {} --out-dir {}\nthen re-run with --graph-artifacts-dir {}",
+        dumped,
+        dir.display(),
+        mp.display(),
+        dir.display(),
+        dir.display(),
+        dir.display()
+    );
+    Ok(())
+}
+
+/// One retriever column's per-type accumulator: (count, recall_sum, answer_sum, ndcg_sum).
+struct TypeAcc {
+    n: usize,
+    recall: f64,
+    answer: f64,
+    ndcg: f64,
+}
+
+impl TypeAcc {
+    fn new() -> Self {
+        TypeAcc {
+            n: 0,
+            recall: 0.0,
+            answer: 0.0,
+            ndcg: 0.0,
+        }
+    }
+    fn add(&mut self, r: f64, a: f64, n: f64) {
+        self.n += 1;
+        self.recall += r;
+        self.answer += a;
+        self.ndcg += n;
+    }
+    fn recall_avg(&self) -> f64 {
+        if self.n == 0 {
+            0.0
+        } else {
+            self.recall / self.n as f64
+        }
+    }
+    fn answer_avg(&self) -> f64 {
+        if self.n == 0 {
+            0.0
+        } else {
+            self.answer / self.n as f64
+        }
+    }
+    fn ndcg_avg(&self) -> f64 {
+        if self.n == 0 {
+            0.0
+        } else {
+            self.ndcg / self.n as f64
+        }
+    }
+}
+
+/// Score `system` on one instance's corpus/question, returning (recall, answer, ndcg).
+fn score_instance(system: &dyn RetrievalSystem, corpus: &Corpus, k: usize) -> (f64, f64, f64) {
+    let q = &corpus.ground_truth.recall[0];
+    let retrieved = system.search(&q.question, k);
+    let r = recall_at_k(&retrieved, &q.relevant_entries, k);
+    let n = ndcg_at_k(&retrieved, &q.relevant_entries, k);
+    let a = if answer_in_entries(corpus, &retrieved, &q.answer) {
+        1.0
+    } else {
+        0.0
+    };
+    (r, a, n)
+}
+
+fn run_longmemeval_eval(
+    instances: &[LongMemEvalInstance],
+    k: usize,
+    graph_artifacts_dir: Option<&std::path::Path>,
+) -> Result<()> {
+    println!("\n=== skinki — longmemeval-eval (LongMemEval real-conversation benchmark) ===");
+    println!("instances: {} (k={k})", instances.len());
+
+    let have_graph = graph_artifacts_dir.is_some();
+
+    // Columns: always BM25; optionally co-mention + typed-facts.
+    let mut bm25_by_type: std::collections::BTreeMap<String, TypeAcc> =
+        std::collections::BTreeMap::new();
+    let mut coment_by_type: std::collections::BTreeMap<String, TypeAcc> =
+        std::collections::BTreeMap::new();
+    let mut facts_by_type: std::collections::BTreeMap<String, TypeAcc> =
+        std::collections::BTreeMap::new();
+
+    let mut n_scored = 0usize;
+    let mut n_graph_scored = 0usize; // instances where the artifact log existed & loaded
+
+    for inst in instances {
+        let corpus = inst.to_corpus();
+        let q = match corpus.ground_truth.recall.first() {
+            Some(q) if !q.relevant_entries.is_empty() => q,
+            _ => continue,
+        };
+        let _ = q;
+
+        // BM25 (always).
         let mut bm25 = Bm25::new();
         bm25.index(&corpus);
-        let retrieved = bm25.search(&q.question, k);
-
-        let r = recall_at_k(&retrieved, &q.relevant_entries, k);
-        let n = ndcg_at_k(&retrieved, &q.relevant_entries, k);
-        let a = if answer_in_entries(&corpus, &retrieved, &q.answer) {
-            1.0
-        } else {
-            0.0
-        };
-
-        all_recall += r;
-        all_ndcg += n;
-        all_answer += a;
+        let (r, a, n) = score_instance(&bm25, &corpus, k);
+        bm25_by_type
+            .entry(inst.question_type.clone())
+            .or_insert_with(TypeAcc::new)
+            .add(r, a, n);
         n_scored += 1;
 
-        let e = by_type
-            .entry(inst.question_type.clone())
-            .or_insert((0, 0.0, 0.0, 0.0));
-        e.0 += 1;
-        e.1 += r;
-        e.2 += a;
-        e.3 += n;
+        // Graph retrievers (optional): load this instance's artifact log.
+        if let Some(dir) = graph_artifacts_dir {
+            let safe = safe_instance_id(&inst.question_id);
+            let log_path = dir.join(&safe).join("graph.artifacts.jsonl");
+            if !log_path.exists() {
+                continue; // not extracted yet — skip graph scoring for this instance
+            }
+
+            // Co-mention (the honest negative — kept for contrast).
+            if let Ok(mut gr) = llm_graph::LlmGraphRetriever::from_artifacts(&log_path, true) {
+                gr.index(&corpus);
+                let (r, a, n) = score_instance(&gr, &corpus, k);
+                coment_by_type
+                    .entry(inst.question_type.clone())
+                    .or_insert_with(TypeAcc::new)
+                    .add(r, a, n);
+            }
+
+            // Typed-facts (PR #3 — the candidate to close the multi-hop gap).
+            if let Ok(mut gr) = llm_graph::FactsGraphRetriever::from_artifacts(&log_path, true) {
+                gr.index(&corpus);
+                let (r, a, n) = score_instance(&gr, &corpus, k);
+                facts_by_type
+                    .entry(inst.question_type.clone())
+                    .or_insert_with(TypeAcc::new)
+                    .add(r, a, n);
+            }
+            n_graph_scored += 1;
+        }
     }
 
     if n_scored == 0 {
@@ -2738,39 +2913,77 @@ fn run_longmemeval_eval(instances: &[LongMemEvalInstance], k: usize) -> Result<(
         return Ok(());
     }
 
-    let n = n_scored as f64;
-    println!("\n--- aggregate (all scored instances) ---");
-    println!(
-        "recall@{k}: {:.3}  answer@{k}: {:.3}  ndcg@{k}: {:.3}  (n={n_scored})",
-        all_recall / n,
-        all_answer / n,
-        all_ndcg / n
-    );
+    // Collect all question_types present across all columns, sorted.
+    let mut all_types: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for k in bm25_by_type.keys() {
+        all_types.insert(k.clone());
+    }
+    for k in coment_by_type.keys() {
+        all_types.insert(k.clone());
+    }
+    for k in facts_by_type.keys() {
+        all_types.insert(k.clone());
+    }
 
-    if by_type.len() > 1 {
-        println!("\n--- per question_type ---");
-        println!(
-            "{:<32} {:>8} {:>10} {:>10} {:>10}",
-            "question_type", "n", "recall@k", "answer@k", "ndcg@k"
-        );
-        for (qt, (cnt, r, a, nd)) in &by_type {
-            let c = *cnt as f64;
-            println!(
-                "{:<32} {:>8} {:>10.3} {:>10.3} {:>10.3}",
-                qt,
-                cnt,
-                r / c,
-                a / c,
-                nd / c
-            );
+    // Print per-type table: one block per metric (recall, answer, ndcg), one
+    // column per retriever. This mirrors the locomo-eval layout.
+    println!("\n--- per question_type (n={n_scored} scored",);
+    if have_graph {
+        println!("   graph n={n_graph_scored} instances with artifact logs) ---");
+    } else {
+        println!("   BM25-only) ---");
+    }
+
+    let w = 14usize;
+    for metric_name in &["recall@k", "answer@k", "ndcg@k"] {
+        println!("\n{:<32}", metric_name);
+        // Header row.
+        print!("{:<32} {:>8}", "question_type", "n");
+        print!(" {:>w$}", "bm25");
+        if have_graph {
+            print!(" {:>w$}", "llm-graph+bm25");
+            print!(" {:>w$}", "llm-facts+bm25");
+        }
+        println!();
+
+        let getter = |acc: &TypeAcc| -> f64 {
+            match *metric_name {
+                "recall@k" => acc.recall_avg(),
+                "answer@k" => acc.answer_avg(),
+                "ndcg@k" => acc.ndcg_avg(),
+                _ => 0.0,
+            }
+        };
+
+        for qt in &all_types {
+            let bm = bm25_by_type.get(qt);
+            let cm = coment_by_type.get(qt);
+            let fa = facts_by_type.get(qt);
+            let cnt = bm.map_or(0, |a| a.n);
+            print!("{:<32} {:>8}", qt, cnt);
+            match bm {
+                Some(a) => print!(" {:>w$.3}", getter(a)),
+                None => print!(" {:>w$}", "-"),
+            }
+            if have_graph {
+                match cm {
+                    Some(a) => print!(" {:>w$.3}", getter(a)),
+                    None => print!(" {:>w$}", "-"),
+                }
+                match fa {
+                    Some(a) => print!(" {:>w$.3}", getter(a)),
+                    None => print!(" {:>w$}", "-"),
+                }
+            }
+            println!();
         }
     }
 
     println!(
-        "\nNote: BM25-only measurement. The `multi-session` question_type is the multi-hop \
-         analogue — the regime where, if BM25 leaves a real gap (recall well below the \
-         all-types average), the typed-fact graph (PR #3) gets a real regime to earn its \
-         place on. Available types: {}.",
+        "\nNote: `multi-session` is the multi-hop analogue. If `llm-facts+bm25` recall on \
+         `multi-session` beats `bm25`, the typed-fact graph (PR #3) closes the gap. If not, \
+         the gap is real but the graph doesn't help — a Law-2 negative either way. Available \
+         types: {}.",
         QUESTION_TYPES.join(", ")
     );
 
@@ -2856,5 +3069,126 @@ mod locomo_eval_tests {
             LocomoSample::One(3)
         ));
         assert!(parse_locomo_sample("bogus").is_err());
+    }
+}
+
+#[cfg(test)]
+mod longmemeval_eval_tests {
+    use super::*;
+    use longmemeval::LongMemEvalInstance;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NONCE: AtomicU64 = AtomicU64::new(0);
+
+    fn tmp_dir(label: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "skinki_longmemeval_eval_{}_{}_{}",
+            label,
+            std::process::id(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn tiny_instance(qid: &str, qtype: &str) -> LongMemEvalInstance {
+        LongMemEvalInstance {
+            question_id: qid.to_string(),
+            question_type: qtype.to_string(),
+            question: "What?".to_string(),
+            answer: "x".to_string(),
+            sessions: vec![vec![(
+                "user".to_string(),
+                "evidence here".to_string(),
+                true,
+            )]],
+            answer_session_idxs: vec![0],
+        }
+    }
+
+    #[test]
+    fn safe_instance_id_preserves_alphanumeric_and_replaces_others() {
+        assert_eq!(safe_instance_id("two_hop_1"), "two_hop_1");
+        assert_eq!(
+            safe_instance_id("single-session-user"),
+            "single-session-user"
+        );
+        assert_eq!(safe_instance_id("a/b\\c:d"), "a_b_c_d");
+        assert_eq!(safe_instance_id(""), "");
+    }
+
+    #[test]
+    fn dump_writes_manifest_and_per_instance_entries() {
+        let dir = tmp_dir("dump");
+        let instances = vec![
+            tiny_instance("two_hop_1", "multi-session"),
+            tiny_instance("single_1", "single-session-user"),
+        ];
+        dump_longmemeval_texts(&instances, &dir).unwrap();
+
+        // manifest.json exists and lists both instances.
+        let manifest: Vec<serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest.len(), 2);
+
+        // Per-instance entries.json exists with turn texts.
+        let ep = dir.join("two_hop_1").join("entries.json");
+        assert!(ep.exists());
+        let texts: Vec<String> =
+            serde_json::from_str(&std::fs::read_to_string(&ep).unwrap()).unwrap();
+        assert_eq!(texts, vec!["user: evidence here"]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dump_skips_instances_with_no_evidence() {
+        let dir = tmp_dir("dump_noev");
+        // An instance whose to_corpus() yields no relevant_entries should be
+        // skipped (no evidence to extract or score).
+        let inst = LongMemEvalInstance {
+            question_id: "noev_1".to_string(),
+            question_type: "multi-session".to_string(),
+            question: "?".to_string(),
+            answer: "x".to_string(),
+            sessions: vec![vec![("user".to_string(), "filler".to_string(), false)]],
+            answer_session_idxs: vec![],
+        };
+        dump_longmemeval_texts(&[inst], &dir).unwrap();
+        let manifest: Vec<serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap())
+                .unwrap();
+        assert!(manifest.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn run_eval_bm25_only_scores_scoreable_instances() {
+        // Two instances: one with evidence, one without. Only the first is
+        // scored. No graph dir -> BM25-only path.
+        let instances = vec![
+            tiny_instance("s1", "single-session-user"),
+            LongMemEvalInstance {
+                question_id: "s2".to_string(),
+                question_type: "multi-session".to_string(),
+                question: "?".to_string(),
+                answer: "x".to_string(),
+                sessions: vec![vec![("user".to_string(), "filler".to_string(), false)]],
+                answer_session_idxs: vec![],
+            },
+        ];
+        // This prints to stdout; we just verify it doesn't error.
+        run_longmemeval_eval(&instances, 5, None).unwrap();
+    }
+
+    #[test]
+    fn run_eval_with_graph_dir_skips_missing_artifacts() {
+        // If --graph-artifacts-dir points at a dir with NO per-instance logs,
+        // the graph columns are absent but BM25 still scores — no crash.
+        let dir = tmp_dir("graph_empty");
+        let instances = vec![tiny_instance("s1", "single-session-user")];
+        run_longmemeval_eval(&instances, 5, Some(&dir)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

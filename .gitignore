@@ -58,3 +58,17 @@ target/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Real benchmark datasets (NOT checked in — license/size). Download manually:
+#   locomo10.json — from snap-research/LoCoMo
+#   longmemeval_s_cleaned.json — from xiaowu0162/longmemeval-cleaned (HF)
+#   longmemeval_m_cleaned.json
+#   longmemeval_oracle.json
+locomo10.json
+longmemeval_*.json
+# Per-instance LLM extraction dumps (dev-only, large, not reproducible artifacts)
+lme_dump/
+*_dump/
+
+# Local scratch / kortex sandbox (not part of the engine)
+kortex/
