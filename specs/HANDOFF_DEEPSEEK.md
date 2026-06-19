@@ -36,16 +36,30 @@ remaining detectors + narration. The frozen interface is in
 `crates/skinki-insight/src/lib.rs` — implement against it, don't change it; copy
 the `StructuralBridgeDetector` shape (propose → `Statistic` → `validate`).
 
-> All tickets below are independent and can proceed now. Do **not** touch
-> `skinki-corpus` generation (it moves golden hashes — frontier+human only).
+> Do **not** touch `skinki-corpus` generation (it moves golden hashes —
+> frontier+human only). **Status after PR #6:** T4/T5/T6 ✅ done. T2/T3 landed
+> but are **recall-only** (false-insight 0.78 / 0.57 vs the < 0.05 keystone bar)
+> — kept *informational*, not gated. The open tickets below fix their precision.
 
 | Ticket | Branch | Files | Do | Gate / DoD |
 | --- | --- | --- | --- | --- |
-| **T2** temporal detector | `feat/insight-temporal-detector` | `skinki-insight/src/lib.rs` (+a `temporal.rs` if you like) | Implement a `Detector` for `InsightKind::TemporalLead`: cross-correlate each entity's mention-day series against candidate trailing events; null = shuffled lags; emit `InsightCandidate`s feeding the existing `validate`. | New unit tests recover planted `TemporalPattern` at `lag_days ± 1` with recall ≥ 0.50; `cargo test`/clippy/fmt clean. ⚠ frontier reviews the statistic. |
-| **T3** contradiction detector | `feat/insight-contradiction-detector` | `skinki-insight/src/lib.rs`, uses `skinki-ledger` | Adapt the `skinki_ledger` staleness output into `DiscoveredInsight`s (`InsightKind::Contradiction`). The ledger already catches planted `Contradiction`s; wire it through the engine + cite-or-silence. | Unit test: ≥ 0.80 of planted `Contradiction`s surfaced, each cited; clean. |
-| **T4** narration replay log | `feat/insight-narration-replay` | `skinki-insight/src/lib.rs` | Add an append-only artifact log + replay for the `Narrator` (rule 3): a live narrator appends `NarrationRecord`s, `rebuild(log)` is byte-identical, a checked-in fixture drives the gate. Implement the `Narrator` trait around it. | Golden: `rebuild(log)` byte-identical twice; gate replays, no inference; clean. |
-| **T5** ledger wiring | `feat/insight-ledger-derivations` | `skinki-insight/src/lib.rs`, `skinki-ledger` | Emit a `skinki_ledger::Derivation` per surfaced insight (inputs = evidence content hashes; method = detector+validation `MethodStamp`). | Unit test: a changed premise flags exactly its insights stale; clean. ⚠ frontier reviews. |
-| **T6** telemetry + sleep job | `feat/insight-telemetry-job` | `skinki-insight/src/lib.rs`, `skinki-sleep` | Add `resident_bytes` + bytes/candidate projection to 5M; wrap `discover` as an interruptible/resumable Stage-4 `Job`. | Report shows RAM projection; job resumes losslessly (mirror `sleep-sim`); clean. |
+| ✅ **T2** temporal detector | merged (PR #6) | — | recall 0.800; precision ✗ — see T2-precision below | — |
+| ✅ **T3** contradiction detector | merged (PR #6) | — | recall 1.000; precision ✗, bypasses `validate`, no ledger — see T3-rework | — |
+| ✅ **T4** narration replay log | merged (PR #6) | — | round-trip + replay-determinism tested | — |
+| ✅ **T5** ledger wiring | merged (PR #6) | — | `record_insight_derivations`, staleness tested | — |
+| ✅ **T6** telemetry + sleep job | merged (PR #6) | — | `resident_bytes` ≈ 0.33 MB @5M; `InsightJob` | — |
+
+### Open follow-ups (precision — required before T2/T3 can be promoted to the gate)
+
+> The keystone is **anti-hallucination**: a detector that hits recall but floods
+> false insights is worse than none. These tickets bring T2/T3 to the hard
+> `false-insight < 0.05` bar so they can be **asserted** in `insight-eval`.
+
+| Ticket | Branch | Files | Do | Gate / DoD |
+| --- | --- | --- | --- | --- |
+| **T2-precision** | `feat/insight-temporal-precision` | `skinki-insight/src/lib.rs` | The cross-correlation surfaces ~7 false leads per 2 real ones (false-insight 0.78). Tighten the null / effect floor / BH-FDR so only genuine lead→trail pairs survive. Do **not** weaken `score_temporal`. | `insight-eval` informational temporal row reaches recall ≥ 0.50 **and** false-insight < 0.05 on both seeds; then promote it into `--assert-gate`. |
+| **T3-rework** | `feat/insight-contradiction-rework` | `skinki-insight/src/lib.rs`, `skinki-ledger` | Current detector keys on sentiment cues and sets `p=0, surprise=1` (bypasses `validate`) — it overfits templates and floods false positives (0.57). Rebuild it to (a) produce a **real statistic** that flows through `validate`, and (b) use the **ledger** staleness signal the ticket intended, not surface cues. | recall ≥ 0.80 **and** false-insight < 0.05 on both seeds; flows through `validate`; then promote into `--assert-gate`. |
+| **PROC** non-bundled PRs | n/a | — | Future work: **one ticket = one branch/PR** (PR #6 bundled T2–T6 + 3B + pipeline into 1328 lines — hard to review/revert). | reviewers can land/revert each ticket independently. |
 
 ## Stage 3B — multi-hop retrieval gap (spec: `STAGE_3B_MULTIHOP.md`)
 

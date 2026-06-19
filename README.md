@@ -55,8 +55,11 @@ Everything here is measured, not asserted. The good and the bad:
   planted insight bridges at **recall 1.000, precision 1.000, 0 apophenia hits,
   0 uncited claims** (two seeds). The engine is wired into the MCP server as a
   `discover_insights` tool. **Temporal lead/lag** and **contradiction** detectors
-  are built and gated behind the same frozen interface (recall 0.800 / 1.000);
-  narration is replayed from a checked-in artifact log. Stage 5 is delegate-ready.
+  are also built behind the same frozen interface and hit their *recall* targets
+  (0.800 / 1.000) — but they currently **fail the hard false-insight budget**
+  (0.78 / 0.57 vs the < 0.05 bar), so they are **experimental, not gated**: only
+  the structural-bridge keystone is asserted in CI. Narration is replayed from a
+  checked-in artifact log.
 - **Coarse-to-fine retrieval** — on LongMemEval `multi-session` (the multi-hop
   regime), instance-level coarse pooling + turn-level fine search lifts
   recall@10 from semantic-real's **0.291 to 0.438 (+46%)** — the first retrieval
@@ -89,11 +92,15 @@ graph but query-focused summarization / iterative retrieval.
 A deterministic discovery + Benjamini–Hochberg FDR + "cite-or-silence" pipeline
 surfaces planted insight bridges at **recall/precision 1.000 with zero apophenia
 hits and zero uncited claims** on the V2 corpus (two seeds). The engine is
-wired into the MCP server as a `discover_insights` tool. Temporal lead/lag
-and contradiction detectors are built behind the same frozen interface (recall
-0.800 / 1.000). The next frontier: validate on **real** data (the synthetic
-win must transfer — Stage 3 just taught us it need not) — and complete the
-narration with a live (replayed) LLM narrator.
+wired into the MCP server as a `discover_insights` tool. Temporal lead/lag and
+contradiction detectors are built behind the same frozen interface and reach
+their recall targets (0.800 / 1.000), but **fail the < 0.05 false-insight bar**
+(0.78 / 0.57) so far — they are experimental, not gated, and the contradiction
+detector still keys on sentiment cues rather than the ledger. Tightening their
+precision is open work. The next frontier: validate on **real** data (the
+synthetic win must transfer — Stage 3 just taught us it need not), tighten T2/T3
+to the keystone bar, and complete the narration with a live (replayed) LLM
+narrator.
 
 **The multi-hop gap is partially closed — by retrieval strategy, not graph.**
 Coarse-to-fine (instance-level embedding + targeted fine search) lifts
