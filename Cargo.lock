@@ -273,6 +273,7 @@ dependencies = [
  "serde_json",
  "skinki-corpus",
  "skinki-eval",
+ "skinki-ledger",
 ]
 
 [[package]]

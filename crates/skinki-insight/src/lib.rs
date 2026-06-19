@@ -29,6 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use skinki_corpus::{Corpus, Entity, EntityId, Entry, EntryId};
 use skinki_eval::DiscoveredInsight;
+use skinki_ledger::{ContentHash, Derivation, Ledger, MethodStamp};
 
 pub type CandidateId = u64;
 
@@ -1073,6 +1074,52 @@ impl InsightEngine {
     }
 }
 
+// ---------------------------------------------------------------------------
+// T5 — ledger wiring
+// ---------------------------------------------------------------------------
+
+/// Record a [`skinki_ledger::Derivation`] for each surfaced insight, pinning
+/// the insight to its evidence. When any evidence entry's text changes, its
+/// content hash changes → [`skinki_ledger::Ledger::stale_closure`] flags the
+/// insight as stale. This is the keystone of the anti-hallucination promise:
+/// you can't accidentally trust a conclusion whose premises moved.
+pub fn record_insight_derivations(
+    insights: &[DiscoveredInsight],
+    corpus: &Corpus,
+    ledger: &mut Ledger,
+    detector_id: u32,
+    detector_version: u64,
+) {
+    for d in insights {
+        let mut input_hashes: Vec<ContentHash> = d
+            .supporting_entries
+            .iter()
+            .filter_map(|&eid| corpus.entries.get(eid as usize))
+            .map(|e| ContentHash::of(e.text.as_bytes()))
+            .collect();
+        input_hashes.sort_by_key(|h| h.0);
+        input_hashes.dedup_by(|a, b| a == b);
+        if input_hashes.is_empty() {
+            continue;
+        }
+
+        let output = ContentHash::of(
+            format!(
+                "insight|{}|{}|{:?}",
+                d.description,
+                d.bridge_entity.map_or(0, |e| e),
+                d.supporting_entries
+            )
+            .as_bytes(),
+        );
+        ledger.record(Derivation::new(
+            output,
+            input_hashes,
+            MethodStamp::new(detector_id, detector_version),
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1266,5 +1313,55 @@ mod tests {
         assert_eq!(n1.text, "replayed text");
         assert_eq!(n1.text, n2.text);
         assert_eq!(n1.citations, n2.citations);
+    }
+
+    #[test]
+    fn ledger_wiring_flags_stale_insight_when_premise_changes() {
+        use skinki_corpus::{generate, Difficulty, GenConfig};
+        use skinki_ledger::{ContentHash, Ledger};
+
+        let corpus = generate(&GenConfig {
+            seed: 42,
+            years: 1,
+            entries_per_day: 2,
+            difficulty: Difficulty::V2,
+        });
+        let input = InsightInput::from_corpus(&corpus);
+        let engine = InsightEngine::structural();
+        let discovered = engine.discover(&input);
+        assert!(
+            !discovered.is_empty(),
+            "need surfaced insights for this test"
+        );
+
+        // Record derivations in a ledger.
+        let mut ledger = Ledger::new();
+        record_insight_derivations(&discovered, &corpus, &mut ledger, 99, 1);
+        assert_eq!(ledger.len(), discovered.len());
+
+        // Pick the first insight and find the hash of one of its evidence entries.
+        let d = &discovered[0];
+        let changed_entry_id = d.supporting_entries[0];
+        let original_text = &corpus.entries[changed_entry_id as usize].text;
+        let original_hash = ContentHash::of(original_text.as_bytes());
+
+        // stale_closure with the ORIGINAL hash as a changed premise must flag
+        // the dependent insight.
+        let stale = ledger.stale_closure(
+            &std::collections::BTreeSet::from([original_hash]),
+            &std::collections::BTreeMap::new(),
+        );
+        assert!(
+            !stale.is_empty(),
+            "changed premise must flag the insight stale"
+        );
+
+        // An unrelated hash (not in any derivation's inputs) must NOT flag anything.
+        let unrelated = ContentHash::of(b"completely unrelated text");
+        let stale2 = ledger.stale_closure(
+            &std::collections::BTreeSet::from([unrelated]),
+            &std::collections::BTreeMap::new(),
+        );
+        assert!(stale2.is_empty(), "unrelated hash must not flag anything");
     }
 }
