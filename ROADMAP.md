@@ -22,7 +22,7 @@ layered design and budgets.
 | 0 | Eval harness + synthetic corpus (the measuring stick) | **Done** |
 | 1 | Memory compression PoC (RaBitQ + Model2Vec, two-stage, mmap) | **Done** (re-validated at scale; IVF closes the scan-cost gap, gated) |
 | 2 | Storage substrate (Lance/Cozo) + append-only L0; maybe a `.kx` codec | **Done** (+ 2B durability) |
-| 3 | Incremental local GraphRAG (deterministic-first, two-tier; venue-anchored multi-hop) | **Done on synthetic, fails on real data (honest)** — 2.5–3× BM25 on the synthetic corpus, ledger-wired + 3C assembler, gated; but on real dialogue (LoCoMo) the graph does **not** beat BM25. The synthetic win didn't transfer ([`STAGE_3.md`](specs/STAGE_3.md)) |
+| 3 | Incremental local GraphRAG (deterministic-first, two-tier; venue-anchored multi-hop) | **Closed — graph is substrate, not a retriever (honest).** 2.5–3× BM25 on synthetic, ledger-wired + 3C assembler, gated; but on **two** real benchmarks (LoCoMo, LongMemEval) the graph does **not** beat BM25, and a semantic embedder (EmbeddingGemma) is SOTA (+51% over BM25 on LongMemEval multi-session). Default retriever → EmbeddingGemma; graph retained for structure (ledger/provenance/staleness) into Stage 5. Multi-hop gap remains open ([`STAGE_3.md`](specs/STAGE_3.md)) |
 | 4 | "Sleep" consolidation engine (idle + on-power background jobs) | **Done** (policy proven in simulation; real jobs land at Stage 3/5) |
 | 5 | Insight Engine (deterministic discovery + FDR + cite-or-silence) | Planned |
 | 6 | Portable `skinki` (C-ABI/FFI + Python binding; MCP server) | **Done** (C-ABI + Python parity gated; `skinki-mcp` ships search + context-assembler to agents; Swift → Stage 7) |
@@ -130,6 +130,22 @@ layered design and budgets.
 - **Gate:** target multi-hop accuracy on synthetic + LongMemEval/LoCoMo; cost
   per MB within the battery budget; context-sufficiency above threshold at the
   token budget.
+- **Result (real text — closed, honest).** The synthetic gate is green; the
+  real-text close-out measured the graph against two real benchmarks and a real
+  embedder. **LoCoMo:** BM25 multi-hop recall@10 = 0.784 — *no gap to close.*
+  **LongMemEval** (pooled, `multi-session`, n=20, 9.7k entries, recall@10):
+  bm25 0.193, co-mention graph 0.168, typed-fact graph 0.168, **EmbeddingGemma
+  0.291** (+51% over BM25). The synthetic 2.5–3× win — driven by templated
+  intro/rec/venue patterns — **did not transfer** to free-form dialogue.
+  **Decisions:** (1) the **default retriever is EmbeddingGemma**, not BM25, on
+  real text; (2) the **graph is retained as a structural substrate** (provenance,
+  derivation ledger, staleness) for Stage 5, **not** as a retrieval ranker;
+  (3) the **multi-hop gap stays open** (EmbeddingGemma still misses ~71% of
+  evidence turns) and is *not* pursued via the LLM-entity-graph — the live
+  candidates are **query-focused summarization** and **iterative/multi-step
+  retrieval** (see [`STAGE_3.md`](specs/STAGE_3.md) round 4 and Stage 5 below).
+  Live-LLM extraction and 3B (communities/RAPTOR/PPR-at-scale) are dropped for
+  retrieval — the close-out removes their justification.
 
 ## Stage 4 — "Sleep" engine (consolidation)
 

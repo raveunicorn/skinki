@@ -1,11 +1,17 @@
 # Stage 3 — Incremental local GraphRAG (SPEC)
 
-- **Status:** **deterministic tier done + gated** — typed-relation multi-hop
-  (T1–T5), ledger wiring (T7), RAM telemetry (T8), replay + selection (T6/D2),
-  **and the 3C context assembler** all landed and gated by `graph-eval
-  --assert-gate`. Live-LLM integration deferred (the oracle ceiling shows the
-  tier isn't earned on this corpus); 3B (communities/RAPTOR/PPR-at-scale)
-  remains out of scope.
+- **Status:** **closed on real text — graph is substrate, not a retriever.** The
+  deterministic tier (T1–T5), ledger wiring (T7), RAM telemetry (T8), replay +
+  selection (T6/D2), and the 3C context assembler all landed and stay gated by
+  `graph-eval --assert-gate`. But the **real-text close-out (round 4 below)**
+  measured the graph against two real dialogue benchmarks (LoCoMo, LongMemEval)
+  and a real embedder: the synthetic 2.5–3× multi-hop win **did not transfer** —
+  on real text the graph does **not** beat BM25, and a semantic embedder
+  (EmbeddingGemma) is the actual SOTA. **Verdict: Stage 3 closes with the graph
+  retained as a structural substrate (ledger / provenance / staleness for Stage
+  5), not as a retrieval ranker; EmbeddingGemma becomes the default retrieval
+  baseline.** Live-LLM extraction and 3B (communities/RAPTOR/PPR-at-scale) remain
+  out of scope — the close-out removes the reason to pursue them for retrieval.
 
 > **Measurement log — round 1 (co-mention MVP).** A deterministic entity+venue
 > **co-mention** graph (1-hop + RRF, `crates/skinki-graph::GraphRetriever`)
@@ -48,6 +54,44 @@
 > memory, not the model." The gate prints the lift as informational and does not
 > require it; the machinery stays for re-measurement on a regime where the oracle
 > ceiling actually pays. Live-LLM integration deferred to Stage 6/7.
+>
+> **Measurement log — round 4 (real text — FINAL, Stage 3 closes).** The
+> synthetic gate stays green, so the open question was only ever *does the win
+> transfer to real dialogue?* Two real benchmarks, a real LLM extractor
+> (Qwen-2.5-3B for the typed-fact graph) and a real embedder (EmbeddingGemma),
+> measured through the `locomo-eval` / `longmemeval-eval` harness:
+>
+> - **LoCoMo** — BM25 multi-hop (cat-2) recall@10 = **0.784**: *the gap the
+>   graph exists to close is already absent.* The graph is irrelevant here.
+> - **LongMemEval** — the gap **is** real (`multi-session` is the multi-hop
+>   analogue), so this is the fair test. Pooled (one shared search space, n=20
+>   instances, 9 697 entries), recall@10:
+>
+> | retriever | recall@10 | answer@10 | ndcg@10 |
+> | --- | --- | --- | --- |
+> | semantic-static (hash) | 0.068 | 0.300 | 0.049 |
+> | bm25 | 0.193 | 0.450 | 0.154 |
+> | llm-graph+bm25 (co-mention) | 0.168 | 0.450 | 0.112 |
+> | llm-facts+bm25 (typed, PR #3) | 0.168 | 0.450 | 0.109 |
+> | **semantic-real (EmbeddingGemma)** | **0.291** | 0.450 | **0.187** |
+>
+> Both graph variants land **−0.025 below BM25**; EmbeddingGemma is **+0.098
+> above** BM25 (+51%). The per-instance view agrees (`multi-session`, n=20:
+> BM25 0.372, co-mention 0.360, typed-facts 0.363 — delta −0.009). **The graph
+> does not close the gap on real text; semantic retrieval does (partly).**
+>
+> **Why the synthetic win didn't transfer:** the 2.5–3× came from templated
+> `intro`/`rec`/`venue` surface patterns the deterministic extractor was built
+> to match. Real dialogue carries the join in free-form, paraphrased, coref-laden
+> language; LLM-extracted typed facts + prefix-coref + a structural no-regression
+> gate still don't out-rank a good dense embedder. **Verdict (Law 2): the graph
+> is not earned as a retriever on real text.** It is retained for what it *is*
+> good at — structure: provenance, the derivation ledger, staleness — i.e. the
+> substrate Stage 5 runs on. **The multi-hop gap remains open**: EmbeddingGemma
+> at recall@10 0.291 still misses ~71% of evidence turns on a 10k-entry corpus.
+> Closing it is a Stage-5-adjacent research question, and the LLM-entity-graph
+> approach is *not* the path — candidates are query-focused summarization and
+> iterative/multi-step retrieval (see Stage 5 spec, §8 and the open-problem note).
 - **Owner of the design (frontier/human):** frontier — the graph schema, the
   retrieval algorithm, the tier-0/tier-1 split, the replay contract, and the
   ledger wiring are decided here. Heavy review on every algorithm-core PR.
@@ -56,7 +100,7 @@
   wiring). **No** for the two design tickets marked frontier (selection policy
   calibration; the retrieval ranking core).
 
-> Read [`../../AGENTS.md`](../../AGENTS.md) and the compute arithmetic in
+> Read [`../AGENTS.md`](../AGENTS.md) and the compute arithmetic in
 > [`STAGE_3_BUDGET.md`](STAGE_3_BUDGET.md) — extraction is **two-tier by
 > construction**; all LLM outputs are **replayable** (rule 3). Determinism is law
 > for everything that selects/structures (rule 2). No new deps without approval.

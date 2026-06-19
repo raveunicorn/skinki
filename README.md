@@ -52,18 +52,26 @@ Everything here is measured, not asserted. The good and the bad:
   parity gated in CI.
 
 **Measured and *failed* on real data (the honest part):**
-- On the real **LoCoMo** conversation benchmark, a good **semantic embedder
-  (EmbeddingGemma)** beats BM25 by ~39% — but that win is the *embedder*, which
-  any RAG can use.
+- On two real conversation benchmarks (**LoCoMo**, **LongMemEval**), a good
+  **semantic embedder (EmbeddingGemma)** is the best retriever — on LongMemEval
+  `multi-session` (the multi-hop regime) it scores recall@10 **0.291 vs BM25
+  0.193 (+51%)**. But that win is the *embedder*, which any RAG can use.
 - Our **graph**, given a real LLM extractor (Qwen-2.5-3B), **does not beat
-  BM25** on real dialogue — worse in every category, including multi-hop. The
-  synthetic graph win did **not** transfer. The hand-crafted structure the
-  synthetic benchmark rewarded doesn't generalize. Recorded, not hidden.
+  BM25** on real dialogue. On LoCoMo there's no multi-hop gap to close (BM25
+  cat-2 recall@10 = 0.784); on LongMemEval where the gap *is* real, both the
+  co-mention and typed-fact graphs land **−0.025 below BM25**. The synthetic
+  2.5–3× graph win — driven by templated intro/rec/venue patterns — did **not**
+  transfer to free-form dialogue. Recorded, not hidden.
 
 So: the substrate (compression, storage, provenance/staleness, portability) is
-real and useful today; the claim that our *graph* beats baselines is **true on
-synthetic, false on real data so far**. The unique bets — staleness on evolving
-real data, and an insight engine — are **not yet proven**. That's the open work.
+real and useful today. **Stage 3 closes honestly:** on real text the graph is a
+*structural substrate* (provenance, ledger, staleness — the inputs to the
+insight engine), **not** a retrieval ranker; the default retriever is the
+semantic embedder. The **multi-hop gap remains open** — even EmbeddingGemma
+misses ~71% of evidence turns — and the next attempt is *not* the LLM-entity
+graph but query-focused summarization / iterative retrieval. The unique bets —
+staleness on evolving real data, and an insight engine (Stage 5) — are **not yet
+proven**. That's the open work.
 
 
 ## Quickstart
