@@ -75,7 +75,25 @@ Instrument already merged (`longmemeval-eval`). **Not** the entity graph.
 | --- | --- | --- | --- | --- |
 | **T0** embedder ablation | `chore/semantic-real-fulldim-ablation` | (measurement, maybe a flag) | Re-run `semantic-real` at full embedding dim on `multi-session`; record whether the 0.291 ceiling is partly compression. | Numbers recorded in the PR; re-baseline if it moves. |
 | **T1** iterative retriever | `feat/iterative-retrieval` | `skinki-harness` (new module) | Extractive, deterministic 2–3-round `IterativeRetriever` over semantic-real (retrieve → pick uncovered facets → re-query). | `longmemeval-eval --pooled --question-type multi-session` recall@10 > 0.291 with no single-session regression; clean. |
-| **T2** session pooling | `feat/session-summary-pooling` | `skinki-harness`, `skinki-sleep` | Coarse-to-fine: per-session summaries (a Stage-4 job) → retrieve sessions → drill to turns. | Measured lift vs T1; summaries don't drop the evidence turn; clean. |
+| ✅ **T2** session pooling (coarse-to-fine) | merged (PR #6) | — | LongMemEval multi-session 0.291 → 0.438 (+46%), measured not gated | add a `--assert-gate` once the dataset is in the runbook |
+
+> 3B status: coarse-to-fine (T2) shipped and is the win; iterative expansion was
+> a negative (0.017). Open: gate the 0.438 number reproducibly (dataset in
+> runbook + `--assert-gate`).
+
+## Stage 5B — validate the Insight Engine on REAL data (spec: `STAGE_5B_REAL_INSIGHT.md`)
+
+The synthetic keystone is gated; this proves whether it transfers. Build the
+instrument first (it will likely show the synthetic detectors don't fire on real
+text — that's the point). **Reuse the Stage-3 LLM extraction artifacts** as the
+real entity source; the **LLM oracle judge is replayed** from a fixture (rule 3).
+
+| Ticket | Branch | Files | Do | Gate / DoD |
+| --- | --- | --- | --- | --- |
+| **T0** real-insight eval skeleton | `feat/insight-eval-real` | `skinki-harness`, `skinki-insight` | `insight-eval --real`: real corpus + replayed Stage-3 extraction → `RealInsightInput`; run current detectors; report what surfaces. | runs end to end; honestly reports the (likely ~zero) transfer of synthetic detectors. |
+| **T1** knowledge-update → contradiction GT | `feat/insight-real-recall` | `skinki-harness`, `skinki-eval` | Remap LongMemEval `knowledge-update` to `Contradiction` ground truth; measure real contradiction recall. | recall measured; unit-tested remap. |
+| **T2** oracle-judge replay seam | `feat/insight-oracle-judge` | `skinki-insight` | `dump_manifest` (insight + cited text) + `JudgmentLog` replay + `score_real_false_insight` + a small fixture. | `rebuild(log)` byte-identical; false-insight from replay; ⚠ frontier reviews the contract. |
+| **T4** wire real-signal detectors | `feat/insight-real-detectors` | `skinki-insight` | Behind T3's frontier design: structural via embedding communities, contradiction via stance/extraction, temporal over extracted day-series. | false-insight < 0.05 (oracle) + recall bars on the instrument; ⚠ frontier owns the cores (T3). |
 
 ## How to verify locally (copy/paste)
 

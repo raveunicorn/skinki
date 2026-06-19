@@ -291,6 +291,12 @@ The infrastructure is done; the rest is gated by the instrument it provides.
 
 ## 8. Out of scope (deferred)
 
+- **Real-data validation of this keystone** — everything here is gated on the
+  **synthetic** V2 corpus, and the detectors are coupled to its structure (topic
+  lexicon, exact templates). Whether the win transfers to real dialogue is the
+  explicit next step, instrumented in
+  [`STAGE_5B_REAL_INSIGHT.md`](STAGE_5B_REAL_INSIGHT.md). Treat the synthetic
+  numbers as "earned on synthetic", not "earned" — Stage 3 is the cautionary tale.
 - **Live on-device LLM narration inference** — replayed here (rule 3); the model
   harness lands with Stage 6/7.
 - **The retrieval multi-hop gap** (Stage 3 round 4) — a *retrieval* problem; see
