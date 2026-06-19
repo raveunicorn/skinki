@@ -993,6 +993,12 @@ fn run_insight_eval(
         let t = skinki_eval::score_temporal(&t_out, &corpus.ground_truth.temporal);
         row("temporal (T2)", &t);
 
+        // Contradiction detector (T3, informational).
+        let contradiction = InsightEngine::contradiction();
+        let c_out = contradiction.discover(&input);
+        let c = skinki_eval::score_contradiction(&c_out, &corpus.ground_truth.contradictions);
+        row("contradiction (T3)", &c);
+
         // Stage-5 keystone budgets (specs/STAGE_5.md §2), asserted on both seeds.
         const MIN_RECALL: f64 = 0.50;
         const MIN_PRECISION: f64 = 0.70;

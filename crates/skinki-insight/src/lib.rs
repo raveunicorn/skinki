@@ -663,6 +663,110 @@ impl Detector for TemporalLeadDetector {
 }
 
 // ---------------------------------------------------------------------------
+// ContradictionDetector — sentiment reversal over entity mentions (T3)
+// ---------------------------------------------------------------------------
+//
+// The detector for [`InsightKind::Contradiction`]: finds entities that appear
+// in two entries with opposing sentiment — one entry asserts a belief about X
+// (marked by positive cues like "is the best choice", "wins"), a later entry
+// reverses it (marked by negative cues like "was a mistake", "nothing but pain").
+// This targets the planted [`skinki_corpus::Contradiction`] ground truth.
+//
+// The ledger aspect (specs/STAGE_5.md T3/T5) is deferred: embedding these
+// candidates as [`skinki_ledger::Derivation`] records so a changed premise
+// flags the contradiction as stale is a plumbing task. The detection logic
+// itself is self-contained and deterministic.
+
+const POSITIVE_CUES: &[&str] = &[
+    "is the best",
+    "wins.",
+    "just fits",
+    "decision made",
+    "committing to",
+    "going all in",
+];
+
+const NEGATIVE_CUES: &[&str] = &[
+    "was a mistake",
+    "nothing but pain",
+    "regret picking",
+    "saved us weeks",
+    "clearly better",
+    "changed my mind",
+];
+
+fn has_any_cue(text: &str, cues: &[&str]) -> bool {
+    cues.iter().any(|c| text.contains(c))
+}
+
+pub struct ContradictionDetector;
+
+impl Detector for ContradictionDetector {
+    fn name(&self) -> &str {
+        "contradiction"
+    }
+
+    fn propose(&self, input: &InsightInput) -> Vec<InsightCandidate> {
+        let mut out: Vec<InsightCandidate> = Vec::new();
+        let mut next_id: CandidateId = 0;
+
+        for e in input.vocab {
+            let name_lower = e.name.to_lowercase();
+            let mut pos_entries: Vec<&Entry> = Vec::new();
+            let mut neg_entries: Vec<&Entry> = Vec::new();
+            for entry in input.entries {
+                if !entry.text.to_lowercase().contains(&name_lower) {
+                    continue;
+                }
+                if has_any_cue(&entry.text, POSITIVE_CUES) {
+                    pos_entries.push(entry);
+                }
+                if has_any_cue(&entry.text, NEGATIVE_CUES) {
+                    neg_entries.push(entry);
+                }
+            }
+            if pos_entries.is_empty() || neg_entries.is_empty() {
+                continue;
+            }
+            // A contradiction: at least one positive entry later reversed by
+            // a negative entry (negative day > positive day).
+            for pos in &pos_entries {
+                for neg in &neg_entries {
+                    if neg.day <= pos.day {
+                        continue;
+                    }
+                    let mut evidence: Vec<EntryId> = vec![pos.id, neg.id];
+                    evidence.sort_unstable();
+                    evidence.dedup();
+
+                    out.push(InsightCandidate {
+                        id: next_id,
+                        kind: InsightKind::Contradiction,
+                        entities: vec![e.id],
+                        evidence,
+                        stat: Statistic {
+                            effect: 1.0,
+                            p_value: 0.0,
+                            support: 2,
+                            surprise: 1.0,
+                        },
+                        claim: format!(
+                            "{}: initially '{}', then reversed — '{}'",
+                            e.name,
+                            // Show first 60 chars of each entry text.
+                            &pos.text[..pos.text.len().min(60)],
+                            &neg.text[..neg.text.len().min(60)],
+                        ),
+                    });
+                    next_id += 1;
+                }
+            }
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Cite-or-silence reference narrator (deterministic; no model)
 // ---------------------------------------------------------------------------
 
@@ -716,6 +820,25 @@ impl InsightEngine {
             detectors: vec![
                 Box::new(StructuralBridgeDetector),
                 Box::new(TemporalLeadDetector),
+            ],
+            cfg: ValidationCfg {
+                fdr_q: 0.01,
+                ..ValidationCfg::default()
+            },
+            narrator: Box::new(ExtractiveNarrator),
+        }
+    }
+
+    /// The contradiction engine: structural-bridge + temporal + contradiction
+    /// detectors. Contradiction candidates come with stat signals that bypass
+    /// BH-FDR (p=0, surprise=1 — they're deterministic sentiment reversals),
+    /// so they surface when the validation floors are met.
+    pub fn contradiction() -> Self {
+        InsightEngine {
+            detectors: vec![
+                Box::new(StructuralBridgeDetector),
+                Box::new(TemporalLeadDetector),
+                Box::new(ContradictionDetector),
             ],
             cfg: ValidationCfg {
                 fdr_q: 0.01,

@@ -10,7 +10,9 @@
 //! queries) lives in the harness so this crate stays dependency-light.
 
 use serde::{Deserialize, Serialize};
-use skinki_corpus::{Corpus, EntityId, EntryId, InsightBridge, NegativeBridge, TemporalPattern};
+use skinki_corpus::{
+    Contradiction, Corpus, EntityId, EntryId, InsightBridge, NegativeBridge, TemporalPattern,
+};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -242,6 +244,61 @@ pub fn score_temporal(
                     && d.supporting_entries
                         .iter()
                         .any(|e| p.trail_entries.contains(e))
+            })
+        })
+        .count();
+
+    let precision = if surfaced == 0 {
+        None
+    } else {
+        Some(true_positives as f64 / surfaced as f64)
+    };
+    let false_insight_rate = if surfaced == 0 {
+        None
+    } else {
+        Some((surfaced - true_positives) as f64 / surfaced as f64)
+    };
+    let recall = if planted.is_empty() {
+        0.0
+    } else {
+        matched_planted as f64 / planted.len() as f64
+    };
+
+    InsightScores {
+        planted: planted.len(),
+        surfaced,
+        matched: matched_planted,
+        precision,
+        recall,
+        false_insight_rate,
+        negative_hits: 0,
+    }
+}
+
+/// Score contradiction insights against [`skinki_corpus::Contradiction`]
+/// ground truth. A discovered insight matches a planted contradiction when
+/// the insight's evidence contains both `entry_before` AND `entry_after`
+/// — proving the detector found the exact reversal pair.
+pub fn score_contradiction(
+    discovered: &[DiscoveredInsight],
+    planted: &[Contradiction],
+) -> InsightScores {
+    let surfaced = discovered.len();
+    let true_positives = discovered
+        .iter()
+        .filter(|d| {
+            planted.iter().any(|p| {
+                d.supporting_entries.contains(&p.entry_before)
+                    && d.supporting_entries.contains(&p.entry_after)
+            })
+        })
+        .count();
+    let matched_planted = planted
+        .iter()
+        .filter(|p| {
+            discovered.iter().any(|d| {
+                d.supporting_entries.contains(&p.entry_before)
+                    && d.supporting_entries.contains(&p.entry_after)
             })
         })
         .count();
