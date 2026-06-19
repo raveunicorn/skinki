@@ -21,7 +21,7 @@ use skinki_eval::{
     answer_in_entries, ndcg_at_k, precision_at_k, recall_at_k, score_insights, Latency, Report,
     RetrievalScores, RetrievalSystem,
 };
-use skinki_store::{derive_units, RawEvent, Source, Store};
+use skinki_store::{derive_units, RawEvent, Source, Store, StoreOptions};
 use skinki_telemetry::{peak_rss_bytes, LatencySummary};
 use skinki_vector::bench::{passes_gate, run_matrix, verdict, BenchReport, Budgets};
 use skinki_vector::embed::{synthetic_clusters, ClusterSampler, Embedder, StaticHashEmbedder};
@@ -78,6 +78,26 @@ enum Cmd {
         k: usize,
         #[arg(long)]
         report_out: Option<PathBuf>,
+    },
+    /// Ingest a text entry into an L0 store.
+    Ingest {
+        /// Path to the store directory (created if absent).
+        #[arg(long)]
+        store: PathBuf,
+        /// The text to ingest.
+        #[arg(long)]
+        text: String,
+        /// Optional date string (e.g. "2024-01-15"). Default: now.
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// List ingested events from a store.
+    List {
+        #[arg(long)]
+        store: PathBuf,
+        /// Show only the last N events.
+        #[arg(long)]
+        tail: Option<usize>,
     },
     /// Generate a corpus in memory and evaluate it immediately.
     Demo {
@@ -515,6 +535,32 @@ fn main() -> Result<()> {
                 println!("\nReport written to {}", path.display());
             }
         }
+        Cmd::Ingest { store, text, date } => {
+            let created = if let Some(d) = date {
+                parse_date(&d)?
+            } else {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64
+            };
+            let mut s = Store::open_with(&store, StoreOptions::default())?;
+            let event = RawEvent {
+                source: Source::Text,
+                created_utc_secs: created,
+                text,
+            };
+            let eid = s.append_event(&event)?;
+            let units = derive_units(eid, &event.text);
+            for u in &units {
+                s.append_unit(u)?;
+            }
+            println!("ingested event {eid} ({created}), {} units", units.len());
+        }
+        Cmd::List { store, tail } => {
+            let s = Store::open(&store)?;
+            list_events(&s, tail)?;
+        }
         Cmd::Demo {
             seed,
             years,
@@ -900,6 +946,41 @@ fn parse_locomo_sample(s: &str) -> Result<LocomoSample> {
             .with_context(|| format!("--sample must be 'all' or an integer, got '{s}'"))?;
         Ok(LocomoSample::One(n))
     }
+}
+
+/// Parse a date string like "2024-01-15" into a Unix timestamp.
+fn parse_date(s: &str) -> Result<i64> {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 3 {
+        anyhow::bail!("date must be YYYY-MM-DD, got '{s}'");
+    }
+    let y: i64 = parts[0].parse()?;
+    let m: i64 = parts[1].parse()?;
+    let d: i64 = parts[2].parse()?;
+    // Approximate: days since 1970-01-01 for the given date.
+    let days = (y - 1970) * 365 + (y - 1969) / 4 + m * 30 + d;
+    Ok(days * 86400)
+}
+
+/// List ingested events from the store.
+fn list_events(s: &Store, tail: Option<usize>) -> Result<()> {
+    // Collect unique event IDs from all units.
+    let mut event_ids: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+    for (_, unit) in s.units() {
+        event_ids.insert(unit.event);
+    }
+    let ids: Vec<u64> = event_ids.into_iter().collect();
+    let start = if let Some(n) = tail {
+        ids.len().saturating_sub(n)
+    } else {
+        0
+    };
+    for &eid in &ids[start..] {
+        if let Ok(text) = s.event_text(eid) {
+            println!("[{eid}] {}", &text[..text.len().min(100)]);
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
