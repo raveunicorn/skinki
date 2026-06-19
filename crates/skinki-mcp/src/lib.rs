@@ -26,6 +26,7 @@ use skinki_corpus::Corpus;
 use skinki_corpus::EntryId;
 use skinki_eval::RetrievalSystem;
 use skinki_graph::{assemble_context, RelationRetriever};
+use skinki_insight::{InsightEngine, InsightInput};
 use skinki_vector::dot;
 use skinki_vector::embed::{Embedder, StaticHashEmbedder};
 
@@ -90,6 +91,7 @@ const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
 pub struct Server {
     corpus: Corpus,
     retriever: Box<dyn RetrievalSystem>,
+    insights: Vec<skinki_eval::DiscoveredInsight>,
 }
 
 pub enum RetrieverKind {
@@ -111,7 +113,14 @@ impl Server {
                 Box::new(r)
             }
         };
-        Server { corpus, retriever }
+        let input = InsightInput::from_corpus(&corpus);
+        let engine = InsightEngine::structural();
+        let insights = engine.discover(&input);
+        Server {
+            corpus,
+            retriever,
+            insights,
+        }
     }
 
     /// Handle one parsed JSON-RPC message.
@@ -177,6 +186,7 @@ impl Server {
         let result = match name {
             "search" => self.tool_search(arguments),
             "assemble_context" => self.tool_assemble_context(arguments),
+            "discover_insights" => self.tool_discover_insights(arguments),
             other => Err(format!("unknown tool: {other}")),
         };
 
@@ -242,9 +252,31 @@ impl Server {
         }
         Ok(out.trim_end().to_string())
     }
+
+    /// `discover_insights`: return the pre-computed structural bridge insights.
+    /// Insights are discovered at startup (deterministic, FDR-validated,
+    /// cite-or-silence enforced).
+    fn tool_discover_insights(&self, _arguments: &Value) -> Result<String, String> {
+        if self.insights.is_empty() {
+            return Ok("No insights discovered in this corpus.".to_string());
+        }
+        let mut out = String::new();
+        for (i, d) in self.insights.iter().enumerate() {
+            out.push_str(&format!("{}. {}\n", i + 1, d.description));
+            out.push_str(&format!(
+                "   evidence: [{}]\n",
+                d.supporting_entries
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        Ok(out.trim_end().to_string())
+    }
 }
 
-/// The `tools/list` tool definitions: `search` and `assemble_context`.
+/// The `tools/list` tool definitions.
 fn tool_defs() -> Value {
     json!([
         {
@@ -269,6 +301,14 @@ fn tool_defs() -> Value {
                     "token_budget": { "type": "integer", "default": 512 }
                 },
                 "required": ["query"]
+            }
+        },
+        {
+            "name": "discover_insights",
+            "description": "Discover statistically-validated, cited structural-bridge insights from the memory (entities that link otherwise-separate topics, apophenia-safe via BH-FDR).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
             }
         }
     ])
