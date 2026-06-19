@@ -274,6 +274,7 @@ dependencies = [
  "skinki-corpus",
  "skinki-eval",
  "skinki-ledger",
+ "skinki-sleep",
 ]
 
 [[package]]

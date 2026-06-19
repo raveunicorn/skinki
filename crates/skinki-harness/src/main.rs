@@ -1043,6 +1043,23 @@ fn run_insight_eval(
         let c = skinki_eval::score_contradiction(&c_out, &corpus.ground_truth.contradictions);
         row("contradiction (T3)", &c);
 
+        // Telemetry (T6): RAM projection to 5M.
+        const HDR: usize = 24;
+        let mut ram = 0usize;
+        for d in &a {
+            ram += d.description.len() + HDR;
+            ram += d.supporting_entries.len() * std::mem::size_of::<EntryId>() + HDR;
+            ram += 1;
+        }
+        let scale = 5_000_000_f64 / (corpus.entries.len().max(1) as f64);
+        let ram_5m = (ram as f64 * scale) as usize;
+        println!(
+            "  insight RAM: {:.2} MB at n={} -> {:.2} MB projected at 5M",
+            ram as f64 / 1e6,
+            corpus.entries.len(),
+            ram_5m as f64 / 1e6,
+        );
+
         // Stage-5 keystone budgets (specs/STAGE_5.md §2), asserted on both seeds.
         const MIN_RECALL: f64 = 0.50;
         const MIN_PRECISION: f64 = 0.70;

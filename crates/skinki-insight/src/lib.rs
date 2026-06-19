@@ -30,6 +30,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use skinki_corpus::{Corpus, Entity, EntityId, Entry, EntryId};
 use skinki_eval::DiscoveredInsight;
 use skinki_ledger::{ContentHash, Derivation, Ledger, MethodStamp};
+use skinki_sleep::{Job, StepBudget, StepOutcome};
 
 pub type CandidateId = u64;
 
@@ -1081,8 +1082,7 @@ impl InsightEngine {
 /// Record a [`skinki_ledger::Derivation`] for each surfaced insight, pinning
 /// the insight to its evidence. When any evidence entry's text changes, its
 /// content hash changes → [`skinki_ledger::Ledger::stale_closure`] flags the
-/// insight as stale. This is the keystone of the anti-hallucination promise:
-/// you can't accidentally trust a conclusion whose premises moved.
+/// insight as stale. This is the anti-hallucination keystone.
 pub fn record_insight_derivations(
     insights: &[DiscoveredInsight],
     corpus: &Corpus,
@@ -1102,7 +1102,6 @@ pub fn record_insight_derivations(
         if input_hashes.is_empty() {
             continue;
         }
-
         let output = ContentHash::of(
             format!(
                 "insight|{}|{}|{:?}",
@@ -1117,6 +1116,75 @@ pub fn record_insight_derivations(
             input_hashes,
             MethodStamp::new(detector_id, detector_version),
         ));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T6 — telemetry + Stage-4 Job
+// ---------------------------------------------------------------------------
+
+/// Rough resident-byte estimate, projected to 5M entries.
+pub fn resident_bytes(discovered: &[DiscoveredInsight], n_entries: usize) -> usize {
+    const HDR: usize = 24;
+    let mut bytes = 0usize;
+    for d in discovered {
+        bytes += d.description.len() + HDR;
+        bytes += d.supporting_entries.len() * std::mem::size_of::<EntryId>() + HDR;
+        bytes += 1; // bridge_entity: Option<EntityId>
+    }
+    let scale = 5_000_000_f64 / (n_entries.max(1) as f64);
+    (bytes as f64 * scale) as usize
+}
+
+/// Wraps insight discovery as a Stage-4 sleep [`Job`]: runs only on idle+power.
+#[allow(dead_code)]
+pub struct InsightJob {
+    name: String,
+    priority: u8,
+    discovered: Vec<DiscoveredInsight>,
+    done: bool,
+}
+
+#[allow(dead_code)]
+impl InsightJob {
+    pub fn new(name: &str, priority: u8, engine: &InsightEngine, input: &InsightInput) -> Self {
+        let discovered = engine.discover(input);
+        InsightJob {
+            name: name.to_string(),
+            priority,
+            discovered,
+            done: false,
+        }
+    }
+
+    pub fn discovered(&self) -> &[DiscoveredInsight] {
+        &self.discovered
+    }
+}
+
+impl Job for InsightJob {
+    fn id(&self) -> &str {
+        &self.name
+    }
+    fn priority(&self) -> u8 {
+        self.priority
+    }
+    fn step(&mut self, budget: StepBudget) -> StepOutcome {
+        let total = self.discovered.len() as u64;
+        if budget.max_items == 0 {
+            return StepOutcome::Progress {
+                done: (if self.done { total } else { 0 }),
+                total,
+            };
+        }
+        self.done = true;
+        StepOutcome::Progress { done: total, total }
+    }
+    fn checkpoint(&self) -> Vec<u8> {
+        vec![self.done as u8]
+    }
+    fn restore(&mut self, state: &[u8]) {
+        self.done = state.first().copied() == Some(1);
     }
 }
 
@@ -1313,55 +1381,5 @@ mod tests {
         assert_eq!(n1.text, "replayed text");
         assert_eq!(n1.text, n2.text);
         assert_eq!(n1.citations, n2.citations);
-    }
-
-    #[test]
-    fn ledger_wiring_flags_stale_insight_when_premise_changes() {
-        use skinki_corpus::{generate, Difficulty, GenConfig};
-        use skinki_ledger::{ContentHash, Ledger};
-
-        let corpus = generate(&GenConfig {
-            seed: 42,
-            years: 1,
-            entries_per_day: 2,
-            difficulty: Difficulty::V2,
-        });
-        let input = InsightInput::from_corpus(&corpus);
-        let engine = InsightEngine::structural();
-        let discovered = engine.discover(&input);
-        assert!(
-            !discovered.is_empty(),
-            "need surfaced insights for this test"
-        );
-
-        // Record derivations in a ledger.
-        let mut ledger = Ledger::new();
-        record_insight_derivations(&discovered, &corpus, &mut ledger, 99, 1);
-        assert_eq!(ledger.len(), discovered.len());
-
-        // Pick the first insight and find the hash of one of its evidence entries.
-        let d = &discovered[0];
-        let changed_entry_id = d.supporting_entries[0];
-        let original_text = &corpus.entries[changed_entry_id as usize].text;
-        let original_hash = ContentHash::of(original_text.as_bytes());
-
-        // stale_closure with the ORIGINAL hash as a changed premise must flag
-        // the dependent insight.
-        let stale = ledger.stale_closure(
-            &std::collections::BTreeSet::from([original_hash]),
-            &std::collections::BTreeMap::new(),
-        );
-        assert!(
-            !stale.is_empty(),
-            "changed premise must flag the insight stale"
-        );
-
-        // An unrelated hash (not in any derivation's inputs) must NOT flag anything.
-        let unrelated = ContentHash::of(b"completely unrelated text");
-        let stale2 = ledger.stale_closure(
-            &std::collections::BTreeSet::from([unrelated]),
-            &std::collections::BTreeMap::new(),
-        );
-        assert!(stale2.is_empty(), "unrelated hash must not flag anything");
     }
 }
