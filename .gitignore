@@ -68,6 +68,7 @@ locomo10.json
 longmemeval_*.json
 # Per-instance LLM extraction dumps (dev-only, large, not reproducible artifacts)
 lme_dump/
+lme_pooled/
 *_dump/
 
 # Local scratch / kortex sandbox (not part of the engine)
