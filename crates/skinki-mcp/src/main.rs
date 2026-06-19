@@ -11,40 +11,124 @@
 use std::io::{self, BufRead, Write};
 
 use anyhow::{Context, Result};
-use skinki_corpus::Corpus;
-use skinki_mcp::{parse_line, Server};
+use skinki_corpus::{Corpus, CorpusMeta, Difficulty, Entry, EntryId, EntryKind};
+use skinki_mcp::{parse_line, RetrieverKind, Server};
+use skinki_store::Store;
 
 fn main() -> Result<()> {
-    let corpus_path = parse_args()?;
+    let args = parse_args()?;
 
-    eprintln!("skinki-mcp: loading corpus from {}", corpus_path);
-    let data = std::fs::read_to_string(&corpus_path)
-        .with_context(|| format!("reading corpus file {corpus_path}"))?;
-    let corpus: Corpus = serde_json::from_str(&data)
-        .with_context(|| format!("parsing corpus file {corpus_path}"))?;
+    let corpus = if let Some(store_path) = args.store {
+        eprintln!("skinki-mcp: opening store at {}", store_path.display());
+        let s = Store::open(&store_path)?;
+        corpus_from_store(&s)?
+    } else {
+        let corpus_path = args
+            .corpus
+            .as_deref()
+            .context("--corpus or --store required")?;
+        eprintln!("skinki-mcp: loading corpus from {}", corpus_path.display());
+        let data = std::fs::read_to_string(corpus_path)
+            .with_context(|| format!("reading corpus file {}", corpus_path.display()))?;
+        serde_json::from_str(&data)
+            .with_context(|| format!("parsing corpus file {}", corpus_path.display()))?
+    };
 
     eprintln!(
         "skinki-mcp: indexed {} entries; ready on stdio",
         corpus.entries.len()
     );
-    let server = Server::new(corpus);
-
+    let server = Server::new(corpus, args.retriever);
     run(&server, io::stdin().lock(), io::stdout().lock())
 }
 
-/// Parse `--corpus <path>` from argv. Hand-rolled (no extra dep): the only
-/// flag this v0 server needs.
-fn parse_args() -> Result<String> {
+/// Build a Corpus from all events in a store.
+fn corpus_from_store(s: &Store) -> Result<Corpus> {
+    let mut entries: Vec<Entry> = Vec::new();
+    for (uid, unit) in s.units() {
+        let text = s.unit_text(uid).unwrap_or_default().to_string();
+        let ev_ts = s.event_text(unit.event).map(|_| 0i64).unwrap_or(0);
+        // approximation: use unit id as day offset
+        entries.push(Entry {
+            id: entries.len() as EntryId,
+            day: (uid / 7 % 365) as u32, // week-bucket day
+            date: chrono_fmt(ev_ts),
+            kind: EntryKind::Text,
+            text,
+        });
+    }
+    let num_entries = entries.len();
+    Ok(Corpus {
+        meta: CorpusMeta {
+            seed: 0,
+            years: 0,
+            num_entries,
+            difficulty: Difficulty::V2,
+        },
+        entries,
+        ground_truth: Default::default(),
+    })
+}
+
+fn chrono_fmt(ts: i64) -> String {
+    let days = ts / 86400;
+    let y = 1970 + days / 365;
+    let rem = days % 365;
+    let m = rem / 30 + 1;
+    let d = rem % 30 + 1;
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+struct CliArgs {
+    corpus: Option<std::path::PathBuf>,
+    store: Option<std::path::PathBuf>,
+    retriever: RetrieverKind,
+}
+
+/// Parse `--corpus <path>` or `--store <dir>` from argv.
+fn parse_args() -> Result<CliArgs> {
     let mut args = std::env::args().skip(1);
+    let mut corpus = None;
+    let mut store = None;
+    let mut retriever = RetrieverKind::Graph;
     while let Some(arg) = args.next() {
         if arg == "--corpus" {
-            return args.next().context("--corpus requires a path argument");
-        }
-        if let Some(path) = arg.strip_prefix("--corpus=") {
-            return Ok(path.to_string());
+            corpus = Some(std::path::PathBuf::from(
+                args.next().context("--corpus requires a path")?,
+            ));
+        } else if let Some(path) = arg.strip_prefix("--corpus=") {
+            corpus = Some(std::path::PathBuf::from(path));
+        } else if arg == "--store" {
+            store = Some(std::path::PathBuf::from(
+                args.next().context("--store requires a path")?,
+            ));
+        } else if let Some(path) = arg.strip_prefix("--store=") {
+            store = Some(std::path::PathBuf::from(path));
+        } else if arg == "--retriever" {
+            let val = args
+                .next()
+                .context("--retriever requires {graph, semantic}")?;
+            retriever = match val.as_str() {
+                "graph" => RetrieverKind::Graph,
+                "semantic" => RetrieverKind::Semantic,
+                _ => anyhow::bail!("--retriever must be 'graph' or 'semantic', got '{val}'"),
+            };
+        } else if let Some(val) = arg.strip_prefix("--retriever=") {
+            retriever = match val {
+                "graph" => RetrieverKind::Graph,
+                "semantic" => RetrieverKind::Semantic,
+                _ => anyhow::bail!("--retriever must be 'graph' or 'semantic', got '{val}'"),
+            };
         }
     }
-    anyhow::bail!("usage: skinki-mcp --corpus <path.json>")
+    if corpus.is_none() && store.is_none() {
+        anyhow::bail!("usage: skinki-mcp --corpus <path.json> OR --store <dir> [--retriever {{graph,semantic}}]");
+    }
+    Ok(CliArgs {
+        corpus,
+        store,
+        retriever,
+    })
 }
 
 /// The main stdio loop: read one line at a time, parse, dispatch, and write

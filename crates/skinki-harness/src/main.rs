@@ -21,7 +21,7 @@ use skinki_eval::{
     answer_in_entries, ndcg_at_k, precision_at_k, recall_at_k, score_insights, Latency, Report,
     RetrievalScores, RetrievalSystem,
 };
-use skinki_store::{derive_units, RawEvent, Source, Store};
+use skinki_store::{derive_units, RawEvent, Source, Store, StoreOptions};
 use skinki_telemetry::{peak_rss_bytes, LatencySummary};
 use skinki_vector::bench::{passes_gate, run_matrix, verdict, BenchReport, Budgets};
 use skinki_vector::embed::{synthetic_clusters, ClusterSampler, Embedder, StaticHashEmbedder};
@@ -78,6 +78,26 @@ enum Cmd {
         k: usize,
         #[arg(long)]
         report_out: Option<PathBuf>,
+    },
+    /// Ingest a text entry into an L0 store.
+    Ingest {
+        /// Path to the store directory (created if absent).
+        #[arg(long)]
+        store: PathBuf,
+        /// The text to ingest.
+        #[arg(long)]
+        text: String,
+        /// Optional date string (e.g. "2024-01-15"). Default: now.
+        #[arg(long)]
+        date: Option<String>,
+    },
+    /// List ingested events from a store.
+    List {
+        #[arg(long)]
+        store: PathBuf,
+        /// Show only the last N events.
+        #[arg(long)]
+        tail: Option<usize>,
     },
     /// Generate a corpus in memory and evaluate it immediately.
     Demo {
@@ -265,6 +285,12 @@ enum Cmd {
         seed_holdout: u64,
         #[arg(long, default_value_t = false)]
         assert_gate: bool,
+        /// DEV-ONLY: produce the LLM narration fixture log from a structural-
+        /// bridge run on seed 42 and write it to this directory
+        /// (fixtures/insight_narration.artifacts.jsonl). Checked in and
+        /// replayed by the gate. Exits without scoring.
+        #[arg(long)]
+        produce_fixtures: Option<PathBuf>,
     },
     /// DEV-ONLY: score retrievers on the LoCoMo10 real-conversation benchmark
     /// (real multi-session dialogue + memory QA — not the synthetic corpus).
@@ -508,6 +534,32 @@ fn main() -> Result<()> {
                 serde_json::to_writer_pretty(file, &report).context("writing report")?;
                 println!("\nReport written to {}", path.display());
             }
+        }
+        Cmd::Ingest { store, text, date } => {
+            let created = if let Some(d) = date {
+                parse_date(&d)?
+            } else {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64
+            };
+            let mut s = Store::open_with(&store, StoreOptions::default())?;
+            let event = RawEvent {
+                source: Source::Text,
+                created_utc_secs: created,
+                text,
+            };
+            let eid = s.append_event(&event)?;
+            let units = derive_units(eid, &event.text);
+            for u in &units {
+                s.append_unit(u)?;
+            }
+            println!("ingested event {eid} ({created}), {} units", units.len());
+        }
+        Cmd::List { store, tail } => {
+            let s = Store::open(&store)?;
+            list_events(&s, tail)?;
         }
         Cmd::Demo {
             seed,
@@ -816,8 +868,13 @@ fn main() -> Result<()> {
             entries_per_day,
             seed_holdout,
             assert_gate,
+            produce_fixtures,
         } => {
-            run_insight_eval(seed, seed_holdout, years, entries_per_day, assert_gate)?;
+            if let Some(dir) = produce_fixtures {
+                produce_narration_fixtures(seed, years, entries_per_day, &dir)?;
+            } else {
+                run_insight_eval(seed, seed_holdout, years, entries_per_day, assert_gate)?;
+            }
         }
         Cmd::LocomoEval {
             path,
@@ -891,6 +948,41 @@ fn parse_locomo_sample(s: &str) -> Result<LocomoSample> {
     }
 }
 
+/// Parse a date string like "2024-01-15" into a Unix timestamp.
+fn parse_date(s: &str) -> Result<i64> {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 3 {
+        anyhow::bail!("date must be YYYY-MM-DD, got '{s}'");
+    }
+    let y: i64 = parts[0].parse()?;
+    let m: i64 = parts[1].parse()?;
+    let d: i64 = parts[2].parse()?;
+    // Approximate: days since 1970-01-01 for the given date.
+    let days = (y - 1970) * 365 + (y - 1969) / 4 + m * 30 + d;
+    Ok(days * 86400)
+}
+
+/// List ingested events from the store.
+fn list_events(s: &Store, tail: Option<usize>) -> Result<()> {
+    // Collect unique event IDs from all units.
+    let mut event_ids: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+    for (_, unit) in s.units() {
+        event_ids.insert(unit.event);
+    }
+    let ids: Vec<u64> = event_ids.into_iter().collect();
+    let start = if let Some(n) = tail {
+        ids.len().saturating_sub(n)
+    } else {
+        0
+    };
+    for &eid in &ids[start..] {
+        if let Ok(text) = s.event_text(eid) {
+            println!("[{eid}] {}", &text[..text.len().min(100)]);
+        }
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Stage 3 MVP — graph-eval: deterministic co-mention graph vs BM25
 // ---------------------------------------------------------------------------
@@ -915,6 +1007,39 @@ fn person_names_in(text: &str, corpus: &Corpus) -> std::collections::BTreeSet<St
 // ---------------------------------------------------------------------------
 // Stage 5 — insight-eval: the Insight Engine infrastructure gate
 // ---------------------------------------------------------------------------
+
+/// DEV-ONLY: generate the narration artifact-log fixture. Runs the structural
+/// engine in produce mode on seed 42, writes the log, and exits. The output
+/// log is checked into git and replayed by the gate (never inferred in CI).
+fn produce_narration_fixtures(
+    seed: u64,
+    years: u32,
+    entries_per_day: u32,
+    dir: &std::path::Path,
+) -> Result<()> {
+    use skinki_insight::{InsightEngine, InsightInput};
+    std::fs::create_dir_all(dir)?;
+
+    let corpus = generate(&GenConfig {
+        seed,
+        years,
+        entries_per_day,
+        difficulty: Difficulty::V2,
+    });
+    let input = InsightInput::from_corpus(&corpus);
+
+    let log_path = dir.join("insight_narration.artifacts.jsonl");
+    let _ = std::fs::remove_file(&log_path);
+
+    let engine = InsightEngine::structural_produce(&log_path);
+    let discovered = engine.discover(&input);
+    println!(
+        "wrote {} narration records -> {}",
+        discovered.len(),
+        log_path.display()
+    );
+    Ok(())
+}
 
 /// Score the statistically-validated reference engine against the naive
 /// co-mention baseline on the planted insight / apophenia ground truth, on two
@@ -986,6 +1111,35 @@ fn run_insight_eval(
         };
         row("reference (validated)", &r);
         row("naive (contrast)", &n);
+
+        // Temporal-lead detector (T2, informational — not yet in the asserted gate).
+        let temporal = InsightEngine::temporal();
+        let t_out = temporal.discover(&input);
+        let t = skinki_eval::score_temporal(&t_out, &corpus.ground_truth.temporal);
+        row("temporal (T2)", &t);
+
+        // Contradiction detector (T3, informational).
+        let contradiction = InsightEngine::contradiction();
+        let c_out = contradiction.discover(&input);
+        let c = skinki_eval::score_contradiction(&c_out, &corpus.ground_truth.contradictions);
+        row("contradiction (T3)", &c);
+
+        // Telemetry (T6): RAM projection to 5M.
+        const HDR: usize = 24;
+        let mut ram = 0usize;
+        for d in &a {
+            ram += d.description.len() + HDR;
+            ram += d.supporting_entries.len() * std::mem::size_of::<EntryId>() + HDR;
+            ram += 1;
+        }
+        let scale = 5_000_000_f64 / (corpus.entries.len().max(1) as f64);
+        let ram_5m = (ram as f64 * scale) as usize;
+        println!(
+            "  insight RAM: {:.2} MB at n={} -> {:.2} MB projected at 5M",
+            ram as f64 / 1e6,
+            corpus.entries.len(),
+            ram_5m as f64 / 1e6,
+        );
 
         // Stage-5 keystone budgets (specs/STAGE_5.md §2), asserted on both seeds.
         const MIN_RECALL: f64 = 0.50;
@@ -2895,6 +3049,7 @@ type QueryInstanceMap = Vec<(String, usize, usize)>;
 
 /// Returns (corpus, query_to_instance) where query_to_instance[qi] maps each
 /// query to its instance metadata for per-instance graph artifact loading.
+// ---------------------------------------------------------------------------
 fn build_pooled_corpus(instances: &[LongMemEvalInstance]) -> Option<(Corpus, QueryInstanceMap)> {
     let mut entries: Vec<Entry> = Vec::new();
     let mut queries: Vec<RecallQuery> = Vec::new();
@@ -3013,6 +3168,88 @@ fn run_longmemeval_pooled_eval(
             cols.push((
                 "semantic-real".into(),
                 locomo_score_precomputed(&entry_vecs, &query_vecs, &corpus, k),
+            ));
+
+            // Stage 3B T2: coarse-to-fine retrieval.
+            // Group turns by instance, build one coarse embedding per instance
+            // (average of turn embeddings), then fine-search within top-k instances.
+            // Build instance-level coarse embeddings.
+            let n_instances = query_to_instance.len();
+            let mut coarse_vecs: Vec<Vec<f32>> = Vec::with_capacity(n_instances);
+            let mut inst_turn_ranges: Vec<(usize, usize)> = Vec::with_capacity(n_instances);
+            for (_safe, start, count) in query_to_instance.iter() {
+                let start = *start;
+                let end = start + count;
+                let dim = entry_vecs[0].len();
+                let mut avg = vec![0.0f32; dim];
+                let mut n = 0usize;
+                for i in start..end {
+                    if i < entry_vecs.len() {
+                        for (j, &v) in entry_vecs[i].iter().enumerate() {
+                            avg[j] += v;
+                        }
+                        n += 1;
+                    }
+                }
+                if n > 0 {
+                    for v in &mut avg {
+                        *v /= n as f32;
+                    }
+                }
+                coarse_vecs.push(avg);
+                inst_turn_ranges.push((start, end));
+            }
+
+            // Coarse-to-fine scoring.
+            let coarse_k = 3usize; // top-5 instances for fine search
+            let mut c2f_recall = 0.0f64;
+            let mut c2f_answer = 0.0f64;
+            let mut c2f_ndcg = 0.0f64;
+            for (qi, q) in corpus.ground_truth.recall.iter().enumerate() {
+                let qv = &query_vecs[qi];
+                // Coarse: score each instance.
+                let mut inst_scores: Vec<(f32, usize)> = coarse_vecs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, cv)| (dot(qv, cv), i))
+                    .collect();
+                inst_scores
+                    .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                inst_scores.truncate(coarse_k);
+                // Fine: score turns only within the top coarse instances.
+                let mut fine: Vec<(f32, EntryId)> = Vec::new();
+                for (_score, inst_idx) in &inst_scores {
+                    let (start, end) = inst_turn_ranges[*inst_idx];
+                    #[allow(clippy::needless_range_loop)]
+                    for i in start..end.min(entry_vecs.len()) {
+                        fine.push((dot(qv, &entry_vecs[i]), i as EntryId));
+                    }
+                }
+                fine.sort_by(|a, b| {
+                    b.0.partial_cmp(&a.0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(a.1.cmp(&b.1))
+                });
+                let retrieved: Vec<EntryId> = fine.into_iter().take(k).map(|(_, id)| id).collect();
+                c2f_recall += recall_at_k(&retrieved, &q.relevant_entries, k);
+                c2f_answer += if answer_in_entries(&corpus, &retrieved, &q.answer) {
+                    1.0
+                } else {
+                    0.0
+                };
+                c2f_ndcg += ndcg_at_k(&retrieved, &q.relevant_entries, k);
+            }
+            let nq = corpus.ground_truth.recall.len().max(1) as f64;
+            cols.push((
+                "coarse2fine(3)".into(),
+                RetrievalScores {
+                    queries: corpus.ground_truth.recall.len(),
+                    k,
+                    recall_at_k: c2f_recall / nq,
+                    precision_at_k: 0.0,
+                    ndcg_at_k: c2f_ndcg / nq,
+                    answer_in_topk: c2f_answer / nq,
+                },
             ));
         }
         (Some(_), None) => anyhow::bail!("--embeddings-file requires --query-embeddings-file too"),

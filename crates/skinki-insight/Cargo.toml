@@ -10,3 +10,7 @@ serde.workspace = true
 serde_json.workspace = true
 skinki-corpus.workspace = true
 skinki-eval.workspace = true
+# Stage 5 T5 — ledger-wire surfaced insights for staleness propagation.
+skinki-ledger.workspace = true
+# Stage 5 T6 — wrap discovery as a Stage-4 sleep Job (idle+power only).
+skinki-sleep.workspace = true

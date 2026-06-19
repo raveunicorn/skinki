@@ -273,6 +273,8 @@ dependencies = [
  "serde_json",
  "skinki-corpus",
  "skinki-eval",
+ "skinki-ledger",
+ "skinki-sleep",
 ]
 
 [[package]]
@@ -293,6 +295,9 @@ dependencies = [
  "skinki-corpus",
  "skinki-eval",
  "skinki-graph",
+ "skinki-insight",
+ "skinki-store",
+ "skinki-vector",
 ]
 
 [[package]]

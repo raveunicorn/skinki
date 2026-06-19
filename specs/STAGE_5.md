@@ -128,6 +128,26 @@ independent seeds** (overfit-resistance: no tuning to one draw).
 > cited. `insight-eval --assert-gate` now asserts these budgets (promoted from
 > informational). The naive contrast still fails (precision 0.19, all 5 traps),
 > proving the FDR/surprise validation — not the corpus — does the work.
+>
+> **Measurement log — round 3 (T2–T6 landed; structural gated, temporal/
+> contradiction recall-only).** PR #6 added the temporal + contradiction
+> detectors, the LLM-narration replay log (T4), ledger wiring (T5), and telemetry
+> + the sleep `Job` (T6). T4/T5/T6 are sound (round-trip + replay-determinism
+> tests; `resident_bytes` ≈ 0.33 MB @5M). But the two new **detectors meet recall
+> and miss precision** — they blow the hard false-insight budget:
+>
+> | detector | recall | precision | false-insight (< 0.05 bar) |
+> | --- | --- | --- | --- |
+> | temporal (T2) | 0.800 ✓ | 0.22 | **0.78** ✗ |
+> | contradiction (T3) | 1.000 ✓ | 0.40 | **0.57** ✗ |
+>
+> Root causes: T2's binomial-null cross-correlation isn't tight enough for the
+> synthetic temporal noise; T3 keys on sentiment cues and sets `p=0, surprise=1`,
+> **bypassing `validate`** (so nothing is statistically gated) and ignoring the
+> ledger the ticket called for. **Verdict: T2/T3 are recall-only prototypes, kept
+> *informational* in `insight-eval` (correctly NOT asserted) and NOT done.**
+> Promoting them needs the precision work in the follow-up tickets
+> (`HANDOFF_DEEPSEEK.md`). The structural keystone gate is unaffected.
 
 ## 3. Public interface (as built — `crates/skinki-insight`)
 
@@ -220,11 +240,11 @@ The infrastructure is done; the rest is gated by the instrument it provides.
 | ✅ **INF**: crate, `InsightInput`, `validate` (BH-FDR), cite-or-silence, reference + naive detectors, `insight-eval --assert-gate` | done | frontier | gate green on 2 seeds |
 | ✅ **D0**: rare/unique bridge names (`BRIDGE_PEOPLE`, V2-scoped, RNG-neutral so the V1 golden holds) so a 2-cluster bridge is separable from a 4-cluster hub | done | frontier | reference recall 1.000 ∧ `negative_hits = 0` on 2 seeds |
 | ✅ **D1**: surprise/effect + FDR calibration (`ValidationCfg` default: q=0.05, min_surprise=0.60, min_support=2) | done | frontier | recall/precision/false-insight rows promoted to asserted; beats naive (precision 1.00 vs 0.19) |
-| T2: temporal lead/lag detector (cross-correlation of entity mention series; null = shuffled lags) → `InsightKind::TemporalLead` | impl | DeepSeek (frontier reviews) | recovers planted `TemporalPattern` at `lag_days ± 1`, ≥ 0.50 |
-| T3: contradiction detector — adapt `skinki-ledger` staleness output into `DiscoveredInsight` → `InsightKind::Contradiction` | impl | DeepSeek (frontier reviews) | ≥ 0.80 of planted `Contradiction` surfaced |
-| T4: LLM-narration artifact log (append/replay) + a checked-in fixture + replay golden; wire as a `Narrator` | impl | DeepSeek | `rebuild(log)` byte-identical twice; gate replays, no inference |
-| T5: ledger wiring — a `Derivation` per surfaced insight + a staleness test | impl | DeepSeek (frontier reviews) | changed premise flags exactly its insights |
-| T6: telemetry — `resident_bytes` + bytes/candidate to 5M; wrap discovery as a Stage-4 `Job` | impl | DeepSeek | RAM projection in report; interruptible/resumable |
+| ⚠ T2: temporal lead/lag detector → `InsightKind::TemporalLead` | impl (recall only) | DeepSeek | recall 0.800 ✓ but false-insight 0.78 ✗ — **not done**, see T2-precision follow-up |
+| ⚠ T3: contradiction detector → `InsightKind::Contradiction` | impl (recall only) | DeepSeek | recall 1.000 ✓ but false-insight 0.57 ✗, bypasses `validate`, ignores ledger — **not done**, see T3-rework follow-up |
+| ✅ T4: LLM-narration artifact log (append/replay) + fixture + replay golden | done | DeepSeek | `rebuild(log)` byte-identical (tested) |
+| ✅ T5: ledger wiring — `record_insight_derivations` (a `Derivation` per insight) | done | DeepSeek | staleness propagation tested |
+| ✅ T6: telemetry (`resident_bytes`) + `InsightJob` (Stage-4 `Job`) | done | DeepSeek | ≈ 0.33 MB @5M; interruptible |
 
 ## 7. Definition of done
 
