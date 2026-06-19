@@ -95,6 +95,15 @@ jobs:
           cargo run --release --locked -p skinki-harness -- graph-eval
           --assert-gate
 
+      # Stage 5 (Insight Engine): locks the INFRASTRUCTURE — determinism,
+      # 0 uncited claims, apophenia-safety of the FDR-validated reference, and the
+      # naive contrast firing (teeth) — on two independent seeds. Does NOT assert
+      # recall (blocked on D0; see specs/STAGE_5.md). Deterministic; no inference.
+      - name: Stage 5 insight gate
+        run: >
+          cargo run --release --locked -p skinki-harness -- insight-eval
+          --assert-gate
+
   ffi:
     name: ffi gate (C-ABI / Python parity)
     runs-on: ubuntu-latest

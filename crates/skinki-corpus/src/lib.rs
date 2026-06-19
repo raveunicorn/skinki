@@ -362,6 +362,24 @@ const TOPICS_BY_CLUSTER: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// The topic lexicon: each cluster and the surface topic phrases that appear in
+/// its entries. Exposed as **observable vocabulary** (the analogue of the
+/// entity-name gazetteer the Stage-3 graph already uses) so a downstream engine
+/// can map an entry's text to a topic cluster *without* reading the planted
+/// answer key (`ground_truth.{insights, negative_bridges, ...}`). It is NOT
+/// ground truth — a real deployment would obtain this from topic modelling /
+/// clustering; here it stands in for that observable signal. The Stage-5 Insight
+/// Engine uses it to measure how many distinct clusters an entity spans (a
+/// 2-cluster bridge is surprising; a 4-cluster hub is apophenia).
+pub fn topic_lexicon() -> &'static [(&'static str, &'static [&'static str])] {
+    TOPICS_BY_CLUSTER
+}
+
+/// The cluster labels (observable vocabulary; see [`topic_lexicon`]).
+pub fn cluster_labels() -> &'static [&'static str] {
+    CLUSTERS
+}
+
 // ---------------------------------------------------------------------------
 // Generator
 // ---------------------------------------------------------------------------

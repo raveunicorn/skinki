@@ -246,6 +246,27 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         assert_gate: bool,
     },
+    /// Stage 5 — Insight Engine infrastructure gate. Scores the
+    /// statistically-validated reference engine against the planted insight /
+    /// apophenia ground truth, beside the naive co-mention baseline (the Law-2
+    /// contrast). `--assert-gate` enforces the EARNED invariants (determinism,
+    /// 0 uncited claims, apophenia-safety); recall/precision are reported as
+    /// informational until the insight ground truth is co-designed (see
+    /// `specs/STAGE_5.md`, finding D0).
+    InsightEval {
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long, default_value_t = 5)]
+        years: u32,
+        #[arg(long, default_value_t = 6)]
+        entries_per_day: u32,
+        /// A second, independent seed — the gate must hold on both (no tuning to
+        /// one corpus draw). Overfit-resistance.
+        #[arg(long, default_value_t = 7)]
+        seed_holdout: u64,
+        #[arg(long, default_value_t = false)]
+        assert_gate: bool,
+    },
     /// DEV-ONLY: score retrievers on the LoCoMo10 real-conversation benchmark
     /// (real multi-session dialogue + memory QA — not the synthetic corpus).
     /// No gate: this is a measurement tool, not a CI check.
@@ -790,6 +811,15 @@ fn main() -> Result<()> {
             });
             run_graph_eval(&corpus, k, assert_gate)?;
         }
+        Cmd::InsightEval {
+            seed,
+            years,
+            entries_per_day,
+            seed_holdout,
+            assert_gate,
+        } => {
+            run_insight_eval(seed, seed_holdout, years, entries_per_day, assert_gate)?;
+        }
         Cmd::LocomoEval {
             path,
             k,
@@ -881,6 +911,115 @@ fn person_names_in(text: &str, corpus: &Corpus) -> std::collections::BTreeSet<St
         .map(|e| e.name.to_lowercase())
         .filter(|n| text_lower.contains(n.as_str()))
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Stage 5 — insight-eval: the Insight Engine infrastructure gate
+// ---------------------------------------------------------------------------
+
+/// Score the statistically-validated reference engine against the naive
+/// co-mention baseline on the planted insight / apophenia ground truth, on two
+/// independent seeds (overfit-resistance). `--assert-gate` enforces the EARNED
+/// invariants only; recall/precision are informational (see `specs/STAGE_5.md`).
+fn run_insight_eval(
+    seed: u64,
+    seed_holdout: u64,
+    years: u32,
+    entries_per_day: u32,
+    assert_gate: bool,
+) -> anyhow::Result<()> {
+    use skinki_insight::{InsightEngine, InsightInput};
+
+    println!("\n=== skinki — insight-eval (Stage 5 Insight Engine infrastructure) ===");
+
+    let mut earned_fail = false;
+
+    for &s in &[seed, seed_holdout] {
+        let corpus = generate(&GenConfig {
+            seed: s,
+            years,
+            entries_per_day,
+            difficulty: Difficulty::V2,
+        });
+        let input = InsightInput::from_corpus(&corpus);
+        let planted = &corpus.ground_truth.insights;
+        let neg = &corpus.ground_truth.negative_bridges;
+
+        // Determinism (rule 2): discover twice, demand byte-identical output.
+        let reference = InsightEngine::structural();
+        let a = reference.discover(&input);
+        let b = reference.discover(&input);
+        let deterministic = a.len() == b.len()
+            && a.iter().zip(&b).all(|(x, y)| {
+                x.bridge_entity == y.bridge_entity
+                    && x.supporting_entries == y.supporting_entries
+                    && x.description == y.description
+            });
+
+        let naive_out = InsightEngine::naive().discover(&input);
+        let r = skinki_eval::score_insights(&a, planted, neg);
+        let n = skinki_eval::score_insights(&naive_out, planted, neg);
+
+        // Cite-or-silence: every emitted insight carries non-empty provenance.
+        let uncited = a.iter().filter(|d| d.supporting_entries.is_empty()).count();
+
+        println!(
+            "\n-- seed {s}: {} entries, {} planted insights, {} apophenia traps --",
+            corpus.entries.len(),
+            planted.len(),
+            neg.len()
+        );
+        println!(
+            "  {:<22} {:>9} {:>8} {:>10} {:>10} {:>10}",
+            "engine", "surfaced", "recall", "precision", "false-ins", "apophenia"
+        );
+        let row = |name: &str, s: &skinki_eval::InsightScores| {
+            let fmt = |o: Option<f64>| o.map(|v| format!("{v:.3}")).unwrap_or_else(|| "—".into());
+            println!(
+                "  {:<22} {:>9} {:>8.3} {:>10} {:>10} {:>10}",
+                name,
+                s.surfaced,
+                s.recall,
+                fmt(s.precision),
+                fmt(s.false_insight_rate),
+                s.negative_hits
+            );
+        };
+        row("reference (validated)", &r);
+        row("naive (contrast)", &n);
+
+        // EARNED invariants — these the gate asserts.
+        let earned_ok =
+            deterministic && uncited == 0 && r.negative_hits == 0 && n.negative_hits > 0;
+        if !earned_ok {
+            earned_fail = true;
+        }
+        println!(
+            "  EARNED: determinism={deterministic} uncited={uncited} apophenia-safe(ref)={} teeth(naive-fires)={}",
+            r.negative_hits == 0,
+            n.negative_hits > 0
+        );
+        println!(
+            "  NOT-YET-EARNED (informational): reference recall = {:.3} — see specs/STAGE_5.md finding D0 \
+             (planted bridge entities are not rare; structural signal currently undetectable).",
+            r.recall
+        );
+    }
+
+    if assert_gate {
+        if earned_fail {
+            anyhow::bail!(
+                "GATE: FAIL — a Stage-5 EARNED invariant regressed (determinism / 0-uncited / apophenia-safety / naive-teeth)"
+            );
+        }
+        println!("\nGATE: PASS (insight-eval --assert-gate: EARNED invariants hold on both seeds)");
+        println!(
+            "Note: this gate locks the Stage-5 INFRASTRUCTURE (frozen interface, FDR validation, \
+             cite-or-silence, apophenia-safety). It deliberately does NOT assert recall — Stage 5 \
+             'done' (recall >= 0.50) awaits the D0 insight-ground-truth co-design in specs/STAGE_5.md."
+        );
+    }
+    Ok(())
 }
 
 fn run_graph_eval(corpus: &Corpus, k: usize, assert_gate: bool) -> anyhow::Result<()> {

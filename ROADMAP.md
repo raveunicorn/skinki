@@ -24,7 +24,7 @@ layered design and budgets.
 | 2 | Storage substrate (Lance/Cozo) + append-only L0; maybe a `.kx` codec | **Done** (+ 2B durability) |
 | 3 | Incremental local GraphRAG (deterministic-first, two-tier; venue-anchored multi-hop) | **Closed — graph is substrate, not a retriever (honest).** 2.5–3× BM25 on synthetic, ledger-wired + 3C assembler, gated; but on **two** real benchmarks (LoCoMo, LongMemEval) the graph does **not** beat BM25, and a semantic embedder (EmbeddingGemma) is SOTA (+51% over BM25 on LongMemEval multi-session). Default retriever → EmbeddingGemma; graph retained for structure (ledger/provenance/staleness) into Stage 5. Multi-hop gap remains open ([`STAGE_3.md`](specs/STAGE_3.md)) |
 | 4 | "Sleep" consolidation engine (idle + on-power background jobs) | **Done** (policy proven in simulation; real jobs land at Stage 3/5) |
-| 5 | Insight Engine (deterministic discovery + FDR + cite-or-silence) | Planned |
+| 5 | Insight Engine (deterministic discovery + FDR + cite-or-silence) | **Infrastructure built + gated**; detection blocked on a measured corpus finding (D0) — `skinki-insight` ships the frozen interface, BH-FDR validation, cite-or-silence, an apophenia-safe reference detector + naive contrast, and `insight-eval --assert-gate`; V2's insight ground-truth is not yet detectable (bridge entities not rare). See [`STAGE_5.md`](specs/STAGE_5.md) |
 | 6 | Portable `skinki` (C-ABI/FFI + Python binding; MCP server) | **Done** (C-ABI + Python parity gated; `skinki-mcp` ships search + context-assembler to agents; Swift → Stage 7) |
 | 7 | skinki macOS product integration (the wrapper) | Planned |
 
@@ -175,6 +175,21 @@ layered design and budgets.
   silence" narration; measure fraction of planted insights found vs false ones;
   hallucination audit.
 - **Gate:** >= X% of planted insights at <= Y% false; **0** uncited claims.
+- **Result (infrastructure built + gated; D0 finding).** `crates/skinki-insight`
+  ships the keystone infrastructure: a fairness boundary (`InsightInput` — the
+  answer key is *unreachable*, not just "don't read it"), a Benjamini–Hochberg
+  FDR validation core, structural cite-or-silence (0 uncited by construction), an
+  apophenia-safe reference detector + the naive co-mention contrast, all behind
+  `insight-eval --assert-gate` (EARNED invariants green in CI on two seeds). The
+  measurement then surfaced an honest blocker: on V2 the planted insight is
+  **statistically undetectable** — the naive detector finds all 5 bridges but
+  also all 5 apophenia hubs (precision 0.14), while the validated detector that
+  rejects the hubs also surfaces nothing, because **bridge entities are not rare**
+  (their names recur ~160×/11.5k across all clusters, drowning the 2-cluster
+  signal). **D0** (co-design the insight ground-truth so bridges are rare/unique —
+  a corpus change that moves golden hashes, hence human-gated) is the unblocker
+  before a detector can earn recall. A clean Law-2 result: the instrument works;
+  the benchmark needs hardening. See [`specs/STAGE_5.md`](specs/STAGE_5.md).
 
 ## Stage 6 — Portable engine (primary artifact, "FFmpeg")
 

@@ -37,9 +37,10 @@ skinki/                      PRIMARY — the engine (all real work)
     skinki-sleep/     Stage 4: interruptible/resumable consolidation scheduler + macOS signals
     skinki-ledger/    Derivation Ledger: hash-linked reasoning DAG + deterministic staleness propagation
     skinki-graph/     Stage 3: deterministic GraphRAG (typed IntroEdge/RecEdge walk + 3C context assembler), ledger-backed
+    skinki-insight/   Stage 5: Insight Engine — deterministic discovery + BH-FDR validation + cite-or-silence (frontier-owned keystone; infra gated, detection blocked on D0)
     skinki-ffi/       Stage 6: C-ABI (cdylib/staticlib) over Stage-1 search (unsafe: all in ffi.rs, R1-reviewed)
     skinki-mcp/       Stage 6: MCP server over stdio — search + assemble_context for agents (safe, hand-rolled JSON-RPC)
-    skinki-harness/   `skinki` CLI: generate/eval/demo/compress-bench/scale-bench/store-bench/sleep-sim/ledger-bench/graph-eval
+    skinki-harness/   `skinki` CLI: generate/eval/demo/compress-bench/scale-bench/store-bench/sleep-sim/ledger-bench/graph-eval/insight-eval
   bindings/python/    pure-ctypes binding over the C-ABI (no PyO3)
   specs/              per-stage delegation contracts (STAGE_<n>.md from TEMPLATE.md)
 ARCHITECTURE.md  ROADMAP.md  AGENTS.md   the vision, the staged plan, the rules
@@ -58,7 +59,7 @@ L3 sleep consolidation → L4 insight engine → L5 agent/query) is in
 | 2 / 2B | Storage substrate + durability (pure Rust, mmap, append-only) | **Done** |
 | 3 | Incremental local GraphRAG (two-tier; see `STAGE_3.md`) | **Deterministic tier done + gated** (multi-hop 2.5–3× BM25, ledger-wired, 3C assembler); LLM tier measured = not earned |
 | 4 | "Sleep" consolidation scheduler | **Done** (policy proven in sim; real jobs plug in at Stage 3/5) |
-| 5 | Insight Engine (anti-hallucination keystone) | Planned — frontier-only, the "soul" |
+| 5 | Insight Engine (anti-hallucination keystone) | **Infrastructure built + gated** (`skinki-insight`: frozen interface, BH-FDR `validate`, cite-or-silence, apophenia-safe reference + naive contrast, `insight-eval --assert-gate`). Detection (recall) **blocked on D0** — measured: V2 insight ground-truth not yet detectable (bridge entities not rare). See `specs/STAGE_5.md` |
 | 6 | Portable `skinki` (C-ABI/FFI + Python binding; MCP server) | **Done** — C-ABI + Python parity gated; `skinki-mcp` ships to agents (Swift → Stage 7) |
 | 7 | skinki macOS product | Parked |
 
@@ -102,6 +103,7 @@ cargo run --release -p skinki-harness -- store-bench --years 5 --assert-gate   #
 cargo run --release -p skinki-harness -- sleep-sim --assert-gate               # Stage 4
 cargo run --release -p skinki-harness -- ledger-bench --assert-gate            # Derivation Ledger
 cargo run --release -p skinki-harness -- graph-eval --assert-gate              # Stage 3 GraphRAG + 3C
+cargo run --release -p skinki-harness -- insight-eval --assert-gate            # Stage 5 Insight Engine infra
 bash scripts/ffi-gate.sh                                                        # Stage 6 C-ABI/Python parity
 ```
 

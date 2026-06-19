@@ -257,11 +257,22 @@ dependencies = [
  "skinki-corpus",
  "skinki-eval",
  "skinki-graph",
+ "skinki-insight",
  "skinki-ledger",
  "skinki-sleep",
  "skinki-store",
  "skinki-telemetry",
  "skinki-vector",
+]
+
+[[package]]
+name = "skinki-insight"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "skinki-corpus",
+ "skinki-eval",
 ]
 
 [[package]]
