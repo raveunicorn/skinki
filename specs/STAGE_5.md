@@ -1,17 +1,18 @@
 # Stage 5 — Insight Engine (keystone, anti-hallucination) (SPEC)
 
-- **Status:** **structural-bridge detection earned + gated; temporal /
-  contradiction detectors + replayed-LLM narrator remain (delegatable).** The
-  frozen interface, the BH-FDR validation core, cite-or-silence, the reference
-  `StructuralBridgeDetector`, the naive contrast, and `insight-eval --assert-gate`
-  all landed in `crates/skinki-insight` + the harness. Round 1 found the planted
-  signal undetectable (bridge entities not rare); **round 2 — D0 landed** (rare,
-  unique bridge names, RNG-neutral so the V1 golden held), and the reference
-  engine now **clears the full keystone gate on two seeds**: recall 1.000,
-  precision 1.000, false-insight 0.000, apophenia 0, 0 uncited, deterministic.
-  Remaining for Stage-5 "done": the temporal + contradiction detectors and the
-  live (replayed) LLM narrator — all behind the now-frozen interface (T-tickets,
-  `specs/HANDOFF_DEEPSEEK.md`).
+- **Status:** **all three detectors earned + gated; only the live (replayed) LLM
+  narrator remains.** The frozen interface, BH-FDR validation, cite-or-silence,
+  the structural / temporal / contradiction detectors, the naive contrast, the
+  narration replay log (T4), ledger wiring (T5), telemetry + sleep `Job` (T6),
+  and `insight-eval --assert-gate` all landed in `crates/skinki-insight` + the
+  harness. Round 1 found the planted signal undetectable; **round 2 (D0)** made
+  bridges rare (RNG-neutral, V1 golden held); **round 3** added T2–T6 but the
+  detectors were recall-only (false-insight 0.78 / 0.57); **round 4** fixed their
+  precision. The gate now asserts, on two seeds: structural recall/precision
+  1.000, temporal recall 0.800, contradiction recall 1.000, **every detector's
+  false-insight 0.000**, apophenia 0, 0 uncited, deterministic. Remaining for
+  "done": swap the extractive reference narrator for a live (replayed) LLM
+  narrator (Stage 6/7) — the only delegated ticket left.
 - **Owner of the design (frontier/human):** **frontier** — the fairness boundary,
   the FDR core, the cite-or-silence contract, and the apophenia discrimination are
   decided and implemented here. Heavy review on every algorithm-core PR; the gate
@@ -67,24 +68,23 @@ independent seeds** (overfit-resistance: no tuning to one draw).
 | Discovery determinism | byte-identical | ✓ |
 | **Uncited claims** | **= 0** (hard, `CLAUDE.md`) | 0 (structural) |
 | **Apophenia hits (reference)** | **`negative_hits = 0`** | 0 / 5 |
-| **Insight recall** | **≥ 0.50** | **1.000** |
-| **Insight precision** | **≥ 0.70** | **1.000** |
-| **False-insight rate** | **< 0.05** (hard) | **0.000** |
+| **Structural insight recall** | **≥ 0.50** | **1.000** |
+| **Structural insight precision** | **≥ 0.70** | **1.000** |
+| **Temporal recall** | **≥ 0.50** | **0.800** |
+| **Contradiction recall** | **≥ 0.80** | **1.000** |
+| **False-insight rate (every detector)** | **< 0.05** (hard) | **0.000** |
 | Gate has teeth (naive contrast) | naive `negative_hits > 0` | 5 / 5 (precision 0.14–0.19) |
 
-**NOT YET EARNED — detectors not built (delegatable T-tickets):**
+**NOT YET EARNED:**
 
 | Metric | Target | Status |
 | --- | --- | --- |
-| Temporal lead/lag recovered | ≥ 0.50 @ ±1 day | detector not built (T2) |
-| Contradiction surfaced | ≥ 0.80 | detector not built (T3) |
-| Live narration (replayed) | replay golden stable | extractive reference only; LLM narrator = T4 |
+| Live narration (replayed LLM) | replay golden stable | extractive + replay-log reference shipped; a live LLM narrator (Stage 6/7) replaces it behind the same trait |
 
 > The keystone gate is in CI **now** and asserts the anti-hallucination budgets
-> (recall/precision/false-insight/apophenia/0-uncited/determinism) on two seeds.
-> Stage-5 "done" adds the temporal + contradiction rows once those detectors land.
-> The `< 0.05` false-insight and `= 0` uncited budgets are fixed by `CLAUDE.md`
-> and never negotiable.
+> (every detector's recall + the hard false-insight/apophenia/0-uncited/
+> determinism bars) on two seeds. The `< 0.05` false-insight and `= 0` uncited
+> budgets are fixed by `CLAUDE.md` and never negotiable.
 
 > **Measurement log — round 1 (infrastructure + the corpus blocker).** The
 > reference `StructuralBridgeDetector` profiles each entity's spread over topic
@@ -148,6 +148,35 @@ independent seeds** (overfit-resistance: no tuning to one draw).
 > *informational* in `insight-eval` (correctly NOT asserted) and NOT done.**
 > Promoting them needs the precision work in the follow-up tickets
 > (`HANDOFF_DEEPSEEK.md`). The structural keystone gate is unaffected.
+>
+> **Measurement log — round 4 (T2/T3 precision rework — promoted to the gate).**
+> Diagnosing the false positives turned up three concrete causes, each fixed:
+> (1) **substring matching** counted a short name like "rust" inside "trust"/
+> "frustrated" (1763 phantom mentions → ubiquitous-entity false leads) → fixed
+> with **word-boundary matching**; (2) the temporal **null ignored the trail
+> entity's frequency**, so a rare lead aligned with a *common* trail (a person
+> mentioned 165×) looked significant → fixed with a **density-corrected binomial
+> null** (`p ≈ n_b·(2·tol+1)/max_day`) plus a Bonferroni correction for the
+> 91-lag search; (3) the measurement engines **bundled the structural detector**,
+> so its insights counted as temporal/contradiction false positives → fixed by
+> measuring each detector in isolation. For T3, sentiment cues were **mis-
+> attributed** ("rust was a mistake. go is clearly better" flagged *go*) → fixed
+> with **name-anchored** stance attribution (the entity must be the cue's subject/
+> object), dropping Y-referring cues, and emitting **one entity-level candidate**
+> citing all its endorse/regret entries (instead of an all-pairs cross product).
+> Re-measured (seeds 42 & 7):
+>
+> | detector | recall | precision | false-insight |
+> | --- | --- | --- | --- |
+> | temporal (T2) | 0.800 | 1.000 | **0.000** |
+> | contradiction (T3) | 1.000 | 1.000 | **0.000** |
+>
+> **Verdict: all three detectors clear the keystone bar.** `insight-eval
+> --assert-gate` now asserts temporal recall ≥ 0.50 and contradiction recall
+> ≥ 0.80, each at false-insight < 0.05, alongside the structural keystone — on
+> both seeds. (T3 is an exact name-anchored matcher, deterministic, so its
+> `p=0` is sound: there is no multiple-testing search to FDR-correct — and with
+> correct attribution it produces zero false positives.)
 
 ## 3. Public interface (as built — `crates/skinki-insight`)
 
@@ -240,8 +269,8 @@ The infrastructure is done; the rest is gated by the instrument it provides.
 | ✅ **INF**: crate, `InsightInput`, `validate` (BH-FDR), cite-or-silence, reference + naive detectors, `insight-eval --assert-gate` | done | frontier | gate green on 2 seeds |
 | ✅ **D0**: rare/unique bridge names (`BRIDGE_PEOPLE`, V2-scoped, RNG-neutral so the V1 golden holds) so a 2-cluster bridge is separable from a 4-cluster hub | done | frontier | reference recall 1.000 ∧ `negative_hits = 0` on 2 seeds |
 | ✅ **D1**: surprise/effect + FDR calibration (`ValidationCfg` default: q=0.05, min_surprise=0.60, min_support=2) | done | frontier | recall/precision/false-insight rows promoted to asserted; beats naive (precision 1.00 vs 0.19) |
-| ⚠ T2: temporal lead/lag detector → `InsightKind::TemporalLead` | impl (recall only) | DeepSeek | recall 0.800 ✓ but false-insight 0.78 ✗ — **not done**, see T2-precision follow-up |
-| ⚠ T3: contradiction detector → `InsightKind::Contradiction` | impl (recall only) | DeepSeek | recall 1.000 ✓ but false-insight 0.57 ✗, bypasses `validate`, ignores ledger — **not done**, see T3-rework follow-up |
+| ✅ T2: temporal lead/lag detector → `InsightKind::TemporalLead` | done (impl DeepSeek; precision rework frontier) | recall 0.800, precision 1.000, false-insight 0.000 — **gated** |
+| ✅ T3: contradiction detector → `InsightKind::Contradiction` | done (impl DeepSeek; precision rework frontier) | recall 1.000, precision 1.000, false-insight 0.000 — **gated** |
 | ✅ T4: LLM-narration artifact log (append/replay) + fixture + replay golden | done | DeepSeek | `rebuild(log)` byte-identical (tested) |
 | ✅ T5: ledger wiring — `record_insight_derivations` (a `Derivation` per insight) | done | DeepSeek | staleness propagation tested |
 | ✅ T6: telemetry (`resident_bytes`) + `InsightJob` (Stage-4 `Job`) | done | DeepSeek | ≈ 0.33 MB @5M; interruptible |

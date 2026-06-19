@@ -57,9 +57,15 @@ the `StructuralBridgeDetector` shape (propose → `Statistic` → `validate`).
 
 | Ticket | Branch | Files | Do | Gate / DoD |
 | --- | --- | --- | --- | --- |
-| **T2-precision** | `feat/insight-temporal-precision` | `skinki-insight/src/lib.rs` | The cross-correlation surfaces ~7 false leads per 2 real ones (false-insight 0.78). Tighten the null / effect floor / BH-FDR so only genuine lead→trail pairs survive. Do **not** weaken `score_temporal`. | `insight-eval` informational temporal row reaches recall ≥ 0.50 **and** false-insight < 0.05 on both seeds; then promote it into `--assert-gate`. |
-| **T3-rework** | `feat/insight-contradiction-rework` | `skinki-insight/src/lib.rs`, `skinki-ledger` | Current detector keys on sentiment cues and sets `p=0, surprise=1` (bypasses `validate`) — it overfits templates and floods false positives (0.57). Rebuild it to (a) produce a **real statistic** that flows through `validate`, and (b) use the **ledger** staleness signal the ticket intended, not surface cues. | recall ≥ 0.80 **and** false-insight < 0.05 on both seeds; flows through `validate`; then promote into `--assert-gate`. |
-| **PROC** non-bundled PRs | n/a | — | Future work: **one ticket = one branch/PR** (PR #6 bundled T2–T6 + 3B + pipeline into 1328 lines — hard to review/revert). | reviewers can land/revert each ticket independently. |
+| ✅ **T2-precision** | done (frontier) | `skinki-insight/src/lib.rs` | Word-boundary matching + density-corrected binomial null + Bonferroni over the lag search + measure the detector in isolation. | recall 0.800, false-insight 0.000 on both seeds — **asserted in the gate**. |
+| ✅ **T3-rework** | done (frontier) | `skinki-insight/src/lib.rs` | Name-anchored stance attribution (entity is the cue's subject/object), dropped Y-referring cues, one entity-level candidate citing all endorse/regret entries. Kept exact-match (p=0 is sound — no multiple-testing search). | recall 1.000, false-insight 0.000 on both seeds — **asserted in the gate**. |
+| **PROC** non-bundled PRs | n/a | — | Standing rule: **one ticket = one branch/PR** (PR #6 bundled T2–T6 + 3B + pipeline into 1328 lines — hard to review/revert). | reviewers can land/revert each ticket independently. |
+
+> **Note:** the temporal/contradiction *precision* rework was kept on the
+> frontier (it was the subtle anti-hallucination statistics, not mechanical
+> plumbing). The ledger-based contradiction detector the ticket originally
+> imagined is moot — the detector is now a precise exact-match; T5 already wires
+> insight→`Derivation` staleness separately.
 
 ## Stage 3B — multi-hop retrieval gap (spec: `STAGE_3B_MULTIHOP.md`)
 

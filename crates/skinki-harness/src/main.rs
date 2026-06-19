@@ -266,12 +266,12 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         assert_gate: bool,
     },
-    /// Stage 5 — Insight Engine keystone gate. Scores the statistically-validated
-    /// reference engine against the planted insight / apophenia ground truth,
-    /// beside the naive co-mention baseline (the Law-2 contrast). `--assert-gate`
-    /// enforces the keystone budgets on two seeds: determinism, 0 uncited claims,
-    /// apophenia=0, recall>=0.50, precision>=0.70, false-insight<0.05 (post-D0;
-    /// see `specs/STAGE_5.md`).
+    /// Stage 5 — Insight Engine keystone gate. Scores the structural, temporal,
+    /// and contradiction detectors against the planted ground truth, beside the
+    /// naive co-mention baseline (the Law-2 contrast). `--assert-gate` enforces
+    /// the keystone budgets on two seeds: determinism, 0 uncited, apophenia=0,
+    /// structural recall>=0.50/precision>=0.70, temporal recall>=0.50,
+    /// contradiction recall>=0.80, every false-insight<0.05 (see `specs/STAGE_5.md`).
     InsightEval {
         #[arg(long, default_value_t = 42)]
         seed: u64,
@@ -1112,13 +1112,13 @@ fn run_insight_eval(
         row("reference (validated)", &r);
         row("naive (contrast)", &n);
 
-        // Temporal-lead detector (T2, informational — not yet in the asserted gate).
+        // Temporal-lead detector (T2 — now asserted, post precision rework).
         let temporal = InsightEngine::temporal();
         let t_out = temporal.discover(&input);
         let t = skinki_eval::score_temporal(&t_out, &corpus.ground_truth.temporal);
         row("temporal (T2)", &t);
 
-        // Contradiction detector (T3, informational).
+        // Contradiction detector (T3 — now asserted, post precision rework).
         let contradiction = InsightEngine::contradiction();
         let c_out = contradiction.discover(&input);
         let c = skinki_eval::score_contradiction(&c_out, &corpus.ground_truth.contradictions);
@@ -1145,24 +1145,36 @@ fn run_insight_eval(
         const MIN_RECALL: f64 = 0.50;
         const MIN_PRECISION: f64 = 0.70;
         const MAX_FALSE_INSIGHT: f64 = 0.05;
+        const MIN_TEMPORAL_RECALL: f64 = 0.50;
+        const MIN_CONTRADICTION_RECALL: f64 = 0.80;
         let recall_ok = r.recall >= MIN_RECALL;
         let precision_ok = r.precision.is_some_and(|p| p >= MIN_PRECISION);
         let false_ok = r.false_insight_rate.is_some_and(|f| f < MAX_FALSE_INSIGHT);
         let apophenia_ok = r.negative_hits == 0;
+        // T2/T3: each must hit its recall target AND the hard false-insight bar.
+        let temporal_ok = t.recall >= MIN_TEMPORAL_RECALL
+            && t.false_insight_rate.is_some_and(|f| f < MAX_FALSE_INSIGHT);
+        let contradiction_ok = c.recall >= MIN_CONTRADICTION_RECALL
+            && c.false_insight_rate.is_some_and(|f| f < MAX_FALSE_INSIGHT);
         let earned_ok = deterministic
             && uncited == 0
             && apophenia_ok
             && recall_ok
             && precision_ok
             && false_ok
+            && temporal_ok
+            && contradiction_ok
             && n.negative_hits > 0;
         if !earned_ok {
             earned_fail = true;
         }
         println!(
             "  EARNED: determinism={deterministic} uncited={uncited} apophenia-safe={apophenia_ok} \
-             recall>={MIN_RECALL}={recall_ok} precision>={MIN_PRECISION}={precision_ok} \
-             false-insight<{MAX_FALSE_INSIGHT}={false_ok} naive-teeth={}",
+             structural(recall>={MIN_RECALL},precision>={MIN_PRECISION},false<{MAX_FALSE_INSIGHT})={} \
+             temporal(recall>={MIN_TEMPORAL_RECALL},false<{MAX_FALSE_INSIGHT})={temporal_ok} \
+             contradiction(recall>={MIN_CONTRADICTION_RECALL},false<{MAX_FALSE_INSIGHT})={contradiction_ok} \
+             naive-teeth={}",
+            recall_ok && precision_ok && false_ok,
             n.negative_hits > 0
         );
     }
@@ -1171,17 +1183,19 @@ fn run_insight_eval(
         if earned_fail {
             anyhow::bail!(
                 "GATE: FAIL — a Stage-5 keystone budget regressed (determinism / 0-uncited / \
-                 apophenia-safety / recall>=0.50 / precision>=0.70 / false-insight<0.05 / naive-teeth)"
+                 apophenia-safety / structural recall>=0.50 precision>=0.70 / temporal recall>=0.50 / \
+                 contradiction recall>=0.80 / all false-insight<0.05 / naive-teeth)"
             );
         }
         println!(
-            "\nGATE: PASS (insight-eval --assert-gate: structural-bridge keystone earned on both seeds \
-             — recall>=0.50, precision>=0.70, false-insight<0.05, apophenia=0, 0 uncited, deterministic)"
+            "\nGATE: PASS (insight-eval --assert-gate: all three detectors earned on both seeds — \
+             structural recall>=0.50/precision>=0.70, temporal recall>=0.50, contradiction recall>=0.80, \
+             every false-insight<0.05, apophenia=0, 0 uncited, deterministic)"
         );
         println!(
-            "Note: asserts the StructuralBridge keystone (deterministic discovery + BH-FDR validation + \
-             cite-or-silence + apophenia-safety, post-D0). Temporal/contradiction detectors and the \
-             replayed-LLM narrator are delegated tickets (specs/STAGE_5.md, specs/HANDOFF_DEEPSEEK.md)."
+            "Note: asserts the StructuralBridge + temporal + contradiction detectors (deterministic \
+             discovery + BH-FDR/anchored validation + cite-or-silence + apophenia-safety). The live \
+             (replayed) LLM narrator remains a delegated ticket (specs/STAGE_5.md, HANDOFF_DEEPSEEK.md)."
         );
     }
     Ok(())

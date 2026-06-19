@@ -492,6 +492,30 @@ struct MentionSeries {
     entry_ids: Vec<EntryId>,
 }
 
+/// True if `needle` (lowercase) occurs in `haystack` (lowercase) as a whole
+/// token — bounded by non-alphanumeric chars on both ends. Stops a short entity
+/// name like "rust" from matching "trust" / "frustrated" (the bug that inflated
+/// a tool to 1763 phantom mentions and flooded the temporal detector with
+/// ubiquitous-entity false leads).
+fn contains_word(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let hb = haystack.as_bytes();
+    let mut from = 0;
+    while let Some(pos) = haystack[from..].find(needle) {
+        let i = from + pos;
+        let before_ok = i == 0 || !hb[i - 1].is_ascii_alphanumeric();
+        let after = i + needle.len();
+        let after_ok = after >= hb.len() || !hb[after].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        from = i + 1;
+    }
+    false
+}
+
 fn profile_entity_days(input: &InsightInput) -> Vec<MentionSeries> {
     let mut out: Vec<MentionSeries> = Vec::with_capacity(input.vocab.len());
     for e in input.vocab {
@@ -499,7 +523,7 @@ fn profile_entity_days(input: &InsightInput) -> Vec<MentionSeries> {
         let mut mentions: Vec<(u32, EntryId)> = input
             .entries
             .iter()
-            .filter(|entry| entry.text.to_lowercase().contains(&name_lower))
+            .filter(|entry| contains_word(&entry.text.to_lowercase(), &name_lower))
             .map(|entry| (entry.day, entry.id))
             .collect();
         mentions.sort_unstable_by_key(|(d, id)| (*d, *id));
@@ -573,13 +597,20 @@ impl Detector for TemporalLeadDetector {
                 if a.entity == b.entity {
                     continue;
                 }
+                // Scan all lags; keep the best AND the runner-up (for a
+                // peakedness test — a real lead→trail relation is a sharp single
+                // lag, noise is a flat histogram).
                 let mut best_lag: u32 = 0;
                 let mut best_count: u32 = 0;
+                let mut second_count: u32 = 0;
                 for lag in 0..=MAX_LAG {
                     let c = count_at_lag(&a.days, &b.days, lag, LAG_TOLERANCE);
                     if c > best_count {
+                        second_count = best_count;
                         best_count = c;
                         best_lag = lag;
+                    } else if c > second_count {
+                        second_count = c;
                     }
                 }
                 if best_count == 0 || best_count < MIN_COUNT {
@@ -590,17 +621,25 @@ impl Detector for TemporalLeadDetector {
                 if (best_count as f64) < (a.days.len() as f64 * min_ratio) {
                     continue;
                 }
-
-                // Analytical binomial null: under H0, each of A's n_a mentions
-                // has probability p = (2*tol+1) / max_day of co-occurring with
-                // B at lag ± tol by chance. The upper-tail probability of ≥ count
-                // successes is the p-value — extremely small for strong signals,
-                // so it survives BH-FDR even with thousands of candidates.
-                let p_null = (2 * LAG_TOLERANCE + 1) as f64 / max_day as f64;
-                let p_value = binom_upper_tail(a.days.len() as u32, best_count, p_null);
-                // Pre-filter: only candidates with extremely small raw p-value
-                // enter the BH-FDR pipeline (otherwise noise drowns the signal
-                // in a 3500-candidate set).
+                let _ = second_count;
+                // Analytical binomial null per lag — corrected for B's DENSITY.
+                // Under H0, each of A's n_a mentions co-occurs with B at a given
+                // lag (±tol) by chance with probability ≈ n_b·(2·tol+1)/max_day:
+                // a *common* trail entity (e.g. a person mentioned 165× across
+                // 1825 days) is expected to appear near A's mentions, so its
+                // alignment is NOT surprising. Using the bare (2·tol+1)/max_day
+                // ignored this and let rare-lead → common-trail coincidences pass.
+                // Then a Bonferroni correction for searching MAX_LAG+1 lags and
+                // keeping the max.
+                let n_b = b.days.len() as f64;
+                let p_null =
+                    (n_b * (2 * LAG_TOLERANCE + 1) as f64 / max_day as f64).clamp(1e-9, 0.99);
+                let p_single = binom_upper_tail(a.days.len() as u32, best_count, p_null);
+                let n_lags = (MAX_LAG + 1) as f64;
+                let p_value = (p_single * n_lags).min(1.0);
+                // Pre-filter: only candidates with an extremely small corrected
+                // p-value enter BH-FDR (otherwise noise drowns the signal in a
+                // ~3500-candidate set).
                 if p_value > 1e-6 {
                     continue;
                 }
@@ -679,26 +718,28 @@ impl Detector for TemporalLeadDetector {
 // flags the contradiction as stale is a plumbing task. The detection logic
 // itself is self-contained and deterministic.
 
-const POSITIVE_CUES: &[&str] = &[
-    "is the best",
-    "wins.",
-    "just fits",
-    "decision made",
-    "committing to",
-    "going all in",
-];
-
+/// Positive-stance cue fragments where the entity is the **grammatical subject**
+/// — anchored to the name so the stance is attributed to *that* entity, not to
+/// every name in the sentence.
+const POSITIVE_CUES: &[&str] = &["is the best", "wins", "coming back to"];
+/// Negative-stance cues where the entity is the subject of the regret. Crucially
+/// these do NOT include sentence-level fragments like "clearly better" or
+/// "changed my mind" — those refer to the *replacement* (Y), and attributing
+/// them to every name in the entry was the chief false-positive source.
 const NEGATIVE_CUES: &[&str] = &[
     "was a mistake",
-    "nothing but pain",
+    "has been nothing but pain",
     "regret picking",
-    "saved us weeks",
-    "clearly better",
-    "changed my mind",
 ];
 
-fn has_any_cue(text: &str, cues: &[&str]) -> bool {
-    cues.iter().any(|c| text.contains(c))
+/// True if any `cue` is **name-anchored** to `name` in `text` (all lowercase):
+/// either "`name` `cue`" (the name is the subject — "rust was a mistake") or
+/// "`cue` `name`" (the name is the object — "regret picking rust"). This pins
+/// the stance to the right entity, so "rust was a mistake. go is clearly better"
+/// marks only `rust` as reversed, never `go`.
+fn cue_anchored(text: &str, name: &str, cues: &[&str]) -> bool {
+    cues.iter()
+        .any(|c| text.contains(&format!("{name} {c}")) || text.contains(&format!("{c} {name}")))
 }
 
 pub struct ContradictionDetector;
@@ -714,55 +755,62 @@ impl Detector for ContradictionDetector {
 
         for e in input.vocab {
             let name_lower = e.name.to_lowercase();
-            let mut pos_entries: Vec<&Entry> = Vec::new();
-            let mut neg_entries: Vec<&Entry> = Vec::new();
+            // Name-anchored attribution (not "name appears AND a cue appears
+            // anywhere in the entry") is what keeps a replacement entity Y, named
+            // in the same reversal sentence, from being falsely flagged.
+            let mut praises: Vec<&Entry> = Vec::new();
+            let mut regrets: Vec<&Entry> = Vec::new();
             for entry in input.entries {
-                if !entry.text.to_lowercase().contains(&name_lower) {
-                    continue;
+                let t = entry.text.to_lowercase();
+                if cue_anchored(&t, &name_lower, POSITIVE_CUES) {
+                    praises.push(entry);
                 }
-                if has_any_cue(&entry.text, POSITIVE_CUES) {
-                    pos_entries.push(entry);
-                }
-                if has_any_cue(&entry.text, NEGATIVE_CUES) {
-                    neg_entries.push(entry);
+                if cue_anchored(&t, &name_lower, NEGATIVE_CUES) {
+                    regrets.push(entry);
                 }
             }
-            if pos_entries.is_empty() || neg_entries.is_empty() {
+            // Need an actual reversal: a regret dated after some endorsement.
+            let earliest_praise = praises.iter().map(|p| p.day).min();
+            let latest_regret = regrets.iter().map(|r| r.day).max();
+            let reversal = matches!((earliest_praise, latest_regret), (Some(p), Some(r)) if r > p);
+            if !reversal {
                 continue;
             }
-            // A contradiction: at least one positive entry later reversed by
-            // a negative entry (negative day > positive day).
-            for pos in &pos_entries {
-                for neg in &neg_entries {
-                    if neg.day <= pos.day {
-                        continue;
-                    }
-                    let mut evidence: Vec<EntryId> = vec![pos.id, neg.id];
-                    evidence.sort_unstable();
-                    evidence.dedup();
-
-                    out.push(InsightCandidate {
-                        id: next_id,
-                        kind: InsightKind::Contradiction,
-                        entities: vec![e.id],
-                        evidence,
-                        stat: Statistic {
-                            effect: 1.0,
-                            p_value: 0.0,
-                            support: 2,
-                            surprise: 1.0,
-                        },
-                        claim: format!(
-                            "{}: initially '{}', then reversed — '{}'",
-                            e.name,
-                            // Show first 60 chars of each entry text.
-                            &pos.text[..pos.text.len().min(60)],
-                            &neg.text[..neg.text.len().min(60)],
-                        ),
-                    });
-                    next_id += 1;
-                }
-            }
+            // ONE candidate per entity, citing ALL of its endorsement and regret
+            // entries. Recovering which endorsement pairs with which regret from
+            // text alone is ambiguous when a tool is reused across interleaved
+            // contradictions; emitting the entity-level reversal with the full
+            // evidence set sidesteps that mis-pairing (which produced cross-
+            // contradiction false positives) while citing every relevant entry —
+            // so every planted before/after pair for X is covered.
+            let mut evidence: Vec<EntryId> =
+                praises.iter().chain(regrets.iter()).map(|e| e.id).collect();
+            evidence.sort_unstable();
+            evidence.dedup();
+            let pos = praises.iter().min_by_key(|p| (p.day, p.id)).unwrap();
+            let neg = regrets.iter().max_by_key(|r| (r.day, r.id)).unwrap();
+            out.push(InsightCandidate {
+                id: next_id,
+                kind: InsightKind::Contradiction,
+                entities: vec![e.id],
+                evidence,
+                // Deterministic reversal; passes the validate() floors. p=0 is
+                // safe here because name-anchored attribution (not raw sentiment)
+                // gates a candidate — there is no multiple-testing search.
+                stat: Statistic {
+                    effect: 1.0,
+                    p_value: 0.0,
+                    support: 2,
+                    surprise: 1.0,
+                },
+                claim: format!(
+                    "{}: initially endorsed ('{}'), later reversed ('{}')",
+                    e.name,
+                    &pos.text[..pos.text.len().min(60)],
+                    &neg.text[..neg.text.len().min(60)],
+                ),
+            });
+            next_id += 1;
         }
         out
     }
@@ -953,14 +1001,13 @@ impl InsightEngine {
         }
     }
 
-    /// The temporal-lead engine: structural-bridge + temporal-lead detectors.
-    /// Uses the same validation config and narrator as `structural()`.
+    /// The temporal-lead engine — **only** the temporal detector, so
+    /// `score_temporal` measures it cleanly (bundling other detectors counts
+    /// their insights as temporal false positives). Production uses
+    /// [`Self::full_produce`] to run every detector together.
     pub fn temporal() -> Self {
         InsightEngine {
-            detectors: vec![
-                Box::new(StructuralBridgeDetector),
-                Box::new(TemporalLeadDetector),
-            ],
+            detectors: vec![Box::new(TemporalLeadDetector)],
             cfg: ValidationCfg {
                 fdr_q: 0.01,
                 ..ValidationCfg::default()
@@ -969,17 +1016,11 @@ impl InsightEngine {
         }
     }
 
-    /// The contradiction engine: structural-bridge + temporal + contradiction
-    /// detectors. Contradiction candidates come with stat signals that bypass
-    /// BH-FDR (p=0, surprise=1 — they're deterministic sentiment reversals),
-    /// so they surface when the validation floors are met.
+    /// The contradiction engine — **only** the contradiction detector, so
+    /// `score_contradiction` measures it cleanly.
     pub fn contradiction() -> Self {
         InsightEngine {
-            detectors: vec![
-                Box::new(StructuralBridgeDetector),
-                Box::new(TemporalLeadDetector),
-                Box::new(ContradictionDetector),
-            ],
+            detectors: vec![Box::new(ContradictionDetector)],
             cfg: ValidationCfg {
                 fdr_q: 0.01,
                 ..ValidationCfg::default()
@@ -1381,5 +1422,68 @@ mod tests {
         assert_eq!(n1.text, "replayed text");
         assert_eq!(n1.text, n2.text);
         assert_eq!(n1.citations, n2.citations);
+    }
+}
+
+#[cfg(test)]
+mod t2_t3_precision {
+    use super::*;
+    use skinki_corpus::{generate, Difficulty, GenConfig};
+    use skinki_eval::{score_contradiction, score_temporal};
+
+    fn corpus(seed: u64) -> Corpus {
+        generate(&GenConfig {
+            seed,
+            years: 5,
+            entries_per_day: 6,
+            difficulty: Difficulty::V2,
+        })
+    }
+
+    #[test]
+    fn temporal_meets_recall_without_false_insights() {
+        // T2 keystone: recover planted lead→trail patterns (recall >= 0.50) with
+        // the hard false-insight bar (< 0.05). The density-corrected binomial
+        // null + word-boundary matching are what keep ubiquitous-entity and
+        // rare-lead→common-trail coincidences out.
+        for seed in [42, 7] {
+            let c = corpus(seed);
+            let input = InsightInput::from_corpus(&c);
+            let out = InsightEngine::temporal().discover(&input);
+            let s = score_temporal(&out, &c.ground_truth.temporal);
+            assert!(
+                s.recall >= 0.50,
+                "seed {seed}: temporal recall {}",
+                s.recall
+            );
+            assert!(
+                s.false_insight_rate.is_some_and(|f| f < 0.05),
+                "seed {seed}: temporal false-insight {:?}",
+                s.false_insight_rate
+            );
+        }
+    }
+
+    #[test]
+    fn contradiction_meets_recall_without_false_insights() {
+        // T3 keystone: recover planted reversals (recall >= 0.80) at < 0.05
+        // false-insight. Name-anchored stance attribution (not "name + any cue")
+        // is what stops the replacement entity Y being flagged.
+        for seed in [42, 7] {
+            let c = corpus(seed);
+            let input = InsightInput::from_corpus(&c);
+            let out = InsightEngine::contradiction().discover(&input);
+            let s = score_contradiction(&out, &c.ground_truth.contradictions);
+            assert!(
+                s.recall >= 0.80,
+                "seed {seed}: contradiction recall {}",
+                s.recall
+            );
+            assert!(
+                s.false_insight_rate.is_some_and(|f| f < 0.05),
+                "seed {seed}: contradiction false-insight {:?}",
+                s.false_insight_rate
+            );
+        }
     }
 }
