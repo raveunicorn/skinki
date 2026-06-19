@@ -296,6 +296,7 @@ dependencies = [
  "skinki-eval",
  "skinki-graph",
  "skinki-store",
+ "skinki-vector",
 ]
 
 [[package]]

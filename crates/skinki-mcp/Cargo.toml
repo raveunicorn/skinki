@@ -17,3 +17,4 @@ skinki-corpus.workspace = true
 skinki-eval.workspace = true
 skinki-graph.workspace = true
 skinki-store.workspace = true
+skinki-vector.workspace = true

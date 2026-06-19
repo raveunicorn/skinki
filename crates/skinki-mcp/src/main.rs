@@ -12,7 +12,7 @@ use std::io::{self, BufRead, Write};
 
 use anyhow::{Context, Result};
 use skinki_corpus::{Corpus, CorpusMeta, Difficulty, Entry, EntryId, EntryKind};
-use skinki_mcp::{parse_line, Server};
+use skinki_mcp::{parse_line, RetrieverKind, Server};
 use skinki_store::Store;
 
 fn main() -> Result<()> {
@@ -38,7 +38,7 @@ fn main() -> Result<()> {
         "skinki-mcp: indexed {} entries; ready on stdio",
         corpus.entries.len()
     );
-    let server = Server::new(corpus);
+    let server = Server::new(corpus, args.retriever);
     run(&server, io::stdin().lock(), io::stdout().lock())
 }
 
@@ -82,6 +82,7 @@ fn chrono_fmt(ts: i64) -> String {
 struct CliArgs {
     corpus: Option<std::path::PathBuf>,
     store: Option<std::path::PathBuf>,
+    retriever: RetrieverKind,
 }
 
 /// Parse `--corpus <path>` or `--store <dir>` from argv.
@@ -89,6 +90,7 @@ fn parse_args() -> Result<CliArgs> {
     let mut args = std::env::args().skip(1);
     let mut corpus = None;
     let mut store = None;
+    let mut retriever = RetrieverKind::Graph;
     while let Some(arg) = args.next() {
         if arg == "--corpus" {
             corpus = Some(std::path::PathBuf::from(
@@ -102,12 +104,31 @@ fn parse_args() -> Result<CliArgs> {
             ));
         } else if let Some(path) = arg.strip_prefix("--store=") {
             store = Some(std::path::PathBuf::from(path));
+        } else if arg == "--retriever" {
+            let val = args
+                .next()
+                .context("--retriever requires {graph, semantic}")?;
+            retriever = match val.as_str() {
+                "graph" => RetrieverKind::Graph,
+                "semantic" => RetrieverKind::Semantic,
+                _ => anyhow::bail!("--retriever must be 'graph' or 'semantic', got '{val}'"),
+            };
+        } else if let Some(val) = arg.strip_prefix("--retriever=") {
+            retriever = match val {
+                "graph" => RetrieverKind::Graph,
+                "semantic" => RetrieverKind::Semantic,
+                _ => anyhow::bail!("--retriever must be 'graph' or 'semantic', got '{val}'"),
+            };
         }
     }
     if corpus.is_none() && store.is_none() {
-        anyhow::bail!("usage: skinki-mcp --corpus <path.json> OR --store <dir>");
+        anyhow::bail!("usage: skinki-mcp --corpus <path.json> OR --store <dir> [--retriever {{graph,semantic}}]");
     }
-    Ok(CliArgs { corpus, store })
+    Ok(CliArgs {
+        corpus,
+        store,
+        retriever,
+    })
 }
 
 /// The main stdio loop: read one line at a time, parse, dispatch, and write

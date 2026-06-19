@@ -23,8 +23,59 @@
 
 use serde_json::{json, Value};
 use skinki_corpus::Corpus;
+use skinki_corpus::EntryId;
 use skinki_eval::RetrievalSystem;
 use skinki_graph::{assemble_context, RelationRetriever};
+use skinki_vector::dot;
+use skinki_vector::embed::{Embedder, StaticHashEmbedder};
+
+/// A cosine-similarity (dot product) retriever over an embedder.
+/// Generic over [`Embedder`] — works with any deterministic embedding.
+struct SemanticRetriever<E: Embedder> {
+    embedder: E,
+    vectors: Vec<Vec<f32>>,
+    ids: Vec<EntryId>,
+}
+
+impl<E: Embedder> SemanticRetriever<E> {
+    fn new(embedder: E) -> Self {
+        SemanticRetriever {
+            embedder,
+            vectors: Vec::new(),
+            ids: Vec::new(),
+        }
+    }
+}
+
+impl<E: Embedder> RetrievalSystem for SemanticRetriever<E> {
+    fn name(&self) -> &str {
+        "semantic"
+    }
+    fn index(&mut self, corpus: &Corpus) {
+        self.vectors = corpus
+            .entries
+            .iter()
+            .map(|e| self.embedder.embed(&e.text))
+            .collect();
+        self.ids = corpus.entries.iter().map(|e| e.id).collect();
+    }
+    fn search(&self, query: &str, k: usize) -> Vec<EntryId> {
+        let qv = self.embedder.embed(query);
+        let mut scored: Vec<(f32, EntryId)> = self
+            .vectors
+            .iter()
+            .zip(&self.ids)
+            .map(|(v, &id)| (dot(&qv, v), id))
+            .collect();
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.1.cmp(&b.1))
+        });
+        scored.truncate(k);
+        scored.into_iter().map(|(_, id)| id).collect()
+    }
+}
 
 /// JSON-RPC error codes used by this server (standard JSON-RPC 2.0 codes).
 const PARSE_ERROR: i64 = -32700;
@@ -35,21 +86,31 @@ const INVALID_PARAMS: i64 = -32602;
 /// Protocol version this server speaks if the client doesn't specify one.
 const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
 
-/// The MCP server: an indexed corpus + the graph retriever over it.
-///
-/// Built once at startup (`new`) and held for the process lifetime; one
-/// thread, one stdio loop — no internal mutability needed beyond the index
-/// built during construction.
+/// The MCP server: an indexed corpus + the configured retriever.
 pub struct Server {
     corpus: Corpus,
-    retriever: RelationRetriever,
+    retriever: Box<dyn RetrievalSystem>,
+}
+
+pub enum RetrieverKind {
+    Graph,    // RelationRetriever (typed edges + BM25 fusion)
+    Semantic, // StaticHashEmbedder (hash-of-tokens, fast, deterministic)
 }
 
 impl Server {
-    /// Build the server: index `corpus` with [`RelationRetriever`].
-    pub fn new(corpus: Corpus) -> Self {
-        let mut retriever = RelationRetriever::new();
-        retriever.index(&corpus);
+    pub fn new(corpus: Corpus, kind: RetrieverKind) -> Self {
+        let retriever: Box<dyn RetrievalSystem> = match kind {
+            RetrieverKind::Graph => {
+                let mut r = RelationRetriever::new();
+                r.index(&corpus);
+                Box::new(r)
+            }
+            RetrieverKind::Semantic => {
+                let mut r = SemanticRetriever::new(StaticHashEmbedder::new(256));
+                r.index(&corpus);
+                Box::new(r)
+            }
+        };
         Server { corpus, retriever }
     }
 
@@ -146,7 +207,7 @@ impl Server {
             .ok_or_else(|| "missing required argument: query".to_string())?;
         let k = arguments.get("k").and_then(Value::as_u64).unwrap_or(10) as usize;
 
-        let ids = self.retriever.search(query, k);
+        let ids = self.retriever.as_ref().search(query, k);
         if ids.is_empty() {
             return Ok("No results.".to_string());
         }
@@ -173,7 +234,7 @@ impl Server {
             .and_then(Value::as_u64)
             .unwrap_or(512) as usize;
 
-        let package = assemble_context(&self.retriever, &self.corpus, query, token_budget);
+        let package = assemble_context(self.retriever.as_ref(), &self.corpus, query, token_budget);
 
         let mut out = format!("est_tokens: {}\n", package.est_tokens);
         for fact in &package.facts {
@@ -272,7 +333,7 @@ mod tests {
     }
 
     fn server() -> Server {
-        Server::new(tiny_corpus())
+        Server::new(tiny_corpus(), RetrieverKind::Graph)
     }
 
     #[test]
