@@ -14,7 +14,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use skinki_baseline::Bm25;
-use skinki_corpus::{generate, Corpus, Difficulty, EntryId, GenConfig};
+use skinki_corpus::{
+    generate, Corpus, CorpusMeta, Difficulty, Entry, EntryId, GenConfig, GroundTruth, RecallQuery,
+};
 use skinki_eval::{
     answer_in_entries, ndcg_at_k, precision_at_k, recall_at_k, score_insights, Latency, Report,
     RetrievalScores, RetrievalSystem,
@@ -320,6 +322,18 @@ enum Cmd {
         /// and `llm-facts+bm25` columns alongside BM25.
         #[arg(long)]
         graph_artifacts_dir: Option<PathBuf>,
+        /// Pooled mode: concatenate all instances into ONE corpus (like locomo).
+        /// All retrievers search the same space. Supports --embeddings-file /
+        /// --query-embeddings-file for semantic-real (the SOTA baseline).
+        /// Without this flag, eval is per-instance (official benchmark mode).
+        #[arg(long, default_value_t = false)]
+        pooled: bool,
+        /// Optional precomputed entry embeddings (pooled mode only).
+        #[arg(long)]
+        embeddings_file: Option<PathBuf>,
+        /// Optional precomputed query embeddings (pooled mode only).
+        #[arg(long)]
+        query_embeddings_file: Option<PathBuf>,
     },
 }
 
@@ -809,10 +823,25 @@ fn main() -> Result<()> {
             limit,
             dump_texts,
             graph_artifacts_dir,
+            pooled,
+            embeddings_file,
+            query_embeddings_file,
         } => {
             let instances = load_longmemeval(&path, question_type.as_deref(), limit)?;
             if let Some(dir) = dump_texts {
-                dump_longmemeval_texts(&instances, &dir)?;
+                if pooled {
+                    dump_pooled_texts(&instances, &dir)?;
+                } else {
+                    dump_longmemeval_texts(&instances, &dir)?;
+                }
+            } else if pooled {
+                run_longmemeval_pooled_eval(
+                    &instances,
+                    k,
+                    graph_artifacts_dir.as_deref(),
+                    embeddings_file.as_deref(),
+                    query_embeddings_file.as_deref(),
+                )?;
             } else {
                 run_longmemeval_eval(&instances, k, graph_artifacts_dir.as_deref())?;
             }
@@ -2695,8 +2724,253 @@ fn run_locomo_eval(
 }
 
 // ---------------------------------------------------------------------------
-// longmemeval-eval — per-instance measurement on LongMemEval
+// longmemeval-eval --pooled — one big corpus, all retrievers on equal footing
 // ---------------------------------------------------------------------------
+//
+// Per-instance eval is the official LongMemEval benchmark mode (each question
+// against its own haystack). Pooled mode concatenates EVERYTHING into one
+// corpus — a harder, more realistic search space where a query from instance
+// A can surface turns from instance B (distractors). This is the regime where
+// semantic-real (EmbeddingGemma) and the graph MUST be scored against the
+// SAME search space as BM25 — the apples-to-apples comparison.
+//
+// Also dumps flat entries.json / queries.json when --dump-texts is used in
+// pooled mode (the input to tools/export-embeddings-gemma.py).
+
+/// Build a pooled corpus from all scoreable instances: every turn across all
+/// instances becomes one [`Entry`] with a global [`EntryId`]; every query
+/// becomes a [`RecallQuery`] with `relevant_entries` translated to global ids.
+/// (safe_id, local_entry_start_global, local_turn_count) for each scored query.
+type QueryInstanceMap = Vec<(String, usize, usize)>;
+
+/// Returns (corpus, query_to_instance) where query_to_instance[qi] maps each
+/// query to its instance metadata for per-instance graph artifact loading.
+fn build_pooled_corpus(instances: &[LongMemEvalInstance]) -> Option<(Corpus, QueryInstanceMap)> {
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut queries: Vec<RecallQuery> = Vec::new();
+    let mut query_to_instance: Vec<(String, usize, usize)> = Vec::new();
+    // (safe_id, local_entry_start_global, local_turn_count)
+
+    for inst in instances {
+        let inst_corpus = inst.to_corpus();
+        let q = match inst_corpus.ground_truth.recall.first() {
+            Some(q) if !q.relevant_entries.is_empty() => q,
+            _ => continue,
+        };
+        let entry_start = entries.len();
+        let turn_count = inst_corpus.entries.len();
+        let safe = safe_instance_id(&inst.question_id);
+        query_to_instance.push((safe, entry_start, turn_count));
+
+        for e in inst_corpus.entries {
+            entries.push(Entry {
+                id: entries.len() as EntryId,
+                day: e.day,
+                date: e.date,
+                kind: e.kind,
+                text: e.text,
+            });
+        }
+
+        let global_relevant: Vec<EntryId> = q
+            .relevant_entries
+            .iter()
+            .map(|&local_id| entry_start as EntryId + local_id)
+            .collect();
+        queries.push(RecallQuery {
+            id: queries.len(),
+            question: q.question.clone(),
+            answer: q.answer.clone(),
+            relevant_entries: global_relevant,
+        });
+    }
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    let num_entries = entries.len();
+    Some((
+        Corpus {
+            meta: CorpusMeta {
+                seed: 0,
+                years: 0,
+                num_entries,
+                difficulty: Difficulty::V2,
+            },
+            entries,
+            ground_truth: GroundTruth {
+                recall: queries,
+                ..Default::default()
+            },
+        },
+        query_to_instance,
+    ))
+}
+
+fn run_longmemeval_pooled_eval(
+    instances: &[LongMemEvalInstance],
+    k: usize,
+    graph_artifacts_dir: Option<&std::path::Path>,
+    embeddings_file: Option<&std::path::Path>,
+    query_embeddings_file: Option<&std::path::Path>,
+) -> Result<()> {
+    let Some((corpus, query_to_instance)) = build_pooled_corpus(instances) else {
+        println!("\nNo scoreable instances (all had empty evidence).");
+        return Ok(());
+    };
+
+    println!("\n=== skinki — longmemeval-eval (LongMemEval POOLED, one corpus) ===");
+    println!(
+        "corpus: {} entries, {} queries, k={k}",
+        corpus.entries.len(),
+        corpus.ground_truth.recall.len(),
+    );
+
+    // Collect (column name, scores).
+    let mut cols: Vec<(String, RetrievalScores)> = Vec::new();
+
+    // BM25 (always).
+    let mut bm25 = Bm25::new();
+    bm25.index(&corpus);
+    cols.push(("bm25".into(), locomo_score(&bm25, &corpus, k)));
+
+    // Semantic-static (hash-of-tokens).
+    let mut semantic = SemanticRetriever::new(StaticHashEmbedder::new(256), "semantic-static");
+    semantic.index(&corpus);
+    cols.push((
+        "semantic-static".into(),
+        locomo_score(&semantic, &corpus, k),
+    ));
+
+    // Semantic-real (EmbeddingGemma — the SOTA baseline).
+    match (embeddings_file, query_embeddings_file) {
+        (Some(epath), Some(qpath)) => {
+            let entry_vec_len = std::fs::metadata(epath)
+                .map(|m| m.len() as usize)
+                .unwrap_or(0)
+                / std::mem::size_of::<f32>();
+            let n_entries = corpus.entries.len();
+            let dim = entry_vec_len.checked_div(n_entries).unwrap_or(64);
+            anyhow::ensure!(
+                entry_vec_len == dim * n_entries,
+                "embeddings file size mismatch: {entry_vec_len} floats, expected {dim} * {n_entries} = {}",
+                dim * n_entries
+            );
+            let entry_vecs = read_embeddings_file(epath, dim, n_entries)?;
+            let n_queries = corpus.ground_truth.recall.len();
+            let query_vecs = read_embeddings_file(qpath, dim, n_queries)?;
+            cols.push((
+                "semantic-real".into(),
+                locomo_score_precomputed(&entry_vecs, &query_vecs, &corpus, k),
+            ));
+        }
+        (Some(_), None) => anyhow::bail!("--embeddings-file requires --query-embeddings-file too"),
+        (None, Some(_)) => anyhow::bail!("--query-embeddings-file requires --embeddings-file too"),
+        (None, None) => {}
+    }
+
+    // Graph columns (per-instance artifacts, scored on pooled corpus).
+    if let Some(dir) = graph_artifacts_dir {
+        // Co-mention: pool all artifact logs into one big artifact log then index.
+        // The artifact log entries use PER-INSTANCE entry indices, but the pooled
+        // corpus uses global indices. We build graph retrievers per-instance and
+        // aggregate scores — graph results are intrinsically per-instance.
+        //
+        // For pooled measurement: for each instance, build the graph retriever
+        // from that instance's log, index the pooled corpus, score just that
+        // instance's query, and aggregate. This is approximate (the graph sees
+        // every turn as a candidate, including turns from other instances) but
+        // matches the pooled BM25/semantic search space.
+        let mut coment_scores = (0usize, 0.0, 0.0, 0.0); // count, recall, answer, ndcg
+        let mut facts_scores = (0usize, 0.0, 0.0, 0.0);
+
+        for (qi, recall_q) in corpus.ground_truth.recall.iter().enumerate() {
+            let (safe, _entry_start, _turn_count) = &query_to_instance[qi];
+            let log_path = dir.join(safe).join("graph.artifacts.jsonl");
+
+            if let Ok(mut gr) = llm_graph::LlmGraphRetriever::from_artifacts(&log_path, true) {
+                gr.index(&corpus);
+                let retrieved = gr.search(&recall_q.question, k);
+                let r = recall_at_k(&retrieved, &recall_q.relevant_entries, k);
+                let n = ndcg_at_k(&retrieved, &recall_q.relevant_entries, k);
+                let a = if answer_in_entries(&corpus, &retrieved, &recall_q.answer) {
+                    1.0
+                } else {
+                    0.0
+                };
+                coment_scores.0 += 1;
+                coment_scores.1 += r;
+                coment_scores.2 += a;
+                coment_scores.3 += n;
+            }
+
+            if let Ok(mut gr) = llm_graph::FactsGraphRetriever::from_artifacts(&log_path, true) {
+                gr.index(&corpus);
+                let retrieved = gr.search(&recall_q.question, k);
+                let r = recall_at_k(&retrieved, &recall_q.relevant_entries, k);
+                let n = ndcg_at_k(&retrieved, &recall_q.relevant_entries, k);
+                let a = if answer_in_entries(&corpus, &retrieved, &recall_q.answer) {
+                    1.0
+                } else {
+                    0.0
+                };
+                facts_scores.0 += 1;
+                facts_scores.1 += r;
+                facts_scores.2 += a;
+                facts_scores.3 += n;
+            }
+        }
+
+        let avg = |(c, r, a, n): (usize, f64, f64, f64)| -> RetrievalScores {
+            let c = c.max(1) as f64;
+            RetrievalScores {
+                queries: corpus.ground_truth.recall.len(),
+                k,
+                recall_at_k: r / c,
+                precision_at_k: 0.0,
+                ndcg_at_k: n / c,
+                answer_in_topk: a / c,
+            }
+        };
+        if coment_scores.0 > 0 {
+            cols.push(("llm-graph+bm25".into(), avg(coment_scores)));
+        }
+        if facts_scores.0 > 0 {
+            cols.push(("llm-facts+bm25".into(), avg(facts_scores)));
+        }
+    }
+
+    // Print table.
+    let w = 16usize;
+    let metrics = ["recall@k", "answer@k", "ndcg@k"];
+    for m in &metrics {
+        print!("\n{:<10}", m);
+        for (name, _) in &cols {
+            print!(" {name:>w$}");
+        }
+        println!();
+        for (_, s) in &cols {
+            let v = match *m {
+                "recall@k" => s.recall_at_k,
+                "answer@k" => s.answer_in_topk,
+                "ndcg@k" => s.ndcg_at_k,
+                _ => 0.0,
+            };
+            print!(" {:>w$.3}", v);
+        }
+        println!();
+    }
+
+    println!(
+        "\nNote: POOLED mode — all instances share one search space (harder, more realistic)."
+    );
+    println!(
+        "Semantic-real needs --embeddings-file (dump with --dump-texts + embed via tools/export-embeddings-gemma.py)."
+    );
+
+    Ok(())
+}
 //
 // The instrument to answer two questions:
 //  1. Does BM25 leave a real multi-hop gap on LongMemEval? (The `multi-session`
@@ -2739,12 +3013,11 @@ fn dump_longmemeval_texts(instances: &[LongMemEvalInstance], dir: &std::path::Pa
     let mut dumped = 0usize;
     for inst in instances {
         let corpus = inst.to_corpus();
-        // Skip instances with no evidence — nothing to extract or score.
         let q = match corpus.ground_truth.recall.first() {
             Some(q) if !q.relevant_entries.is_empty() => q,
             _ => continue,
         };
-        let _ = q; // evidence presence is the gate; entries are dumped regardless
+        let _ = q;
 
         let safe = safe_instance_id(&inst.question_id);
         let inst_dir = dir.join(&safe);
@@ -2774,6 +3047,38 @@ fn dump_longmemeval_texts(instances: &[LongMemEvalInstance], dir: &std::path::Pa
         dir.display(),
         dir.display(),
         dir.display()
+    );
+    Ok(())
+}
+
+/// Dump flat entries.json + queries.json for pooled embedding export.
+/// The order matches `build_pooled_corpus` — embedding rows line up with
+/// corpus entries/queries byte-for-byte on reload.
+fn dump_pooled_texts(instances: &[LongMemEvalInstance], dir: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+
+    let Some((corpus, _)) = build_pooled_corpus(instances) else {
+        anyhow::bail!("no scoreable instances with evidence");
+    };
+
+    let entries: Vec<&str> = corpus.entries.iter().map(|e| e.text.as_str()).collect();
+    let queries: Vec<&str> = corpus
+        .ground_truth
+        .recall
+        .iter()
+        .map(|q| q.question.as_str())
+        .collect();
+
+    let ep = dir.join("entries.json");
+    let qp = dir.join("queries.json");
+    std::fs::write(&ep, serde_json::to_vec(&entries)?)?;
+    std::fs::write(&qp, serde_json::to_vec(&queries)?)?;
+    println!(
+        "dumped {} entry texts -> {}\ndumped {} query texts -> {}\n\nNext: embed with tools/export-embeddings-gemma.py, then re-run with --pooled --embeddings-file <dir>/entries.f32 --query-embeddings-file <dir>/queries.f32",
+        entries.len(),
+        ep.display(),
+        queries.len(),
+        qp.display()
     );
     Ok(())
 }
@@ -2880,7 +3185,7 @@ fn run_longmemeval_eval(
         // Graph retrievers (optional): load this instance's artifact log.
         if let Some(dir) = graph_artifacts_dir {
             let safe = safe_instance_id(&inst.question_id);
-            let log_path = dir.join(&safe).join("graph.artifacts.jsonl");
+            let log_path = dir.join(safe).join("graph.artifacts.jsonl");
             if !log_path.exists() {
                 continue; // not extracted yet — skip graph scoring for this instance
             }
