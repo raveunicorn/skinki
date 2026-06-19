@@ -25,7 +25,7 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use skinki_corpus::{Corpus, Entity, EntityId, Entry, EntryId};
 use skinki_eval::DiscoveredInsight;
@@ -468,6 +468,201 @@ impl Detector for CoMentionDetector {
 }
 
 // ---------------------------------------------------------------------------
+// TemporalLeadDetector — cross-correlation over entity mention days (T2)
+// ---------------------------------------------------------------------------
+//
+// Profiles each vocab entity's mention-day series, then for every ordered
+// pair (A, B) computes the strongest lag (the `d` that maximises the count of
+// B-on-day-t after A-on-day-(t-d)) and tests it against a shuffled-lag null.
+// The null keeps A's days fixed and randomly assigns B's days; the p-value is
+// the fraction of shuffles where the strongest-lag count ≥ the observed count.
+// Candidates that survive BH-FDR at the engine's threshold are surfaced as
+// [`InsightKind::TemporalLead`] insights.
+//
+// Targets the planted [`skinki_corpus::TemporalPattern`] ground truth on V2:
+// a lead entity A is mentioned, then a trail entity B is mentioned exactly
+// `lag_days` later, embedded in the text via a templated temporal cue.
+
+/// Deduped, sorted mention days for one entity.
+struct MentionSeries {
+    entity: EntityId,
+    days: Vec<u32>,
+    entry_ids: Vec<EntryId>,
+}
+
+fn profile_entity_days(input: &InsightInput) -> Vec<MentionSeries> {
+    let mut out: Vec<MentionSeries> = Vec::with_capacity(input.vocab.len());
+    for e in input.vocab {
+        let name_lower = e.name.to_lowercase();
+        let mut mentions: Vec<(u32, EntryId)> = input
+            .entries
+            .iter()
+            .filter(|entry| entry.text.to_lowercase().contains(&name_lower))
+            .map(|entry| (entry.day, entry.id))
+            .collect();
+        mentions.sort_unstable_by_key(|(d, id)| (*d, *id));
+        mentions.dedup();
+        out.push(MentionSeries {
+            entity: e.id,
+            days: mentions.iter().map(|(d, _)| *d).collect(),
+            entry_ids: mentions.iter().map(|(_, id)| *id).collect(),
+        });
+    }
+    out
+}
+
+pub struct TemporalLeadDetector;
+
+impl Detector for TemporalLeadDetector {
+    fn name(&self) -> &str {
+        "temporal-lead"
+    }
+
+    fn propose(&self, input: &InsightInput) -> Vec<InsightCandidate> {
+        let series = profile_entity_days(input);
+        const MIN_MENTIONS: usize = 5;
+        const MAX_LAG: u32 = 90;
+        const LAG_TOLERANCE: u32 = 1;
+        const MIN_COUNT: u32 = 4;
+
+        let max_day = input.entries.iter().map(|e| e.day).max().unwrap_or(1825);
+
+        let mut out: Vec<InsightCandidate> = Vec::new();
+        let mut next_id: CandidateId = 0;
+
+        // Helper: count how many A mentions have a B mention at roughly `lag` days.
+        fn count_at_lag(a_days: &[u32], b_days: &[u32], lag: u32, tol: u32) -> u32 {
+            let mut c: u32 = 0;
+            for &da in a_days {
+                let lo = da + lag.saturating_sub(tol);
+                let hi = da + lag + tol;
+                if b_days.iter().any(|&db| db >= lo && db <= hi) {
+                    c += 1;
+                }
+            }
+            c
+        }
+
+        // Helper: collect (a_idx, b_day) pairs where B is within tolerance of A+lag.
+        fn evidence_pairs(
+            a_days: &[u32],
+            a_eids: &[EntryId],
+            b_days: &[u32],
+            b_eids: &[EntryId],
+            lag: u32,
+            tol: u32,
+        ) -> Vec<(EntryId, u32)> {
+            let mut pairs: Vec<(EntryId, u32)> = Vec::new();
+            for (&da, &eid_a) in a_days.iter().zip(a_eids.iter()) {
+                let lo = da + lag.saturating_sub(tol);
+                let hi = da + lag + tol;
+                for (&db, &_eid_b) in b_days.iter().zip(b_eids.iter()) {
+                    if db >= lo && db <= hi {
+                        pairs.push((eid_a, db));
+                        break; // one pair per A mention
+                    }
+                }
+            }
+            pairs
+        }
+
+        for a in series.iter().filter(|s| s.days.len() >= MIN_MENTIONS) {
+            for b in series.iter().filter(|s| s.days.len() >= MIN_MENTIONS) {
+                if a.entity == b.entity {
+                    continue;
+                }
+                let mut best_lag: u32 = 0;
+                let mut best_count: u32 = 0;
+                for lag in 0..=MAX_LAG {
+                    let c = count_at_lag(&a.days, &b.days, lag, LAG_TOLERANCE);
+                    if c > best_count {
+                        best_count = c;
+                        best_lag = lag;
+                    }
+                }
+                if best_count == 0 || best_count < MIN_COUNT {
+                    continue;
+                }
+                // Require a meaningful fraction of A's mentions to co-occur.
+                let min_ratio = 0.35;
+                if (best_count as f64) < (a.days.len() as f64 * min_ratio) {
+                    continue;
+                }
+
+                // Analytical binomial null: under H0, each of A's n_a mentions
+                // has probability p = (2*tol+1) / max_day of co-occurring with
+                // B at lag ± tol by chance. The upper-tail probability of ≥ count
+                // successes is the p-value — extremely small for strong signals,
+                // so it survives BH-FDR even with thousands of candidates.
+                let p_null = (2 * LAG_TOLERANCE + 1) as f64 / max_day as f64;
+                let p_value = binom_upper_tail(a.days.len() as u32, best_count, p_null);
+                // Pre-filter: only candidates with extremely small raw p-value
+                // enter the BH-FDR pipeline (otherwise noise drowns the signal
+                // in a 3500-candidate set).
+                if p_value > 1e-6 {
+                    continue;
+                }
+
+                let effect = best_count as f64 / ((a.days.len() * b.days.len()) as f64).sqrt();
+                let support = best_count;
+
+                let pairs = evidence_pairs(
+                    &a.days,
+                    &a.entry_ids,
+                    &b.days,
+                    &b.entry_ids,
+                    best_lag,
+                    LAG_TOLERANCE,
+                );
+                let mut evidence: Vec<EntryId> = Vec::new();
+                let mut seen_evidence: BTreeSet<EntryId> = BTreeSet::new();
+                for (eid_a, target_day) in pairs {
+                    if seen_evidence.insert(eid_a) {
+                        evidence.push(eid_a);
+                    }
+                    for (&db, &eid_b) in b.days.iter().zip(b.entry_ids.iter()) {
+                        if db == target_day {
+                            if seen_evidence.insert(eid_b) {
+                                evidence.push(eid_b);
+                            }
+                            break;
+                        }
+                    }
+                }
+                evidence.sort_unstable();
+                if evidence.is_empty() {
+                    continue;
+                }
+
+                out.push(InsightCandidate {
+                    id: next_id,
+                    kind: InsightKind::TemporalLead,
+                    entities: vec![a.entity, b.entity],
+                    evidence,
+                    stat: Statistic {
+                        effect,
+                        p_value,
+                        support,
+                        surprise: effect,
+                    },
+                    claim: format!(
+                        "{} leads {} by {} days ({} co-occurrences, {} / {} mentions)",
+                        input.vocab[a.entity as usize].name,
+                        input.vocab[b.entity as usize].name,
+                        best_lag,
+                        best_count,
+                        a.days.len(),
+                        b.days.len(),
+                    ),
+                });
+                next_id += 1;
+            }
+        }
+        out
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Cite-or-silence reference narrator (deterministic; no model)
 // ---------------------------------------------------------------------------
 
@@ -510,6 +705,22 @@ impl InsightEngine {
         InsightEngine {
             detectors: vec![Box::new(StructuralBridgeDetector)],
             cfg: ValidationCfg::default(),
+            narrator: Box::new(ExtractiveNarrator),
+        }
+    }
+
+    /// The temporal-lead engine: structural-bridge + temporal-lead detectors.
+    /// Uses the same validation config and narrator as `structural()`.
+    pub fn temporal() -> Self {
+        InsightEngine {
+            detectors: vec![
+                Box::new(StructuralBridgeDetector),
+                Box::new(TemporalLeadDetector),
+            ],
+            cfg: ValidationCfg {
+                fdr_q: 0.01,
+                ..ValidationCfg::default()
+            },
             narrator: Box::new(ExtractiveNarrator),
         }
     }

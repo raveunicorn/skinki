@@ -987,6 +987,12 @@ fn run_insight_eval(
         row("reference (validated)", &r);
         row("naive (contrast)", &n);
 
+        // Temporal-lead detector (T2, informational — not yet in the asserted gate).
+        let temporal = InsightEngine::temporal();
+        let t_out = temporal.discover(&input);
+        let t = skinki_eval::score_temporal(&t_out, &corpus.ground_truth.temporal);
+        row("temporal (T2)", &t);
+
         // Stage-5 keystone budgets (specs/STAGE_5.md §2), asserted on both seeds.
         const MIN_RECALL: f64 = 0.50;
         const MIN_PRECISION: f64 = 0.70;
