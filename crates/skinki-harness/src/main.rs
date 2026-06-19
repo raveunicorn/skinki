@@ -2968,6 +2968,7 @@ type QueryInstanceMap = Vec<(String, usize, usize)>;
 
 /// Returns (corpus, query_to_instance) where query_to_instance[qi] maps each
 /// query to its instance metadata for per-instance graph artifact loading.
+// ---------------------------------------------------------------------------
 fn build_pooled_corpus(instances: &[LongMemEvalInstance]) -> Option<(Corpus, QueryInstanceMap)> {
     let mut entries: Vec<Entry> = Vec::new();
     let mut queries: Vec<RecallQuery> = Vec::new();
@@ -3086,6 +3087,88 @@ fn run_longmemeval_pooled_eval(
             cols.push((
                 "semantic-real".into(),
                 locomo_score_precomputed(&entry_vecs, &query_vecs, &corpus, k),
+            ));
+
+            // Stage 3B T2: coarse-to-fine retrieval.
+            // Group turns by instance, build one coarse embedding per instance
+            // (average of turn embeddings), then fine-search within top-k instances.
+            // Build instance-level coarse embeddings.
+            let n_instances = query_to_instance.len();
+            let mut coarse_vecs: Vec<Vec<f32>> = Vec::with_capacity(n_instances);
+            let mut inst_turn_ranges: Vec<(usize, usize)> = Vec::with_capacity(n_instances);
+            for (_safe, start, count) in query_to_instance.iter() {
+                let start = *start;
+                let end = start + count;
+                let dim = entry_vecs[0].len();
+                let mut avg = vec![0.0f32; dim];
+                let mut n = 0usize;
+                for i in start..end {
+                    if i < entry_vecs.len() {
+                        for (j, &v) in entry_vecs[i].iter().enumerate() {
+                            avg[j] += v;
+                        }
+                        n += 1;
+                    }
+                }
+                if n > 0 {
+                    for v in &mut avg {
+                        *v /= n as f32;
+                    }
+                }
+                coarse_vecs.push(avg);
+                inst_turn_ranges.push((start, end));
+            }
+
+            // Coarse-to-fine scoring.
+            let coarse_k = 3usize; // top-5 instances for fine search
+            let mut c2f_recall = 0.0f64;
+            let mut c2f_answer = 0.0f64;
+            let mut c2f_ndcg = 0.0f64;
+            for (qi, q) in corpus.ground_truth.recall.iter().enumerate() {
+                let qv = &query_vecs[qi];
+                // Coarse: score each instance.
+                let mut inst_scores: Vec<(f32, usize)> = coarse_vecs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, cv)| (dot(qv, cv), i))
+                    .collect();
+                inst_scores
+                    .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                inst_scores.truncate(coarse_k);
+                // Fine: score turns only within the top coarse instances.
+                let mut fine: Vec<(f32, EntryId)> = Vec::new();
+                for (_score, inst_idx) in &inst_scores {
+                    let (start, end) = inst_turn_ranges[*inst_idx];
+                    #[allow(clippy::needless_range_loop)]
+                    for i in start..end.min(entry_vecs.len()) {
+                        fine.push((dot(qv, &entry_vecs[i]), i as EntryId));
+                    }
+                }
+                fine.sort_by(|a, b| {
+                    b.0.partial_cmp(&a.0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(a.1.cmp(&b.1))
+                });
+                let retrieved: Vec<EntryId> = fine.into_iter().take(k).map(|(_, id)| id).collect();
+                c2f_recall += recall_at_k(&retrieved, &q.relevant_entries, k);
+                c2f_answer += if answer_in_entries(&corpus, &retrieved, &q.answer) {
+                    1.0
+                } else {
+                    0.0
+                };
+                c2f_ndcg += ndcg_at_k(&retrieved, &q.relevant_entries, k);
+            }
+            let nq = corpus.ground_truth.recall.len().max(1) as f64;
+            cols.push((
+                "coarse2fine(3)".into(),
+                RetrievalScores {
+                    queries: corpus.ground_truth.recall.len(),
+                    k,
+                    recall_at_k: c2f_recall / nq,
+                    precision_at_k: 0.0,
+                    ndcg_at_k: c2f_ndcg / nq,
+                    answer_in_topk: c2f_answer / nq,
+                },
             ));
         }
         (Some(_), None) => anyhow::bail!("--embeddings-file requires --query-embeddings-file too"),
