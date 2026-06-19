@@ -265,6 +265,12 @@ enum Cmd {
         seed_holdout: u64,
         #[arg(long, default_value_t = false)]
         assert_gate: bool,
+        /// DEV-ONLY: produce the LLM narration fixture log from a structural-
+        /// bridge run on seed 42 and write it to this directory
+        /// (fixtures/insight_narration.artifacts.jsonl). Checked in and
+        /// replayed by the gate. Exits without scoring.
+        #[arg(long)]
+        produce_fixtures: Option<PathBuf>,
     },
     /// DEV-ONLY: score retrievers on the LoCoMo10 real-conversation benchmark
     /// (real multi-session dialogue + memory QA — not the synthetic corpus).
@@ -816,8 +822,13 @@ fn main() -> Result<()> {
             entries_per_day,
             seed_holdout,
             assert_gate,
+            produce_fixtures,
         } => {
-            run_insight_eval(seed, seed_holdout, years, entries_per_day, assert_gate)?;
+            if let Some(dir) = produce_fixtures {
+                produce_narration_fixtures(seed, years, entries_per_day, &dir)?;
+            } else {
+                run_insight_eval(seed, seed_holdout, years, entries_per_day, assert_gate)?;
+            }
         }
         Cmd::LocomoEval {
             path,
@@ -915,6 +926,39 @@ fn person_names_in(text: &str, corpus: &Corpus) -> std::collections::BTreeSet<St
 // ---------------------------------------------------------------------------
 // Stage 5 — insight-eval: the Insight Engine infrastructure gate
 // ---------------------------------------------------------------------------
+
+/// DEV-ONLY: generate the narration artifact-log fixture. Runs the structural
+/// engine in produce mode on seed 42, writes the log, and exits. The output
+/// log is checked into git and replayed by the gate (never inferred in CI).
+fn produce_narration_fixtures(
+    seed: u64,
+    years: u32,
+    entries_per_day: u32,
+    dir: &std::path::Path,
+) -> Result<()> {
+    use skinki_insight::{InsightEngine, InsightInput};
+    std::fs::create_dir_all(dir)?;
+
+    let corpus = generate(&GenConfig {
+        seed,
+        years,
+        entries_per_day,
+        difficulty: Difficulty::V2,
+    });
+    let input = InsightInput::from_corpus(&corpus);
+
+    let log_path = dir.join("insight_narration.artifacts.jsonl");
+    let _ = std::fs::remove_file(&log_path);
+
+    let engine = InsightEngine::structural_produce(&log_path);
+    let discovered = engine.discover(&input);
+    println!(
+        "wrote {} narration records -> {}",
+        discovered.len(),
+        log_path.display()
+    );
+    Ok(())
+}
 
 /// Score the statistically-validated reference engine against the naive
 /// co-mention baseline on the planted insight / apophenia ground truth, on two

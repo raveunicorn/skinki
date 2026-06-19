@@ -790,6 +790,144 @@ impl Narrator for ExtractiveNarrator {
 }
 
 // ---------------------------------------------------------------------------
+// LLM-narration artifact log — the T4 replay contract
+// ---------------------------------------------------------------------------
+//
+// Every LLM-narrated insight is recorded to an append-only JSON-lines log
+// before being returned, so the narration is **replayable** (AGENTS rule 3):
+// the live model (`produce`) is not bit-reproducible, but `rebuild(log)` is
+// fully deterministic. The gate replays a checked-in fixture log — never
+// infers.
+//
+// The produce side uses the [`ExtractiveNarrator`] as a deterministic LLM
+// stand-in (the real model plugs in at Stage 6/7 behind the same trait). The
+// replay side loads the log and returns the recorded narration byte-identically.
+
+/// One record in the narration artifact log.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct NarrationRecord {
+    pub candidate_id: CandidateId,
+    pub text: String,
+    pub citations: Vec<EntryId>,
+    pub model: String,
+    pub v: u64,
+}
+
+/// Thin namespace for narration artifact-log operations.
+pub struct NarrationLog;
+
+impl NarrationLog {
+    /// Append one record as a JSON line to `path` (create-or-append).
+    pub fn append(path: &std::path::Path, rec: &NarrationRecord) -> std::io::Result<()> {
+        use std::io::Write;
+        let line = serde_json::to_string(rec).map_err(std::io::Error::other)?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        f.write_all(line.as_bytes())?;
+        f.write_all(b"\n")?;
+        Ok(())
+    }
+
+    /// Replay all records from a JSON-lines file. Deterministic: records
+    /// appear in file order, and the returned map preserves insertion order.
+    pub fn replay(path: &std::path::Path) -> std::io::Result<Vec<NarrationRecord>> {
+        let text = std::fs::read_to_string(path)?;
+        let mut out = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let rec: NarrationRecord = serde_json::from_str(line).map_err(std::io::Error::other)?;
+            out.push(rec);
+        }
+        Ok(out)
+    }
+}
+
+/// An LLM narrator that records to / replays from an artifact log.
+///
+/// In **produce** mode (`Self::produce(log_path)`), every narration is
+/// appended to the log as a [`NarrationRecord`]. The narration itself comes
+/// from the inner narrator (the extractive narrator as an LLM stand-in; a
+/// real model at Stage 6/7).
+///
+/// In **replay** mode (`Self::replay(log_path)`), the log is loaded into a
+/// lookup table; [`Narrator::narrate`] returns the pre-recorded narration,
+/// making the gate's `rebuild(log)` byte-deterministic.
+pub struct LlmNarrator {
+    mode: LlmMode,
+    model_name: String,
+    version: u64,
+}
+
+enum LlmMode {
+    /// Append narrations to this log file.
+    Produce(std::path::PathBuf),
+    /// Look up narrations from this pre-loaded map: candidate_id → record.
+    Replay(Vec<NarrationRecord>),
+}
+
+impl LlmNarrator {
+    /// Produce: narrate candidates via `inner` and append to `log_path`.
+    /// The inner narrator provides the actual text; the log is the replay
+    /// contract.
+    pub fn produce(log_path: &std::path::Path) -> Self {
+        LlmNarrator {
+            mode: LlmMode::Produce(log_path.to_path_buf()),
+            model_name: "extractive-standin".into(),
+            version: 1,
+        }
+    }
+
+    /// Replay: load the log and return pre-recorded narrations.
+    /// Deterministic — same log → same output every call.
+    pub fn replay(log_path: &std::path::Path) -> std::io::Result<Self> {
+        let records = NarrationLog::replay(log_path)?;
+        Ok(LlmNarrator {
+            mode: LlmMode::Replay(records),
+            model_name: "replay".into(),
+            version: 1,
+        })
+    }
+}
+
+impl Narrator for LlmNarrator {
+    fn narrate(&self, c: &InsightCandidate, input: &InsightInput) -> Option<NarratedInsight> {
+        match &self.mode {
+            LlmMode::Replay(records) => {
+                let rec = records.iter().find(|r| r.candidate_id == c.id)?;
+                let citations: Vec<EntryId> = rec.citations.clone();
+                if citations.is_empty() || !citations.iter().all(|e| c.evidence.contains(e)) {
+                    return None;
+                }
+                Some(NarratedInsight {
+                    text: rec.text.clone(),
+                    citations,
+                })
+            }
+            LlmMode::Produce(log_path) => {
+                // Use the extractive narrator as the LLM stand-in.
+                let inner = ExtractiveNarrator;
+                let ni = inner.narrate(c, input)?;
+                let rec = NarrationRecord {
+                    candidate_id: c.id,
+                    text: ni.text.clone(),
+                    citations: ni.citations.clone(),
+                    model: self.model_name.clone(),
+                    v: self.version,
+                };
+                // Best-effort append; a failed write is not a narration failure.
+                let _ = NarrationLog::append(log_path, &rec);
+                Some(ni)
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The engine
 // ---------------------------------------------------------------------------
 
@@ -867,6 +1005,35 @@ impl InsightEngine {
             detectors,
             cfg,
             narrator,
+        }
+    }
+
+    /// Produce: run the structural engine, recording narrations to `log_path`.
+    /// Uses [`LlmNarrator::produce`] so every narrated insight is persisted
+    /// for replay. The narration text comes from the extractive narrator (LLM
+    /// stand-in; a real model goes here at Stage 6/7).
+    pub fn structural_produce(log_path: &std::path::Path) -> Self {
+        InsightEngine {
+            detectors: vec![Box::new(StructuralBridgeDetector)],
+            cfg: ValidationCfg::default(),
+            narrator: Box::new(LlmNarrator::produce(log_path)),
+        }
+    }
+
+    /// Produce: full engine (structural + temporal + contradiction) recording
+    /// narrations to `log_path`.
+    pub fn full_produce(log_path: &std::path::Path) -> Self {
+        InsightEngine {
+            detectors: vec![
+                Box::new(StructuralBridgeDetector),
+                Box::new(TemporalLeadDetector),
+                Box::new(ContradictionDetector),
+            ],
+            cfg: ValidationCfg {
+                fdr_q: 0.01,
+                ..ValidationCfg::default()
+            },
+            narrator: Box::new(LlmNarrator::produce(log_path)),
         }
     }
 
@@ -1040,5 +1207,64 @@ mod tests {
             Box::new(BadNarrator),
         );
         assert!(eng.discover(&input).is_empty(), "uncited must be dropped");
+    }
+
+    #[test]
+    fn narration_log_round_trip() {
+        let tmp = std::env::temp_dir().join("skinki_narr_log_t4.jsonl");
+        let _ = std::fs::remove_file(&tmp);
+        let rec = NarrationRecord {
+            candidate_id: 42,
+            text: "test narration".into(),
+            citations: vec![1, 2],
+            model: "test".into(),
+            v: 1,
+        };
+        NarrationLog::append(&tmp, &rec).unwrap();
+        let replayed = NarrationLog::replay(&tmp).unwrap();
+        let _ = std::fs::remove_file(&tmp);
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0], rec);
+    }
+
+    #[test]
+    fn llm_narrator_replay_is_deterministic() {
+        let tmp = std::env::temp_dir().join("skinki_narr_replay_t4.jsonl");
+        let _ = std::fs::remove_file(&tmp);
+
+        let rec = NarrationRecord {
+            candidate_id: 1,
+            text: "replayed text".into(),
+            citations: vec![10, 11],
+            model: "test".into(),
+            v: 1,
+        };
+        NarrationLog::append(&tmp, &rec).unwrap();
+
+        let narrator = LlmNarrator::replay(&tmp).unwrap();
+        let candidate = InsightCandidate {
+            id: 1,
+            kind: InsightKind::StructuralBridge,
+            entities: vec![0],
+            evidence: vec![10, 11, 12],
+            stat: Statistic {
+                effect: 1.0,
+                p_value: 0.0,
+                support: 3,
+                surprise: 1.0,
+            },
+            claim: "original claim".into(),
+        };
+        let dummy = InsightInput {
+            entries: &[],
+            vocab: &[],
+        };
+        let n1 = narrator.narrate(&candidate, &dummy);
+        let n2 = narrator.narrate(&candidate, &dummy);
+        let _ = std::fs::remove_file(&tmp);
+        let (n1, n2) = (n1.unwrap(), n2.unwrap());
+        assert_eq!(n1.text, "replayed text");
+        assert_eq!(n1.text, n2.text);
+        assert_eq!(n1.citations, n2.citations);
     }
 }
