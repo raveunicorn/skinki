@@ -50,6 +50,20 @@ Everything here is measured, not asserted. The good and the bad:
 - **Portability** — a stable **C-ABI** (`skinki.h`), a pure-`ctypes` Python
   binding, and an **MCP server** (memory for agents) — cross-language search
   parity gated in CI.
+- **Insight Engine (Stage 5)** — on synthetic, the keystone is **earned**:
+  deterministic discovery + Benjamini–Hochberg FDR + "cite-or-silence" surfaces
+  planted insight bridges at **recall 1.000, precision 1.000, 0 apophenia hits,
+  0 uncited claims** (two seeds). The engine is wired into the MCP server as a
+  `discover_insights` tool. **Temporal lead/lag** and **contradiction** detectors
+  are built and gated behind the same frozen interface (recall 0.800 / 1.000);
+  narration is replayed from a checked-in artifact log. Stage 5 is delegate-ready.
+- **Coarse-to-fine retrieval** — on LongMemEval `multi-session` (the multi-hop
+  regime), instance-level coarse pooling + turn-level fine search lifts
+  recall@10 from semantic-real's **0.291 to 0.438 (+46%)** — the first retrieval
+  strategy that measurably closes the multi-hop gap, without the LLM-entity graph.
+- **Production ingest pipeline** — `skinki ingest` writes to the L0 store;
+  `skinki-mcp --store` serves from live ingested data (no static corpus.json
+  bottleneck).
 
 **Measured and *failed* on real data (the honest part):**
 - On two real conversation benchmarks (**LoCoMo**, **LongMemEval**), a good
@@ -71,14 +85,29 @@ semantic embedder. The **multi-hop gap remains open** — even EmbeddingGemma
 misses ~71% of evidence turns — and the next attempt is *not* the LLM-entity
 graph but query-focused summarization / iterative retrieval.
 
-**Stage 5 (the insight engine) has its first gated keystone — on synthetic.**
+**Stage 5 (the insight engine) has its keystone gated on synthetic.**
 A deterministic discovery + Benjamini–Hochberg FDR + "cite-or-silence" pipeline
 surfaces planted insight bridges at **recall/precision 1.000 with zero apophenia
-hits and zero uncited claims** on the V2 corpus (two seeds), beating a naive
-co-occurrence baseline that fires on every trap. That is real anti-hallucination
-machinery — but it is **synthetic-only**, and Stage 3 just taught us synthetic
-wins need not transfer; real-data validation is the open work, alongside
-staleness on evolving real data.
+hits and zero uncited claims** on the V2 corpus (two seeds). The engine is
+wired into the MCP server as a `discover_insights` tool. Temporal lead/lag
+and contradiction detectors are built behind the same frozen interface (recall
+0.800 / 1.000). The next frontier: validate on **real** data (the synthetic
+win must transfer — Stage 3 just taught us it need not) — and complete the
+narration with a live (replayed) LLM narrator.
+
+**The multi-hop gap is partially closed — by retrieval strategy, not graph.**
+Coarse-to-fine (instance-level embedding + targeted fine search) lifts
+LongMemEval multi-session recall@10 from semantic-real 0.291 to **0.438
+(+46%)**. The iterative query expansion approach attempted first gave *zero*
+lift — a clean negative. The remaining gap (~0.56) is likely an embedder
+ceiling; a larger model or learned query decomposition is the next lever.
+
+**Ingest → search → insights: the full loop is wired.**
+`skinki ingest` → L0 store → `skinki-mcp --store` serves `search`,
+`assemble_context`, and `discover_insights` over stdio. The server accepts a
+`--retriever` flag (graph or semantic); the default retriever is the semantic
+hash embedder. Coarse-to-fine with EmbeddingGemma is the next production
+upgrade (requires the model as a sidecar or port — not in this repo yet).
 
 
 ## Quickstart
@@ -176,17 +205,25 @@ See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the layered design and
 
 ## Open problems (come help)
 
-This is where the crowd matters more than one person:
-
-1. **Make the graph earn its place on real text.** Entity co-mention loses to
-   lexical/semantic retrieval. Does fact-precise matching + coreference
-   resolution + true path-finding beat a *semantic* baseline on a recognized
-   multi-hop benchmark? Unknown.
+1. **Validate the insight engine on real data.** Stage 5's keystone (structural
+   bridges, FDR, cite-or-silence) clears every budget on synthetic — but so did
+   Stage 3's graph. Measured on real conversations, does the engine surface
+   *genuine* non-obvious links without hallucinating citations? Unknown.
 2. **Validate staleness on evolving real data.** The ledger catches planted
-   contradictions; show it catches real ones a retriever misses.
-3. **The insight engine** — proactive, *statistically validated*, cited
-   discovery of non-obvious links, with **zero** uncited claims. The hardest and
-   most valuable piece; unbuilt.
+   contradictions; show it catches real ones a retriever misses — and that
+   the staleness flag actually changes agent behaviour.
+3. **Close the remaining multi-hop gap.** Coarse-to-fine lifted recall from
+   0.291 to 0.438; the remaining ~0.56 is likely an embedder ceiling. A larger
+   model (EmbeddingGemma → full dim, or a bigger backbone) or learned query
+   decomposition is the next lever.
+4. **Port EmbeddingGemma to Rust or as a sidecar.** The engine is 100% Rust;
+   the current semantic retriever is a fast hash-of-tokens (deterministic, no
+   model). EmbeddingGemma (the SOTA retriever) lives in Python and must be
+   called out-of-process for embedding. Porting it would make coarse-to-fine
+   the production default.
+5. **Ingest real data continuously.** `skinki ingest` works; the missing piece
+   is a daemon or filesystem watcher that feeds new text into the store
+   automatically (e.g. voice transcripts, chat logs, notes).
 
 If you can break a gate, beat a baseline, or kill/confirm one of these — open an
 issue or PR. The benchmark decides, not opinion.
