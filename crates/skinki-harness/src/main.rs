@@ -246,13 +246,12 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         assert_gate: bool,
     },
-    /// Stage 5 — Insight Engine infrastructure gate. Scores the
-    /// statistically-validated reference engine against the planted insight /
-    /// apophenia ground truth, beside the naive co-mention baseline (the Law-2
-    /// contrast). `--assert-gate` enforces the EARNED invariants (determinism,
-    /// 0 uncited claims, apophenia-safety); recall/precision are reported as
-    /// informational until the insight ground truth is co-designed (see
-    /// `specs/STAGE_5.md`, finding D0).
+    /// Stage 5 — Insight Engine keystone gate. Scores the statistically-validated
+    /// reference engine against the planted insight / apophenia ground truth,
+    /// beside the naive co-mention baseline (the Law-2 contrast). `--assert-gate`
+    /// enforces the keystone budgets on two seeds: determinism, 0 uncited claims,
+    /// apophenia=0, recall>=0.50, precision>=0.70, false-insight<0.05 (post-D0;
+    /// see `specs/STAGE_5.md`).
     InsightEval {
         #[arg(long, default_value_t = 42)]
         seed: u64,
@@ -988,35 +987,47 @@ fn run_insight_eval(
         row("reference (validated)", &r);
         row("naive (contrast)", &n);
 
-        // EARNED invariants — these the gate asserts.
-        let earned_ok =
-            deterministic && uncited == 0 && r.negative_hits == 0 && n.negative_hits > 0;
+        // Stage-5 keystone budgets (specs/STAGE_5.md §2), asserted on both seeds.
+        const MIN_RECALL: f64 = 0.50;
+        const MIN_PRECISION: f64 = 0.70;
+        const MAX_FALSE_INSIGHT: f64 = 0.05;
+        let recall_ok = r.recall >= MIN_RECALL;
+        let precision_ok = r.precision.is_some_and(|p| p >= MIN_PRECISION);
+        let false_ok = r.false_insight_rate.is_some_and(|f| f < MAX_FALSE_INSIGHT);
+        let apophenia_ok = r.negative_hits == 0;
+        let earned_ok = deterministic
+            && uncited == 0
+            && apophenia_ok
+            && recall_ok
+            && precision_ok
+            && false_ok
+            && n.negative_hits > 0;
         if !earned_ok {
             earned_fail = true;
         }
         println!(
-            "  EARNED: determinism={deterministic} uncited={uncited} apophenia-safe(ref)={} teeth(naive-fires)={}",
-            r.negative_hits == 0,
+            "  EARNED: determinism={deterministic} uncited={uncited} apophenia-safe={apophenia_ok} \
+             recall>={MIN_RECALL}={recall_ok} precision>={MIN_PRECISION}={precision_ok} \
+             false-insight<{MAX_FALSE_INSIGHT}={false_ok} naive-teeth={}",
             n.negative_hits > 0
-        );
-        println!(
-            "  NOT-YET-EARNED (informational): reference recall = {:.3} — see specs/STAGE_5.md finding D0 \
-             (planted bridge entities are not rare; structural signal currently undetectable).",
-            r.recall
         );
     }
 
     if assert_gate {
         if earned_fail {
             anyhow::bail!(
-                "GATE: FAIL — a Stage-5 EARNED invariant regressed (determinism / 0-uncited / apophenia-safety / naive-teeth)"
+                "GATE: FAIL — a Stage-5 keystone budget regressed (determinism / 0-uncited / \
+                 apophenia-safety / recall>=0.50 / precision>=0.70 / false-insight<0.05 / naive-teeth)"
             );
         }
-        println!("\nGATE: PASS (insight-eval --assert-gate: EARNED invariants hold on both seeds)");
         println!(
-            "Note: this gate locks the Stage-5 INFRASTRUCTURE (frozen interface, FDR validation, \
-             cite-or-silence, apophenia-safety). It deliberately does NOT assert recall — Stage 5 \
-             'done' (recall >= 0.50) awaits the D0 insight-ground-truth co-design in specs/STAGE_5.md."
+            "\nGATE: PASS (insight-eval --assert-gate: structural-bridge keystone earned on both seeds \
+             — recall>=0.50, precision>=0.70, false-insight<0.05, apophenia=0, 0 uncited, deterministic)"
+        );
+        println!(
+            "Note: asserts the StructuralBridge keystone (deterministic discovery + BH-FDR validation + \
+             cite-or-silence + apophenia-safety, post-D0). Temporal/contradiction detectors and the \
+             replayed-LLM narrator are delegated tickets (specs/STAGE_5.md, specs/HANDOFF_DEEPSEEK.md)."
         );
     }
     Ok(())

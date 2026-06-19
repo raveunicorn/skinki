@@ -37,7 +37,7 @@ skinki/                      PRIMARY — the engine (all real work)
     skinki-sleep/     Stage 4: interruptible/resumable consolidation scheduler + macOS signals
     skinki-ledger/    Derivation Ledger: hash-linked reasoning DAG + deterministic staleness propagation
     skinki-graph/     Stage 3: deterministic GraphRAG (typed IntroEdge/RecEdge walk + 3C context assembler), ledger-backed
-    skinki-insight/   Stage 5: Insight Engine — deterministic discovery + BH-FDR validation + cite-or-silence (frontier-owned keystone; infra gated, detection blocked on D0)
+    skinki-insight/   Stage 5: Insight Engine — deterministic discovery + BH-FDR validation + cite-or-silence (frontier-owned keystone; structural-bridge detection earned + gated post-D0; temporal/contradiction = delegatable tickets)
     skinki-ffi/       Stage 6: C-ABI (cdylib/staticlib) over Stage-1 search (unsafe: all in ffi.rs, R1-reviewed)
     skinki-mcp/       Stage 6: MCP server over stdio — search + assemble_context for agents (safe, hand-rolled JSON-RPC)
     skinki-harness/   `skinki` CLI: generate/eval/demo/compress-bench/scale-bench/store-bench/sleep-sim/ledger-bench/graph-eval/insight-eval
@@ -59,7 +59,7 @@ L3 sleep consolidation → L4 insight engine → L5 agent/query) is in
 | 2 / 2B | Storage substrate + durability (pure Rust, mmap, append-only) | **Done** |
 | 3 | Incremental local GraphRAG (two-tier; see `STAGE_3.md`) | **Deterministic tier done + gated** (multi-hop 2.5–3× BM25, ledger-wired, 3C assembler); LLM tier measured = not earned |
 | 4 | "Sleep" consolidation scheduler | **Done** (policy proven in sim; real jobs plug in at Stage 3/5) |
-| 5 | Insight Engine (anti-hallucination keystone) | **Infrastructure built + gated** (`skinki-insight`: frozen interface, BH-FDR `validate`, cite-or-silence, apophenia-safe reference + naive contrast, `insight-eval --assert-gate`). Detection (recall) **blocked on D0** — measured: V2 insight ground-truth not yet detectable (bridge entities not rare). See `specs/STAGE_5.md` |
+| 5 | Insight Engine (anti-hallucination keystone) | **Structural-bridge detection earned + gated** (`skinki-insight`: frozen interface, BH-FDR `validate`, cite-or-silence, reference + naive contrast). Post-D0 (rare bridge names, RNG-neutral, V1 golden intact) `insight-eval --assert-gate` asserts recall/precision 1.000, false-insight 0, apophenia 0, 0 uncited on 2 seeds. Temporal/contradiction detectors + replayed-LLM narrator = delegatable. See `specs/STAGE_5.md` |
 | 6 | Portable `skinki` (C-ABI/FFI + Python binding; MCP server) | **Done** — C-ABI + Python parity gated; `skinki-mcp` ships to agents (Swift → Stage 7) |
 | 7 | skinki macOS product | Parked |
 

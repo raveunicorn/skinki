@@ -69,9 +69,16 @@ real and useful today. **Stage 3 closes honestly:** on real text the graph is a
 insight engine), **not** a retrieval ranker; the default retriever is the
 semantic embedder. The **multi-hop gap remains open** — even EmbeddingGemma
 misses ~71% of evidence turns — and the next attempt is *not* the LLM-entity
-graph but query-focused summarization / iterative retrieval. The unique bets —
-staleness on evolving real data, and an insight engine (Stage 5) — are **not yet
-proven**. That's the open work.
+graph but query-focused summarization / iterative retrieval.
+
+**Stage 5 (the insight engine) has its first gated keystone — on synthetic.**
+A deterministic discovery + Benjamini–Hochberg FDR + "cite-or-silence" pipeline
+surfaces planted insight bridges at **recall/precision 1.000 with zero apophenia
+hits and zero uncited claims** on the V2 corpus (two seeds), beating a naive
+co-occurrence baseline that fires on every trap. That is real anti-hallucination
+machinery — but it is **synthetic-only**, and Stage 3 just taught us synthetic
+wins need not transfer; real-data validation is the open work, alongside
+staleness on evolving real data.
 
 
 ## Quickstart

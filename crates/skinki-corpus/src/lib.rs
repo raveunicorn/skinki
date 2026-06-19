@@ -275,6 +275,30 @@ const PEOPLE: &[&str] = &[
     "Anna", "Marcus", "Lena", "Pavel", "Sofia", "Dmitry", "Clara", "Yuki", "Omar", "Nina",
     "Viktor", "Mara", "Ivan", "Stella", "Hugo",
 ];
+
+/// Dedicated, RARE names for V2 insight-bridge entities — disjoint from [`PEOPLE`]
+/// so a planted bridge does NOT recur as a background distractor. This is the D0
+/// fix that makes the insight signal detectable: a real bridge appears only in
+/// its two planted clusters (a rare 2-cluster entity), cleanly separable from a
+/// common multi-cluster apophenia hub. See `specs/STAGE_5.md`.
+const BRIDGE_PEOPLE: &[&str] = &[
+    "Quillon",
+    "Zephyrine",
+    "Caradoc",
+    "Isolde",
+    "Thessaly",
+    "Oberon",
+    "Vespera",
+    "Lysander",
+    "Calixto",
+    "Marisol",
+    "Evander",
+    "Ondine",
+    "Peregrine",
+    "Saffron",
+    "Tiberius",
+    "Wrenna",
+];
 const BOOKS: &[&str] = &[
     "Deep Work",
     "Sapiens",
@@ -761,7 +785,20 @@ impl Generator {
 
     fn plan_insights(&mut self, count: usize) {
         for _ in 0..count {
-            let e_name = (*self.rng.pick(PEOPLE)).to_string();
+            // Consume the PEOPLE pick UNCONDITIONALLY so the V2 RNG stream stays
+            // byte-identical to the legacy generator; `picked` still seeds
+            // `bridge_names` below so negative-bridge avoidance draws the same RNG.
+            let picked = (*self.rng.pick(PEOPLE)).to_string();
+            let plan = self.insight_params.len();
+            // D0 (V2 only): bridge entities get UNIQUE, RARE names from a
+            // dedicated pool so a planted 2-cluster bridge is statistically
+            // separable from a common multi-cluster apophenia hub. V1 keeps the
+            // legacy PEOPLE name so its byte-frozen golden holds.
+            let e_name = if self.difficulty == Difficulty::V2 {
+                BRIDGE_PEOPLE[plan % BRIDGE_PEOPLE.len()].to_string()
+            } else {
+                picked.clone()
+            };
             // Pick two distinct clusters to bridge.
             let ca = (*self.rng.pick(CLUSTERS)).to_string();
             let mut cb = (*self.rng.pick(CLUSTERS)).to_string();
@@ -769,8 +806,7 @@ impl Generator {
                 cb = (*self.rng.pick(CLUSTERS)).to_string();
             }
             let e = self.intern(&e_name, EntityKind::Person, "bridge");
-            self.bridge_names.push(e_name.clone());
-            let plan = self.insight_params.len();
+            self.bridge_names.push(picked.clone());
             self.insight_params.push(InsightParams {
                 e,
                 cluster_a: ca.clone(),

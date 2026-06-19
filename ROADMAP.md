@@ -24,7 +24,7 @@ layered design and budgets.
 | 2 | Storage substrate (Lance/Cozo) + append-only L0; maybe a `.kx` codec | **Done** (+ 2B durability) |
 | 3 | Incremental local GraphRAG (deterministic-first, two-tier; venue-anchored multi-hop) | **Closed — graph is substrate, not a retriever (honest).** 2.5–3× BM25 on synthetic, ledger-wired + 3C assembler, gated; but on **two** real benchmarks (LoCoMo, LongMemEval) the graph does **not** beat BM25, and a semantic embedder (EmbeddingGemma) is SOTA (+51% over BM25 on LongMemEval multi-session). Default retriever → EmbeddingGemma; graph retained for structure (ledger/provenance/staleness) into Stage 5. Multi-hop gap remains open ([`STAGE_3.md`](specs/STAGE_3.md)) |
 | 4 | "Sleep" consolidation engine (idle + on-power background jobs) | **Done** (policy proven in simulation; real jobs land at Stage 3/5) |
-| 5 | Insight Engine (deterministic discovery + FDR + cite-or-silence) | **Infrastructure built + gated**; detection blocked on a measured corpus finding (D0) — `skinki-insight` ships the frozen interface, BH-FDR validation, cite-or-silence, an apophenia-safe reference detector + naive contrast, and `insight-eval --assert-gate`; V2's insight ground-truth is not yet detectable (bridge entities not rare). See [`STAGE_5.md`](specs/STAGE_5.md) |
+| 5 | Insight Engine (deterministic discovery + FDR + cite-or-silence) | **Structural-bridge detection earned + gated** — `skinki-insight` ships the frozen interface, BH-FDR validation, cite-or-silence, the reference detector + naive contrast; after the D0 corpus fix (rare bridge names, RNG-neutral) the reference clears the full keystone gate on 2 seeds (recall/precision 1.000, false-insight 0, apophenia 0, 0 uncited). Temporal/contradiction detectors + replayed-LLM narrator remain (delegatable). See [`STAGE_5.md`](specs/STAGE_5.md) |
 | 6 | Portable `skinki` (C-ABI/FFI + Python binding; MCP server) | **Done** (C-ABI + Python parity gated; `skinki-mcp` ships search + context-assembler to agents; Swift → Stage 7) |
 | 7 | skinki macOS product integration (the wrapper) | Planned |
 
@@ -175,21 +175,22 @@ layered design and budgets.
   silence" narration; measure fraction of planted insights found vs false ones;
   hallucination audit.
 - **Gate:** >= X% of planted insights at <= Y% false; **0** uncited claims.
-- **Result (infrastructure built + gated; D0 finding).** `crates/skinki-insight`
-  ships the keystone infrastructure: a fairness boundary (`InsightInput` — the
-  answer key is *unreachable*, not just "don't read it"), a Benjamini–Hochberg
-  FDR validation core, structural cite-or-silence (0 uncited by construction), an
-  apophenia-safe reference detector + the naive co-mention contrast, all behind
-  `insight-eval --assert-gate` (EARNED invariants green in CI on two seeds). The
-  measurement then surfaced an honest blocker: on V2 the planted insight is
-  **statistically undetectable** — the naive detector finds all 5 bridges but
-  also all 5 apophenia hubs (precision 0.14), while the validated detector that
-  rejects the hubs also surfaces nothing, because **bridge entities are not rare**
-  (their names recur ~160×/11.5k across all clusters, drowning the 2-cluster
-  signal). **D0** (co-design the insight ground-truth so bridges are rare/unique —
-  a corpus change that moves golden hashes, hence human-gated) is the unblocker
-  before a detector can earn recall. A clean Law-2 result: the instrument works;
-  the benchmark needs hardening. See [`specs/STAGE_5.md`](specs/STAGE_5.md).
+- **Result (structural-bridge detection earned + gated).** `crates/skinki-insight`
+  ships the keystone: a fairness boundary (`InsightInput` — the answer key is
+  *unreachable*, not just "don't read it"), a Benjamini–Hochberg FDR validation
+  core, structural cite-or-silence (0 uncited by construction), the reference
+  detector + the naive co-mention contrast, all behind `insight-eval
+  --assert-gate` (green in CI on two seeds). Round 1 measured an honest blocker
+  (the planted insight was statistically undetectable — bridge entities weren't
+  rare, so the naive detector found all 5 bridges *and* all 5 apophenia hubs while
+  the validated detector that rejected the hubs found nothing). Round 2 fixed it
+  with **D0** — rare/unique bridge names, scoped to V2 and RNG-neutral so the V1
+  byte-frozen golden held — and the reference engine now clears the full keystone:
+  **recall 1.000, precision 1.000, false-insight 0.000, apophenia 0/5, 0 uncited,
+  deterministic**, beating the naive contrast (precision 0.19). The FDR/surprise
+  validation — not the corpus — does the work. Remaining for "done": temporal +
+  contradiction detectors and the replayed-LLM narrator (delegatable behind the
+  frozen interface). See [`specs/STAGE_5.md`](specs/STAGE_5.md).
 
 ## Stage 6 — Portable engine (primary artifact, "FFmpeg")
 

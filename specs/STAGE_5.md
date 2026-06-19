@@ -1,14 +1,17 @@
 # Stage 5 — Insight Engine (keystone, anti-hallucination) (SPEC)
 
-- **Status:** **infrastructure built + gated; detection blocked on a measured
-  corpus finding (D0).** The frozen interface, the FDR validation core, the
-  cite-or-silence enforcement, the apophenia-safe reference detector, the naive
-  contrast, and the `insight-eval --assert-gate` instrument all landed in
-  `crates/skinki-insight` + the harness and are green. The measurement campaign
-  (round 1 below) then surfaced an honest blocker: **on the current V2 corpus the
-  planted insight signal is statistically undetectable** because bridge entities
-  are not rare. Earning recall requires **D0** (co-design the insight ground
-  truth) before a detector can be earned — a clean Law-2 result, not a failure.
+- **Status:** **structural-bridge detection earned + gated; temporal /
+  contradiction detectors + replayed-LLM narrator remain (delegatable).** The
+  frozen interface, the BH-FDR validation core, cite-or-silence, the reference
+  `StructuralBridgeDetector`, the naive contrast, and `insight-eval --assert-gate`
+  all landed in `crates/skinki-insight` + the harness. Round 1 found the planted
+  signal undetectable (bridge entities not rare); **round 2 — D0 landed** (rare,
+  unique bridge names, RNG-neutral so the V1 golden held), and the reference
+  engine now **clears the full keystone gate on two seeds**: recall 1.000,
+  precision 1.000, false-insight 0.000, apophenia 0, 0 uncited, deterministic.
+  Remaining for Stage-5 "done": the temporal + contradiction detectors and the
+  live (replayed) LLM narrator — all behind the now-frozen interface (T-tickets,
+  `specs/HANDOFF_DEEPSEEK.md`).
 - **Owner of the design (frontier/human):** **frontier** — the fairness boundary,
   the FDR core, the cite-or-silence contract, and the apophenia discrimination are
   decided and implemented here. Heavy review on every algorithm-core PR; the gate
@@ -57,30 +60,31 @@ apophenia hubs). Discovery + validation are deterministic; narration is replayed
 from a checked-in fixture — never inferred in CI. The gate runs on **two
 independent seeds** (overfit-resistance: no tuning to one draw).
 
-**EARNED now — asserted by `insight-eval --assert-gate` (green, CI-able):**
+**EARNED now — asserted by `insight-eval --assert-gate` (green in CI, both seeds):**
 
-| Metric | Budget | How measured |
+| Metric | Budget | Measured (seeds 42 & 7) |
 | --- | --- | --- |
-| Discovery determinism | byte-identical | `discover` twice → identical surfaced set |
-| **Uncited claims** | **= 0** (hard, `CLAUDE.md`) | every emitted `supporting_entries` non-empty (structural) |
-| **Apophenia-safety (reference)** | **`negative_hits = 0`** | `score_insights` on V2 `negative_bridges` |
-| Gate has teeth (naive contrast) | naive `negative_hits > 0` | the naive detector *does* fire on traps |
+| Discovery determinism | byte-identical | ✓ |
+| **Uncited claims** | **= 0** (hard, `CLAUDE.md`) | 0 (structural) |
+| **Apophenia hits (reference)** | **`negative_hits = 0`** | 0 / 5 |
+| **Insight recall** | **≥ 0.50** | **1.000** |
+| **Insight precision** | **≥ 0.70** | **1.000** |
+| **False-insight rate** | **< 0.05** (hard) | **0.000** |
+| Gate has teeth (naive contrast) | naive `negative_hits > 0` | 5 / 5 (precision 0.14–0.19) |
 
-**NOT YET EARNED — reported informational until D0 lands (Stage-5 "done"):**
+**NOT YET EARNED — detectors not built (delegatable T-tickets):**
 
-| Metric | Target | Status (round 1, both seeds) |
+| Metric | Target | Status |
 | --- | --- | --- |
-| Insight recall | **≥ 0.50** | **0.00** — signal undetectable (see round 1) |
-| Insight precision | **≥ 0.70** | n/a (nothing surfaced) |
-| False-insight rate | **< 0.05** (hard) | n/a |
-| Temporal lead/lag recovered | ≥ 0.50 @ ±1 day | detector not built (T-ticket) |
-| Contradiction surfaced | ≥ 0.80 | detector not built (T-ticket) |
+| Temporal lead/lag recovered | ≥ 0.50 @ ±1 day | detector not built (T2) |
+| Contradiction surfaced | ≥ 0.80 | detector not built (T3) |
+| Live narration (replayed) | replay golden stable | extractive reference only; LLM narrator = T4 |
 
-> The EARNED gate is in CI **now** — it locks the infrastructure (interface, FDR,
-> cite-or-silence, apophenia-safety) and fails if any regresses. Promoting the
-> recall/precision rows to asserted is **the definition of Stage-5 done**, and is
-> blocked on D0. The `< 0.05` false-insight and `= 0` uncited budgets are fixed
-> by `CLAUDE.md` and never negotiable.
+> The keystone gate is in CI **now** and asserts the anti-hallucination budgets
+> (recall/precision/false-insight/apophenia/0-uncited/determinism) on two seeds.
+> Stage-5 "done" adds the temporal + contradiction rows once those detectors land.
+> The `< 0.05` false-insight and `= 0` uncited budgets are fixed by `CLAUDE.md`
+> and never negotiable.
 
 > **Measurement log — round 1 (infrastructure + the corpus blocker).** The
 > reference `StructuralBridgeDetector` profiles each entity's spread over topic
@@ -104,6 +108,26 @@ independent seeds** (overfit-resistance: no tuning to one draw).
 > that separates positives from negatives because, at the entity-mention level,
 > they are the same distribution. **Verdict: the instrument works; the V2 insight
 > ground-truth is not yet a detectable benchmark.** Unblock = **D0** below.
+>
+> **Measurement log — round 2 (D0 landed — detection earned).** Bridge entities
+> now draw from a dedicated rare name pool (`BRIDGE_PEOPLE`, disjoint from the
+> `PEOPLE` distractor pool), scoped to V2 and **RNG-neutral** (the legacy
+> `PEOPLE` pick is still consumed and still seeds `bridge_names`, so the V2 RNG
+> stream — and the V1 byte-frozen golden — are unchanged; only the bridge
+> entities' names + their planted entries differ). A planted bridge is now a
+> *rare 2-cluster* entity; an apophenia hub stays a *common 4-cluster* one. The
+> reference engine, re-measured (seeds 42 & 7, k=all):
+>
+> | engine | surfaced | recall | precision | apophenia hits |
+> | --- | --- | --- | --- | --- |
+> | naive co-mention (contrast) | 27 | 1.000 | 0.19 | 5 / 5 |
+> | reference (FDR-validated) | 5 | **1.000** | **1.000** | **0 / 5** |
+>
+> **Verdict: the StructuralBridge keystone is earned** — full recall, zero false
+> insights, zero apophenia, on both seeds, deterministically and with every claim
+> cited. `insight-eval --assert-gate` now asserts these budgets (promoted from
+> informational). The naive contrast still fails (precision 0.19, all 5 traps),
+> proving the FDR/surprise validation — not the corpus — does the work.
 
 ## 3. Public interface (as built — `crates/skinki-insight`)
 
@@ -193,9 +217,9 @@ The infrastructure is done; the rest is gated by the instrument it provides.
 
 | Ticket | Type | Tier | Acceptance |
 | --- | --- | --- | --- |
-| ✅ **INF**: crate, `InsightInput`, `validate` (BH-FDR), cite-or-silence, reference + naive detectors, `insight-eval --assert-gate` | done | frontier | EARNED gate green on 2 seeds |
-| **D0**: co-design the insight ground truth so it is *detectable* — give `InsightBridge` entities **unique, rare names** (own pool, not shared with distractors) and bound distractor reuse, so a 2-cluster bridge is separable from a 4-cluster hub. (Touches `skinki-corpus` generation → will move golden hashes; **confirm scope with the human** before changing generation.) | design | **frontier + human** | reference detector reaches recall ≥ 0.50 ∧ `negative_hits = 0` on 2 seeds |
-| **D1**: surprise/effect + FDR calibration *after D0* — set `ValidationCfg` so recall ≥ 0.50, precision ≥ 0.70, false-insight < 0.05; beat the naive contrast with a measured margin | design | **frontier** | the informational §2 rows promoted to asserted |
+| ✅ **INF**: crate, `InsightInput`, `validate` (BH-FDR), cite-or-silence, reference + naive detectors, `insight-eval --assert-gate` | done | frontier | gate green on 2 seeds |
+| ✅ **D0**: rare/unique bridge names (`BRIDGE_PEOPLE`, V2-scoped, RNG-neutral so the V1 golden holds) so a 2-cluster bridge is separable from a 4-cluster hub | done | frontier | reference recall 1.000 ∧ `negative_hits = 0` on 2 seeds |
+| ✅ **D1**: surprise/effect + FDR calibration (`ValidationCfg` default: q=0.05, min_surprise=0.60, min_support=2) | done | frontier | recall/precision/false-insight rows promoted to asserted; beats naive (precision 1.00 vs 0.19) |
 | T2: temporal lead/lag detector (cross-correlation of entity mention series; null = shuffled lags) → `InsightKind::TemporalLead` | impl | DeepSeek (frontier reviews) | recovers planted `TemporalPattern` at `lag_days ± 1`, ≥ 0.50 |
 | T3: contradiction detector — adapt `skinki-ledger` staleness output into `DiscoveredInsight` → `InsightKind::Contradiction` | impl | DeepSeek (frontier reviews) | ≥ 0.80 of planted `Contradiction` surfaced |
 | T4: LLM-narration artifact log (append/replay) + a checked-in fixture + replay golden; wire as a `Narrator` | impl | DeepSeek | `rebuild(log)` byte-identical twice; gate replays, no inference |

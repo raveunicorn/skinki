@@ -651,37 +651,35 @@ mod tests {
     #[test]
     fn every_emitted_insight_is_cited() {
         // The = 0 uncited budget, structurally: nothing the engine emits ever
-        // lacks supporting_entries (whatever the detector surfaces, or doesn't).
+        // lacks supporting_entries. Post-D0 the reference also surfaces > 0.
         let c = v2();
         let input = InsightInput::from_corpus(&c);
         let out = InsightEngine::structural().discover(&input);
+        assert!(!out.is_empty(), "reference should surface the rare bridges");
         assert!(out.iter().all(|d| !d.supporting_entries.is_empty()));
     }
 
     #[test]
-    fn reference_is_apophenia_safe_but_naive_is_not() {
-        // The keystone direction: the statistically-validated reference engine
-        // must not certify apophenia hubs (`negative_hits == 0`), while the naive
-        // co-mention baseline does — proof the validation has teeth.
-        //
-        // NOTE (measured finding, see specs/STAGE_5.md): on the *current* V2
-        // corpus the reference engine surfaces ~nothing because bridge entities
-        // are NOT rare — their names are reused as distractors ~160×/11.5k across
-        // all clusters, so the planted 2-cluster signal is statistically
-        // indistinguishable from a 4-cluster hub. The reference is therefore
-        // conservative-correct (no false insights) but cannot yet earn recall;
-        // unblocking that needs the insight ground-truth co-designed (D0).
+    fn reference_earns_recall_and_is_apophenia_safe_unlike_naive() {
+        // The keystone, post-D0: the statistically-validated reference engine
+        // recovers the planted bridges (recall) with NO apophenia hits, while the
+        // naive co-mention baseline fires on every trap (precision collapses) —
+        // proof the FDR/surprise validation is earned, not decorative.
         let c = v2();
         let input = InsightInput::from_corpus(&c);
         let planted = &c.ground_truth.insights;
         let neg = &c.ground_truth.negative_bridges;
 
-        let reference = InsightEngine::structural().discover(&input);
-        let naive = InsightEngine::naive().discover(&input);
+        let r = score_insights(&InsightEngine::structural().discover(&input), planted, neg);
+        let n = score_insights(&InsightEngine::naive().discover(&input), planted, neg);
 
-        let r = score_insights(&reference, planted, neg);
-        let n = score_insights(&naive, planted, neg);
         assert_eq!(r.negative_hits, 0, "reference must not certify apophenia");
+        assert!(r.recall >= 0.50, "reference recall {} < 0.50", r.recall);
+        assert!(
+            r.precision.is_some_and(|p| p >= 0.70),
+            "reference precision {:?} < 0.70",
+            r.precision
+        );
         assert!(
             n.negative_hits > 0,
             "naive baseline should fire on apophenia (teeth check)"

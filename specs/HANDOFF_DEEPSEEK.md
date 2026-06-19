@@ -28,14 +28,16 @@ to make the gate go green without weakening it.
 
 ## Stage 5 — Insight Engine (`crates/skinki-insight`, spec: `STAGE_5.md`)
 
-The infrastructure is built and gated (`insight-eval --assert-gate` is green on
-EARNED invariants). These tickets extend it. The frozen interface is in
-`crates/skinki-insight/src/lib.rs` — implement against it, don't change it.
+The keystone is built and gated: `insight-eval --assert-gate` is green and now
+asserts the full anti-hallucination budgets (recall 1.000, precision 1.000,
+false-insight 0, apophenia 0, 0 uncited, deterministic, on two seeds) for the
+**structural-bridge** detector. The D0 corpus fix is done. These tickets add the
+remaining detectors + narration. The frozen interface is in
+`crates/skinki-insight/src/lib.rs` — implement against it, don't change it; copy
+the `StructuralBridgeDetector` shape (propose → `Statistic` → `validate`).
 
-> **Blocker note:** tickets T2/T3/T4/T5/T6 are independent of the D0 corpus
-> finding and can proceed now. The *recall* of the structural detector is blocked
-> on **D0** (frontier + human own it — do not attempt the corpus change yourself;
-> it moves golden hashes across other gates).
+> All tickets below are independent and can proceed now. Do **not** touch
+> `skinki-corpus` generation (it moves golden hashes — frontier+human only).
 
 | Ticket | Branch | Files | Do | Gate / DoD |
 | --- | --- | --- | --- | --- |
