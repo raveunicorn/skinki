@@ -49,6 +49,25 @@ pub enum InsightKind {
     Contradiction,
 }
 
+fn kind_tag(k: InsightKind) -> u8 {
+    match k {
+        InsightKind::StructuralBridge => 1,
+        InsightKind::TemporalLead => 2,
+        InsightKind::Contradiction => 3,
+    }
+}
+
+/// Candidate ids are namespaced by detector family (kind tag in the top byte),
+/// so pooling candidates from several detectors can never collide — before
+/// this, the structural detector used raw entity ids while the others counted
+/// from 0, and a full multi-detector engine silently shadowed candidates in
+/// its id-keyed maps (specs/STAGE_5C.md T1).
+#[inline]
+pub fn candidate_id(kind: InsightKind, seq: u64) -> CandidateId {
+    debug_assert!(seq < (1 << 56), "candidate seq overflows the id namespace");
+    ((kind_tag(kind) as u64) << 56) | seq
+}
+
 /// The per-candidate test result, **before** multiple-hypothesis correction.
 /// `surprise` is the apophenia discriminator (a hub spreads thin → low
 /// surprise); `support` the minimum-evidence guard; `p_value` the input to
@@ -205,6 +224,29 @@ pub fn validate(cands: &[InsightCandidate], cfg: &ValidationCfg) -> Vec<Candidat
             .then(a.id.cmp(&b.id))
     });
     accepted.into_iter().map(|c| c.id).collect()
+}
+
+/// [`validate`] applied **per detector family** (specs/STAGE_5C.md T3): BH's
+/// false-discovery guarantee is about one family of hypotheses, and pooling
+/// families breaks it in both directions — a contradiction candidate's exact
+/// `p = 0` occupies a top BH rank and *raises* the cutoff for every structural/
+/// temporal candidate, while a large noisy family dilutes a small precise one.
+/// Accepted ids are returned family-by-family in a fixed kind order, each
+/// family in `validate`'s stable (effect desc, id asc) order.
+pub fn validate_per_kind(cands: &[InsightCandidate], cfg: &ValidationCfg) -> Vec<CandidateId> {
+    let mut accepted: Vec<CandidateId> = Vec::new();
+    for kind in [
+        InsightKind::StructuralBridge,
+        InsightKind::TemporalLead,
+        InsightKind::Contradiction,
+    ] {
+        let family: Vec<InsightCandidate> =
+            cands.iter().filter(|c| c.kind == kind).cloned().collect();
+        if !family.is_empty() {
+            accepted.extend(validate(&family, cfg));
+        }
+    }
+    accepted
 }
 
 // ---------------------------------------------------------------------------
@@ -402,7 +444,7 @@ impl Detector for StructuralBridgeDetector {
             }
 
             out.push(InsightCandidate {
-                id: p.id,
+                id: candidate_id(InsightKind::StructuralBridge, p.id),
                 kind: InsightKind::StructuralBridge,
                 entities: vec![p.id],
                 evidence,
@@ -451,7 +493,7 @@ impl Detector for CoMentionDetector {
             evidence.dedup();
             let support = evidence.len() as u32;
             out.push(InsightCandidate {
-                id: p.id,
+                id: candidate_id(InsightKind::StructuralBridge, p.id),
                 kind: InsightKind::StructuralBridge,
                 entities: vec![p.id],
                 evidence,
@@ -470,20 +512,33 @@ impl Detector for CoMentionDetector {
 }
 
 // ---------------------------------------------------------------------------
-// TemporalLeadDetector — cross-correlation over entity mention days (T2)
+// TemporalLeadDetector — split-half lag selection + exact circular-shift null
 // ---------------------------------------------------------------------------
 //
-// Profiles each vocab entity's mention-day series, then for every ordered
-// pair (A, B) computes the strongest lag (the `d` that maximises the count of
-// B-on-day-t after A-on-day-(t-d)) and tests it against a shuffled-lag null.
-// The null keeps A's days fixed and randomly assigns B's days; the p-value is
-// the fraction of shuffles where the strongest-lag count ≥ the observed count.
-// Candidates that survive BH-FDR at the engine's threshold are surfaced as
-// [`InsightKind::TemporalLead`] insights.
+// For every ordered entity pair (A, B) with enough mentions the detector asks:
+// do B's mentions follow A's at a fixed lag? Two moves keep the statistics
+// honest (specs/STAGE_5C.md T4 — this replaces the analytic binomial null,
+// whose Bonferroni×lags correction sat behind a hard p<1e-6 pre-filter that
+// voided the FDR semantics, and whose uniform-days assumption would
+// hallucinate leads out of bursty real data):
 //
-// Targets the planted [`skinki_corpus::TemporalPattern`] ground truth on V2:
-// a lead entity A is mentioned, then a trail entity B is mentioned exactly
-// `lag_days` later, embedded in the text via a templated temporal cue.
+// 1. **Selection and testing are split.** The best lag δ* is chosen on A's
+//    odd-indexed mention days only; the test statistic is the alignment count
+//    at that *fixed* lag on the held-out even-indexed days. The "searched 91
+//    lags and kept the max" optimism never reaches the p-value, so no
+//    multiple-testing correction is needed — there is exactly one test.
+// 2. **The null is an exact circular-shift enumeration.** Under H0 (no phase
+//    relation between the two series) every relative offset of B's days is
+//    equally likely, so with period D = max_day + 1:
+//        p = #{ δ in 0..D : c_test(δ) >= c_test(δ*) } / D,
+//    where c_test(δ) counts held-out A-days with a B-day within ±tol of A+δ
+//    (circularly). Enumerated in full — deterministic, no RNG, no analytic
+//    approximation, resolution 1/D — and it inherits B's real day
+//    distribution, so shared burstiness/seasonality is *in* the null instead
+//    of being mistaken for signal.
+//
+// Survivors feed the per-family BH-FDR in `validate` like every detector.
+// Targets the planted [`skinki_corpus::TemporalPattern`] ground truth on V2.
 
 /// Deduped, sorted mention days for one entity.
 struct MentionSeries {
@@ -493,38 +548,57 @@ struct MentionSeries {
 }
 
 /// True if `needle` (lowercase) occurs in `haystack` (lowercase) as a whole
-/// token — bounded by non-alphanumeric chars on both ends. Stops a short entity
-/// name like "rust" from matching "trust" / "frustrated" (the bug that inflated
-/// a tool to 1763 phantom mentions and flooded the temporal detector with
-/// ubiquitous-entity false leads).
+/// token — bounded by non-alphanumeric *characters* on both ends. Stops a short
+/// entity name like "rust" from matching "trust" / "frustrated" (the bug that
+/// inflated a tool to 1763 phantom mentions and flooded the temporal detector
+/// with ubiquitous-entity false leads).
+///
+/// Boundaries are checked per `char`, not per byte (specs/STAGE_5C.md T2): with
+/// byte-level `is_ascii_alphanumeric`, every non-ASCII letter looks like a
+/// boundary, so Cyrillic text would match needles inside words ("раст" inside
+/// "контраст") — the exact phantom-mention bug, reintroduced for the product's
+/// own target language.
 fn contains_word(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return false;
     }
-    let hb = haystack.as_bytes();
     let mut from = 0;
     while let Some(pos) = haystack[from..].find(needle) {
         let i = from + pos;
-        let before_ok = i == 0 || !hb[i - 1].is_ascii_alphanumeric();
+        let before_ok = haystack[..i]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !c.is_alphanumeric());
         let after = i + needle.len();
-        let after_ok = after >= hb.len() || !hb[after].is_ascii_alphanumeric();
+        let after_ok = haystack[after..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric());
         if before_ok && after_ok {
             return true;
         }
-        from = i + 1;
+        // Advance past the first char of this match (a char boundary by
+        // construction — the needle matched here).
+        from = i + needle.chars().next().map_or(1, |c| c.len_utf8());
     }
     false
 }
 
 fn profile_entity_days(input: &InsightInput) -> Vec<MentionSeries> {
+    // Lowercase every entry once, not once per entity: O(N) allocations
+    // instead of O(V·N) (specs/STAGE_5C.md T5).
+    let lowered: Vec<(u32, EntryId, String)> = input
+        .entries
+        .iter()
+        .map(|e| (e.day, e.id, e.text.to_lowercase()))
+        .collect();
     let mut out: Vec<MentionSeries> = Vec::with_capacity(input.vocab.len());
     for e in input.vocab {
         let name_lower = e.name.to_lowercase();
-        let mut mentions: Vec<(u32, EntryId)> = input
-            .entries
+        let mut mentions: Vec<(u32, EntryId)> = lowered
             .iter()
-            .filter(|entry| contains_word(&entry.text.to_lowercase(), &name_lower))
-            .map(|entry| (entry.day, entry.id))
+            .filter(|(_, _, text)| contains_word(text, &name_lower))
+            .map(|(day, id, _)| (*day, *id))
             .collect();
         mentions.sort_unstable_by_key(|(d, id)| (*d, *id));
         mentions.dedup();
@@ -550,19 +624,23 @@ impl Detector for TemporalLeadDetector {
         const MAX_LAG: u32 = 90;
         const LAG_TOLERANCE: u32 = 1;
         const MIN_COUNT: u32 = 4;
+        const MIN_RATIO: f64 = 0.35;
+        const MIN_TEST_COUNT: u32 = 2;
 
-        let max_day = input.entries.iter().map(|e| e.day).max().unwrap_or(1825);
+        let period = input.entries.iter().map(|e| e.day).max().unwrap_or(1825) + 1;
 
         let mut out: Vec<InsightCandidate> = Vec::new();
-        let mut next_id: CandidateId = 0;
+        let mut next_seq: u64 = 0;
 
-        // Helper: count how many A mentions have a B mention at roughly `lag` days.
+        // Helper: count how many A mentions have a B mention at roughly `lag`
+        // days. `b_days` is sorted, so each probe is a binary search.
         fn count_at_lag(a_days: &[u32], b_days: &[u32], lag: u32, tol: u32) -> u32 {
             let mut c: u32 = 0;
             for &da in a_days {
                 let lo = da + lag.saturating_sub(tol);
                 let hi = da + lag + tol;
-                if b_days.iter().any(|&db| db >= lo && db <= hi) {
+                let i = b_days.partition_point(|&db| db < lo);
+                if i < b_days.len() && b_days[i] <= hi {
                     c += 1;
                 }
             }
@@ -597,55 +675,69 @@ impl Detector for TemporalLeadDetector {
                 if a.entity == b.entity {
                     continue;
                 }
-                // Scan all lags; keep the best AND the runner-up (for a
-                // peakedness test — a real lead→trail relation is a sharp single
-                // lag, noise is a flat histogram).
+                // Split A's (sorted) mention days: odd indices select the lag,
+                // even indices test it. Interleaving keeps both halves spread
+                // over the whole time range, so drift can't put all the signal
+                // in one half.
+                let select: Vec<u32> = a.days.iter().copied().skip(1).step_by(2).collect();
+                let held_out: Vec<u32> = a.days.iter().copied().step_by(2).collect();
+
+                // Choose δ* on the selection half only (ties → smallest lag).
                 let mut best_lag: u32 = 0;
-                let mut best_count: u32 = 0;
-                let mut second_count: u32 = 0;
+                let mut best_sel: u32 = 0;
                 for lag in 0..=MAX_LAG {
-                    let c = count_at_lag(&a.days, &b.days, lag, LAG_TOLERANCE);
-                    if c > best_count {
-                        second_count = best_count;
-                        best_count = c;
+                    let c = count_at_lag(&select, &b.days, lag, LAG_TOLERANCE);
+                    if c > best_sel {
+                        best_sel = c;
                         best_lag = lag;
-                    } else if c > second_count {
-                        second_count = c;
                     }
                 }
-                if best_count == 0 || best_count < MIN_COUNT {
-                    continue;
-                }
-                // Require a meaningful fraction of A's mentions to co-occur.
-                let min_ratio = 0.35;
-                if (best_count as f64) < (a.days.len() as f64 * min_ratio) {
-                    continue;
-                }
-                let _ = second_count;
-                // Analytical binomial null per lag — corrected for B's DENSITY.
-                // Under H0, each of A's n_a mentions co-occurs with B at a given
-                // lag (±tol) by chance with probability ≈ n_b·(2·tol+1)/max_day:
-                // a *common* trail entity (e.g. a person mentioned 165× across
-                // 1825 days) is expected to appear near A's mentions, so its
-                // alignment is NOT surprising. Using the bare (2·tol+1)/max_day
-                // ignored this and let rare-lead → common-trail coincidences pass.
-                // Then a Bonferroni correction for searching MAX_LAG+1 lags and
-                // keeping the max.
-                let n_b = b.days.len() as f64;
-                let p_null =
-                    (n_b * (2 * LAG_TOLERANCE + 1) as f64 / max_day as f64).clamp(1e-9, 0.99);
-                let p_single = binom_upper_tail(a.days.len() as u32, best_count, p_null);
-                let n_lags = (MAX_LAG + 1) as f64;
-                let p_value = (p_single * n_lags).min(1.0);
-                // Pre-filter: only candidates with an extremely small corrected
-                // p-value enter BH-FDR (otherwise noise drowns the signal in a
-                // ~3500-candidate set).
-                if p_value > 1e-6 {
+                if best_sel == 0 {
                     continue;
                 }
 
-                let effect = best_count as f64 / ((a.days.len() * b.days.len()) as f64).sqrt();
-                let support = best_count;
+                // Effect-size floors on the full data (guards, not tests: they
+                // never look at the null distribution).
+                let full_count = count_at_lag(&a.days, &b.days, best_lag, LAG_TOLERANCE);
+                if full_count < MIN_COUNT || (full_count as f64) < (a.days.len() as f64 * MIN_RATIO)
+                {
+                    continue;
+                }
+
+                // The one test: alignment of the HELD-OUT days at the fixed δ*.
+                let observed = count_at_lag(&held_out, &b.days, best_lag, LAG_TOLERANCE);
+                if observed < MIN_TEST_COUNT {
+                    continue;
+                }
+
+                // Exact circular-shift null: smear B's days ±tol on the circle
+                // of length `period`, then enumerate every offset δ and count
+                // how often the held-out days align at least as well as at δ*.
+                let mut smear = vec![false; period as usize];
+                for &d in &b.days {
+                    for off in -(LAG_TOLERANCE as i64)..=(LAG_TOLERANCE as i64) {
+                        let idx = (d as i64 + off).rem_euclid(period as i64) as usize;
+                        smear[idx] = true;
+                    }
+                }
+                let mut ge: u32 = 0;
+                for delta in 0..period {
+                    let mut c: u32 = 0;
+                    for &ad in &held_out {
+                        if smear[((ad + delta) % period) as usize] {
+                            c += 1;
+                        }
+                    }
+                    if c >= observed {
+                        ge += 1;
+                    }
+                }
+                // δ = δ* itself is in the enumeration, so p >= 1/period —
+                // a proper, never-zero permutation p-value.
+                let p_value = ge as f64 / period as f64;
+
+                let effect = full_count as f64 / ((a.days.len() * b.days.len()) as f64).sqrt();
+                let support = full_count;
 
                 let pairs = evidence_pairs(
                     &a.days,
@@ -676,7 +768,7 @@ impl Detector for TemporalLeadDetector {
                 }
 
                 out.push(InsightCandidate {
-                    id: next_id,
+                    id: candidate_id(InsightKind::TemporalLead, next_seq),
                     kind: InsightKind::TemporalLead,
                     entities: vec![a.entity, b.entity],
                     evidence,
@@ -691,12 +783,12 @@ impl Detector for TemporalLeadDetector {
                         input.vocab[a.entity as usize].name,
                         input.vocab[b.entity as usize].name,
                         best_lag,
-                        best_count,
+                        full_count,
                         a.days.len(),
                         b.days.len(),
                     ),
                 });
-                next_id += 1;
+                next_seq += 1;
             }
         }
         out
@@ -751,7 +843,14 @@ impl Detector for ContradictionDetector {
 
     fn propose(&self, input: &InsightInput) -> Vec<InsightCandidate> {
         let mut out: Vec<InsightCandidate> = Vec::new();
-        let mut next_id: CandidateId = 0;
+        let mut next_seq: u64 = 0;
+
+        // Lowercase every entry once, not once per entity (specs/STAGE_5C.md T5).
+        let lowered: Vec<(&Entry, String)> = input
+            .entries
+            .iter()
+            .map(|e| (e, e.text.to_lowercase()))
+            .collect();
 
         for e in input.vocab {
             let name_lower = e.name.to_lowercase();
@@ -760,12 +859,11 @@ impl Detector for ContradictionDetector {
             // in the same reversal sentence, from being falsely flagged.
             let mut praises: Vec<&Entry> = Vec::new();
             let mut regrets: Vec<&Entry> = Vec::new();
-            for entry in input.entries {
-                let t = entry.text.to_lowercase();
-                if cue_anchored(&t, &name_lower, POSITIVE_CUES) {
+            for (entry, t) in &lowered {
+                if cue_anchored(t, &name_lower, POSITIVE_CUES) {
                     praises.push(entry);
                 }
-                if cue_anchored(&t, &name_lower, NEGATIVE_CUES) {
+                if cue_anchored(t, &name_lower, NEGATIVE_CUES) {
                     regrets.push(entry);
                 }
             }
@@ -790,7 +888,7 @@ impl Detector for ContradictionDetector {
             let pos = praises.iter().min_by_key(|p| (p.day, p.id)).unwrap();
             let neg = regrets.iter().max_by_key(|r| (r.day, r.id)).unwrap();
             out.push(InsightCandidate {
-                id: next_id,
+                id: candidate_id(InsightKind::Contradiction, next_seq),
                 kind: InsightKind::Contradiction,
                 entities: vec![e.id],
                 evidence,
@@ -810,7 +908,7 @@ impl Detector for ContradictionDetector {
                     &neg.text[..neg.text.len().min(60)],
                 ),
             });
-            next_id += 1;
+            next_seq += 1;
         }
         out
     }
@@ -1093,7 +1191,7 @@ impl InsightEngine {
         let by_id: BTreeMap<CandidateId, &InsightCandidate> =
             cands.iter().map(|c| (c.id, c)).collect();
 
-        let accepted = validate(&cands, &self.cfg);
+        let accepted = validate_per_kind(&cands, &self.cfg);
         let mut out: Vec<DiscoveredInsight> = Vec::new();
         for id in accepted {
             let Some(&cand) = by_id.get(&id) else {
@@ -1422,6 +1520,184 @@ mod tests {
         assert_eq!(n1.text, "replayed text");
         assert_eq!(n1.text, n2.text);
         assert_eq!(n1.citations, n2.citations);
+    }
+}
+
+#[cfg(test)]
+mod hardening_5c {
+    use super::*;
+    use skinki_corpus::{generate, Difficulty, GenConfig};
+
+    fn v2(seed: u64) -> Corpus {
+        generate(&GenConfig {
+            seed,
+            years: 5,
+            entries_per_day: 6,
+            difficulty: Difficulty::V2,
+        })
+    }
+
+    #[test]
+    fn contains_word_is_unicode_aware() {
+        // ASCII behavior preserved: substrings inside words never match.
+        assert!(!contains_word("i distrust this", "rust"));
+        assert!(!contains_word("so frustrated today", "rust"));
+        assert!(contains_word("rewrote it in rust!", "rust"));
+        // Cyrillic: with byte-level boundaries every non-ASCII char looked
+        // like a boundary, so "раст" would match inside "контраст".
+        assert!(!contains_word("сплошной контраст", "раст"));
+        assert!(!contains_word("новое растение", "раст"));
+        assert!(contains_word("посадил раст в саду", "раст"));
+        assert!(contains_word("раст — хороший выбор", "раст"));
+    }
+
+    #[test]
+    fn candidate_ids_are_namespaced_by_kind() {
+        // The same seq in different families must never collide (the bug that
+        // let a full multi-detector engine shadow candidates in id-keyed maps).
+        let a = candidate_id(InsightKind::StructuralBridge, 0);
+        let b = candidate_id(InsightKind::TemporalLead, 0);
+        let c = candidate_id(InsightKind::Contradiction, 0);
+        assert!(a != b && b != c && a != c);
+    }
+
+    #[test]
+    fn full_engine_surfaces_union_of_isolated_engines() {
+        // A candidate must be judged only against its own family: running all
+        // three detectors together yields exactly the union of running each
+        // alone (same cfg), as (description, citations) multisets.
+        let c = v2(42);
+        let input = InsightInput::from_corpus(&c);
+        let cfg = ValidationCfg {
+            fdr_q: 0.01,
+            ..ValidationCfg::default()
+        };
+        let single = |d: Box<dyn Detector>| {
+            InsightEngine::with_parts(vec![d], cfg, Box::new(ExtractiveNarrator)).discover(&input)
+        };
+        let mut union: Vec<(String, Vec<EntryId>)> = Vec::new();
+        for out in [
+            single(Box::new(StructuralBridgeDetector)),
+            single(Box::new(TemporalLeadDetector)),
+            single(Box::new(ContradictionDetector)),
+        ] {
+            union.extend(
+                out.into_iter()
+                    .map(|d| (d.description, d.supporting_entries)),
+            );
+        }
+        let full = InsightEngine::with_parts(
+            vec![
+                Box::new(StructuralBridgeDetector),
+                Box::new(TemporalLeadDetector),
+                Box::new(ContradictionDetector),
+            ],
+            cfg,
+            Box::new(ExtractiveNarrator),
+        )
+        .discover(&input);
+        let mut got: Vec<(String, Vec<EntryId>)> = full
+            .into_iter()
+            .map(|d| (d.description, d.supporting_entries))
+            .collect();
+        union.sort();
+        got.sort();
+        assert_eq!(got, union, "bundling detectors must not change the result");
+    }
+
+    #[test]
+    fn per_family_validation_is_isolated() {
+        // Contradiction candidates carry exact p = 0; pooled into one BH pass
+        // they occupy the top ranks and RAISE the cutoff for the structural
+        // family (accepting what per-family BH rejects). The structural
+        // acceptance set must be identical with and without them present.
+        let mk = |kind: InsightKind, seq: u64, p: f64| InsightCandidate {
+            id: candidate_id(kind, seq),
+            kind,
+            entities: vec![seq],
+            evidence: vec![0],
+            stat: Statistic {
+                effect: 1.0,
+                p_value: p,
+                support: 5,
+                surprise: 1.0,
+            },
+            claim: String::new(),
+        };
+        let structural: Vec<InsightCandidate> = (0..4)
+            .map(|i| mk(InsightKind::StructuralBridge, i, 0.02 + i as f64 * 0.05))
+            .collect();
+        let mut mixed = structural.clone();
+        mixed.extend((0..4).map(|i| mk(InsightKind::Contradiction, i, 0.0)));
+
+        let cfg = ValidationCfg {
+            fdr_q: 0.05,
+            min_surprise: 0.0,
+            min_support: 0,
+        };
+        let alone: Vec<CandidateId> = validate_per_kind(&structural, &cfg);
+        let with_zeros: Vec<CandidateId> = validate_per_kind(&mixed, &cfg)
+            .into_iter()
+            .filter(|id| structural.iter().any(|c| c.id == *id))
+            .collect();
+        assert_eq!(
+            alone, with_zeros,
+            "another family's p=0 must not move this family's BH cutoff"
+        );
+        // And the pooled validate() really does differ here — the reason
+        // validate_per_kind exists.
+        let pooled_structural: Vec<CandidateId> = validate(&mixed, &cfg)
+            .into_iter()
+            .filter(|id| structural.iter().any(|c| c.id == *id))
+            .collect();
+        assert_ne!(
+            alone, pooled_structural,
+            "test vector should demonstrate the pooling distortion"
+        );
+    }
+
+    #[test]
+    fn temporal_is_silent_on_day_shuffled_corpus() {
+        // Null-corpus property: destroy every phase relation by shuffling the
+        // day fields (a seeded permutation of the same multiset of days) and
+        // the temporal detector must surface nothing.
+        fn splitmix(state: &mut u64) -> u64 {
+            *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = *state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        for (corpus_seed, shuffle_seed) in [(42u64, 1u64), (7, 2), (42, 3)] {
+            let c = v2(corpus_seed);
+            let mut days: Vec<u32> = c.entries.iter().map(|e| e.day).collect();
+            let mut s = 0xD1CE ^ shuffle_seed;
+            for i in (1..days.len()).rev() {
+                let j = (splitmix(&mut s) % (i as u64 + 1)) as usize;
+                days.swap(i, j);
+            }
+            let shuffled: Vec<Entry> = c
+                .entries
+                .iter()
+                .cloned()
+                .zip(days)
+                .map(|(mut e, d)| {
+                    e.day = d;
+                    e
+                })
+                .collect();
+            let input = InsightInput {
+                entries: &shuffled,
+                vocab: &c.ground_truth.entities,
+            };
+            let out = InsightEngine::temporal().discover(&input);
+            assert!(
+                out.is_empty(),
+                "corpus seed {corpus_seed} / shuffle {shuffle_seed}: temporal \
+                 detector surfaced {} insights on a phase-destroyed corpus",
+                out.len()
+            );
+        }
     }
 }
 
