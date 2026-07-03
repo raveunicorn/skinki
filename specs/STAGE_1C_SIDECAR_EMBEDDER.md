@@ -11,9 +11,12 @@
 > serving pattern waiting for this discriminative base: the expected
 > end-state is `RRF(BM25 + sidecar)`.
 
-- **Status:** draft — T0 (feasibility bench) is runnable now; **D1 (form +
-  model choice) blocks everything after it and needs the human** (it may add
-  a dependency boundary and a model license to the repo).
+- **Status:** on hold behind `STAGE_1C_B_PURE_RUST_ENCODER.md` — the **D1
+  form decision was taken by the human (2026-07-04): try variant B (pure
+  Rust, self-contained) first**; this spec is the recorded, mechanical
+  fallback if B's kill-switch (1C-B T0 GEMM bar) or quality verdict (1C-B
+  D2) fails. The seam, log format, and quality bars here stay binding for
+  both variants.
 - **Owner of the design (frontier/human):** frontier drafts; human approves
   D1 (deps/license are law-level).
 - **Delegatable to (cheaper model):** yes — T0, T2–T6 are mechanical behind
@@ -125,7 +128,7 @@ multilingual for the product) — the protocol is model-agnostic by design.
 | Ticket | Type | Tier | Acceptance |
 | --- | --- | --- | --- |
 | T0 (measure-first) feasibility bench: onnxruntime (dev tooling) throughput/latency/RSS for the §5 candidates on M1 (batch + single-stream + cold spawn), plus a pure-Rust blocked-GEMM microbench to ground variant-B numbers | impl | cheaper | numbers table recorded in this spec |
-| **D1** form + model decision: out-of-process sidecar (recommended below) vs pure-Rust in-crate forward; model pick + license check; approve the tooling dependency boundary | design | **frontier + human** | decision + rationale recorded here; §5 table updated |
+| ✅ **D1** form + model decision: out-of-process sidecar vs pure-Rust in-crate forward; model pick + license check; approve the tooling dependency boundary | design | **frontier + human** | **Form decided by the human 2026-07-04: variant B first** (`STAGE_1C_B_PURE_RUST_ENCODER.md`) — the self-contained soul of the engine is worth one capped, kill-switched attempt; this spec (A) is the recorded fallback, resumed with 1C-B's T0 data attached if the GEMM bar or the D2 verdict fails. Model pick + license check remain open and shared with 1C-B (§5 table; bge-small-en for the benchmark verdict, multilingual decision deferred to the winning variant's T5/model ticket) |
 | T2 `EmbArtifactLog` (§3): writer/reader/replay + `rebuild(log)` determinism tests + ledger method-stamp wiring | impl | cheaper | unit + property tests green |
 | T3 sidecar reference implementation (dev tooling, e.g. `tools/emb-sidecar.py` over onnxruntime) + §4 protocol client (`BatchEmbedder`) + process supervisor (spawn/warm/TTL/crash) | impl | cheaper | protocol round-trip + fault-injection tests green |
 | T4 wire into `SemanticRetriever`/IVF + `hybrid-rrf`; produce the D1-row logs (one-time inference, offline) | impl | cheaper | replayed eval runs end-to-end |
