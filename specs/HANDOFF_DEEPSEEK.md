@@ -113,8 +113,19 @@ Work them **in order**; every ticket table inside marks its tier. Start here:
      committed** — model weights, regenerate with the script) +
      `fixtures/golden_embeddings.f32` (32 strings, committed). **Cross-impl
      parity verified**: the `#[ignore]` `golden_parity` test reproduces all 32
-     golden embeddings byte-for-byte; rerun it after every regeneration. Next:
-     T3 (wiring) → D1 (verdict).
+     golden embeddings byte-for-byte; rerun it after every regeneration.
+   - **T3 done** — `EmbedderSpec { Hash, Static { path } }` +
+     `SemanticRetriever` consolidated into `skinki-baseline` (single source;
+     previously duplicated in mcp/harness). `--embedder hash|static:<path>` on
+     `loco-eval` / `longmemeval-eval` / `skinki-mcp`; typos are a loud parse
+     error, never a silent hash fallback. Default `hash`.
+   - **D1 done — HYPOTHESIS FALSIFIED.** LongMemEval multi-session pooled
+     recall@10 = 0.090 for the distilled static artifact vs BM25 0.134 and the
+     §2 bar ≥ 0.22. Root cause + full verdict table recorded in the spec (§6).
+     No `--assert-gate` bar frozen (an unreachable bar would be dishonest);
+     `semantic-static` stays a measurement instrument; the hash embedder
+     remains the served default. T4/T5/T7 de-prioritized pending a
+     discriminative base artifact. **Stage 1B closed.**
 3. `STAGE_6B_AGENT_MEMORY.md` — `remember` / staleness / `memory_asof`
    (all delegatable; T2 semantics reviewed).
 

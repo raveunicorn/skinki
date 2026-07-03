@@ -207,6 +207,7 @@ version = "0.1.0"
 dependencies = [
  "skinki-corpus",
  "skinki-eval",
+ "skinki-vector",
 ]
 
 [[package]]
@@ -292,6 +293,7 @@ dependencies = [
  "anyhow",
  "serde",
  "serde_json",
+ "skinki-baseline",
  "skinki-corpus",
  "skinki-eval",
  "skinki-graph",
