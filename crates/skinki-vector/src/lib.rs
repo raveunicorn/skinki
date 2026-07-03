@@ -32,6 +32,7 @@ pub mod ivf;
 pub mod quant;
 pub mod rotate;
 pub mod search;
+pub mod static_embed;
 pub mod store;
 
 /// A tiny deterministic SplitMix64 PRNG (matches the corpus generator's), so the
