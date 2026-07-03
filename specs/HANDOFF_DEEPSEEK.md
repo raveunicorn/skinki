@@ -126,6 +126,12 @@ Work them **in order**; every ticket table inside marks its tier. Start here:
      `semantic-static` stays a measurement instrument; the hash embedder
      remains the served default. T4/T5/T7 de-prioritized pending a
      discriminative base artifact. **Stage 1B closed.**
+   - **D1 addendum (2026-07-04)** — ready-made Model2Vec artifacts measured
+     via `scripts/convert_model2vec_to_skemb.py`: potion-base-8M (30 MB)
+     0.116, potion-retrieval-32M (130 MB, deliberately over budget) 0.086 on
+     the full pool — bigger decays *faster*; the failure is architectural
+     (context-free token vectors), not budget. Static closed in all forms.
+     Next: **T8 hybrid RRF fusion** (measure-first), then the sidecar spec.
 3. `STAGE_6B_AGENT_MEMORY.md` — `remember` / staleness / `memory_asof`
    (all delegatable; T2 semantics reviewed).
 

@@ -150,6 +150,7 @@ model file is present.
 | T4 IVF-backed `SemanticRetriever` mode (threshold switch, index build/load) | impl | cheaper | §5 integration test green; latency reported |
 | T5 coarse-to-fine productionization: per-session/instance pooling as the documented strategy flag; runbook for the LongMemEval dataset (download, layout, exact commands) — this also discharges HANDOFF 3B's "gate the 0.438" TODO | impl | cheaper | `--strategy coarse-to-fine` reproduces the measured number ±0.01 with the live-model embeddings; with static embeddings hits the §2 bar |
 | T6 (optional, measure-first) late-interaction rerank: keep per-token vectors for the top-50 coarse candidates, MaxSim rerank; measure on multi-session | impl | cheaper | measured lift recorded (adopt only if > +0.02 recall@10) |
+| T8 (measure-first) hybrid RRF fusion: deterministic reciprocal-rank fusion of BM25 + `semantic-static` (potion-base-8M artifact), depth 100, RRF k=60, tie-break by id — BM25 and static have disjoint failure modes (exact-term misses vs common-word crowding), fusion is ~50 lines of pure Rust, no new deps | impl | cheaper | measured on the D1 row; recorded here; candidate served default if > BM25 0.134 (default flip is a separate decision) |
 | ✅ **D1** quality verdict: run §2's LongMemEval rows, record the margins in this spec, freeze the `--assert-gate` bars (never lower later) | design | **frontier** | numbers recorded; bars frozen; fallback decision (sidecar) taken only if the hypothesis failed — **done. Verdict below.** |
 
 ### D1 verdict — recorded 2026-07-03
@@ -180,6 +181,55 @@ model file is present.
 - **Sidecar fallback decision:** not taken in D1. A local-LLM sidecar is a Stage-3/production decision, not a Stage-1B one — Stage 1B's job was to test whether *static* distillation suffices; it does not, and that result is recorded. Sidecar expense belongs to a separate frontier decision with its own budget.
 
 **What this means for the stage's DoD:** static distillation is **insufficient by a wide margin** (0.090 vs 0.22 bar, 0.134 BM25 yardstick). The §7 DoD bullet "static distillation sufficient (by what margin) or sidecar fallback (why)" is answered: **insufficient, margin = −0.13 vs bar, −0.04 vs BM25**; the reason is the input-table-vs-attention-pool gap recorded above. T4 (IVF serving) and T7 (multilingual artifact) are de-prioritized; T5 (coarse-to-fine) is reopened conditionally on a better base. The hash embedder remains the engine's honest served retriever.
+
+### D1 addendum — ready-made Model2Vec artifacts (recorded 2026-07-04)
+
+Two follow-up questions were measured after the verdict, closing the static
+hypothesis in *all* forms, not just our own distillation:
+
+**Q1: was our input-table distillation just done wrong?** Partially. The
+canonical Model2Vec recipe (every vocab token through the FULL encoder,
+pooled output; potion models add Tokenlearn training on top) is stronger
+than the input-table shortcut D1 measured — but not nearly enough.
+`scripts/convert_model2vec_to_skemb.py` converts any WordPiece Model2Vec
+model into `SKEMB001` (potion models ship the bge tokenizer, dim-native,
+Zipf baked into the vectors → uniform SKEMB weights, specials 0).
+
+**Q2: was the ≤ 48 MB artifact budget the binding constraint?** No — and
+this is the decisive result. `potion-retrieval-32M` (130 MB, 2.7× over
+budget, run deliberately over-budget as the experiment) *wins* on a small
+pool but *loses to the 30 MB model* on the full pool:
+
+| recall@10, k=10 | size | small pool (20 inst., ~98k entries) | full pool (594,708 entries, 121 queries) |
+| --- | --- | --- | --- |
+| BM25 (yardstick) | — | 0.525 | 0.134 |
+| potion-base-8M | 30.6 MB | 0.408 | **0.116** |
+| potion-retrieval-32M | 130 MB | **0.475** | 0.086 |
+| our input-table artifact (D1) | 30.2 MB | — | 0.090 |
+
+(BM25 full-pool row reproduces the D1 verdict exactly — same corpus, same
+queries; conversion sanity confirmed by the small-pool ordering.)
+
+**Conclusion:** the failure is *architectural*, not a budget or recipe
+artifact. A static bag-of-token-vectors assigns each token one
+context-free vector; a record's embedding is a mean of those. Word order,
+negation, and speaker context are lost at encoding time, so records
+sharing common words crowd the neighborhood, and the relevant-vs-irrelevant
+cosine margin collapses as the haystack grows — bigger/better-tuned tables
+decay *faster* (more ways to match spuriously). Static ceiling on this
+benchmark ≈ 0.12 regardless of size; the 48 MB budget line was never
+binding (it is a design-time carve-out from the 250 MB idle law and mmap
+makes disk size soft — amendable D0-style if a measurement ever justifies
+it; none does).
+
+**Path forward (recorded):** (1) **T8 hybrid RRF fusion** (ticket above) —
+the cheap architecture change *around* the embedder; BM25 and static fail
+differently, fusion is measured next. (2) The **sidecar decision** (a real
+sentence encoder out-of-process, or a pure-Rust in-crate encoder — bge-small
+is 33M params/12 layers) is the true architecture fix (semantic-real
+reference: 0.438); it gets its own frontier spec. Self-distillation
+(full-forward from bge-small) is now pointless — potion *is* that, done
+well, and it ceilings at 0.116.
 
 ## 7. Definition of done
 
