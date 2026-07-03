@@ -136,8 +136,12 @@ Work them **in order**; every ticket table inside marks its tier. Start here:
      first config to beat the yardstick on the D1 row; ndcg +12%; answer@10
      −7%. NOT flipped to served default (margin within noise on 121 queries;
      artifact not shipped); `hybrid-rrf` column ships as an instrument.
-     Next: the sidecar spec (real sentence encoder) — fusion is the pattern
-     to re-apply once a discriminative base lands.
+     Next: `STAGE_1C_SIDECAR_EMBEDDER.md` — fusion is the pattern to
+     re-apply once a discriminative base lands.
+2b. `STAGE_1C_SIDECAR_EMBEDDER.md` — the real sentence encoder behind a
+   process boundary + replay logs (successor to 1B; T8 fusion is the serving
+   pattern). **T0 (feasibility bench) is runnable now and delegatable; D1
+   (form + model + license) is frontier + human and blocks T2+.**
 3. `STAGE_6B_AGENT_MEMORY.md` — `remember` / staleness / `memory_asof`
    (all delegatable; T2 semantics reviewed).
 
