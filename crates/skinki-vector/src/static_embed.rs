@@ -75,23 +75,23 @@ impl StaticEmbedder {
         let bytes = view.as_slice();
         let mut r = Reader::new(bytes);
 
-        let magic = r.take(8);
+        let magic = r.take(8)?;
         if magic != MAGIC {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("bad magic: expected {:?}, got {:?}", MAGIC, magic),
             ));
         }
-        let version = r.u32();
+        let version = r.u32()?;
         if version != FORMAT_VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unsupported artifact version {version} (want {FORMAT_VERSION})"),
             ));
         }
-        let dim = r.u32() as usize;
-        let vocab_count = r.u32() as usize;
-        let flags = r.u32();
+        let dim = r.u32()? as usize;
+        let vocab_count = r.u32()? as usize;
+        let flags = r.u32()?;
         if dim == 0 || vocab_count == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -109,8 +109,8 @@ impl StaticEmbedder {
         let mut piece_to_id = BTreeMap::new();
         let mut unk_id = None;
         for id in 0..vocab_count as u32 {
-            let len = r.u32() as usize;
-            let s = std::str::from_utf8(r.take(len))
+            let len = r.u32()? as usize;
+            let s = std::str::from_utf8(r.take(len)?)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
                 .to_owned();
             if s == UNK {
@@ -126,10 +126,22 @@ impl StaticEmbedder {
         })?;
 
         let table_offset = r.pos();
-        let table_bytes = vocab_count * dim * 4;
-        let weights_offset = table_offset + table_bytes;
-        let weights_bytes = vocab_count * 4;
-        let need = weights_offset + weights_bytes;
+        // All size arithmetic is checked: a corrupt header (huge dim/vocab)
+        // must yield InvalidData, not a usize overflow that wraps past the
+        // bounds check in release mode.
+        let (weights_offset, need) = (|| {
+            let table_bytes = vocab_count.checked_mul(dim)?.checked_mul(4)?;
+            let weights_offset = table_offset.checked_add(table_bytes)?;
+            let weights_bytes = vocab_count.checked_mul(4)?;
+            let need = weights_offset.checked_add(weights_bytes)?;
+            Some((weights_offset, need))
+        })()
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("artifact header overflows: dim {dim} x vocab {vocab_count}"),
+            )
+        })?;
         if bytes.len() < need {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -321,14 +333,30 @@ impl<'a> Reader<'a> {
     fn pos(&self) -> usize {
         self.pos
     }
-    fn take(&mut self, n: usize) -> &[u8] {
-        let s = &self.bytes[self.pos..self.pos + n];
-        self.pos += n;
-        s
+    /// Bounds-checked read: a truncated or corrupt artifact (e.g. a vocab
+    /// string whose length prefix runs past EOF) must surface as
+    /// `InvalidData`, never as a slice panic.
+    fn take(&mut self, n: usize) -> io::Result<&[u8]> {
+        let end = self.pos.checked_add(n).filter(|&e| e <= self.bytes.len());
+        match end {
+            Some(end) => {
+                let s = &self.bytes[self.pos..end];
+                self.pos = end;
+                Ok(s)
+            }
+            None => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "artifact truncated: read of {n} bytes at offset {} exceeds file size {}",
+                    self.pos,
+                    self.bytes.len()
+                ),
+            )),
+        }
     }
-    fn u32(&mut self) -> u32 {
-        let b = self.take(4);
-        u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+    fn u32(&mut self) -> io::Result<u32> {
+        let b = self.take(4)?;
+        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
 }
 
@@ -503,6 +531,65 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         let _ = std::fs::remove_file(&p);
         let _ = std::fs::remove_file(&trunc_path);
+    }
+
+    /// Truncation anywhere before the table — mid-header, mid-vocab, or a
+    /// vocab length prefix pointing past EOF — must be `InvalidData`, never a
+    /// slice panic (the pre-fix reader panicked on all three).
+    #[test]
+    fn load_rejects_truncated_header_and_vocab() {
+        let full = build_toy_artifact(0xA11CE, 16);
+        let dir = std::env::temp_dir().join(format!(
+            "skinki_static_embed_trunc_hdr_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Mid-header (5 bytes into the magic) and mid-vocab (a few bytes past
+        // the fixed header, inside the first length-prefixed string).
+        for (name, cut) in [("hdr", 5usize), ("vocab", 24 + 6)] {
+            let path = dir.join(format!("{name}.skemb"));
+            std::fs::write(&path, &full[..cut]).unwrap();
+            let err = StaticEmbedder::load(&path).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData, "cut={cut}");
+            let _ = std::fs::remove_file(&path);
+        }
+        // A corrupt vocab length prefix that runs past EOF: keep the full
+        // header, then claim a u32::MAX-byte first string.
+        let mut bad = full.clone();
+        bad[24..28].copy_from_slice(&u32::MAX.to_le_bytes());
+        let path = dir.join("badlen.skemb");
+        std::fs::write(&path, &bad).unwrap();
+        let err = StaticEmbedder::load(&path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A corrupt header whose dim x vocab product overflows usize must be
+    /// `InvalidData` — in release mode an unchecked multiply would wrap and
+    /// sail past the length check.
+    #[test]
+    fn load_rejects_header_size_overflow() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"SKEMB001");
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // version
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // dim
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // vocab_count
+        bytes.extend_from_slice(&1u32.to_le_bytes()); // flags: WordPiece
+
+        // One len-prefixed "[UNK]" so vocab parsing reaches the size math for
+        // id 0, then EOF for id 1 — either failure mode must be InvalidData.
+        bytes.extend_from_slice(&5u32.to_le_bytes());
+        bytes.extend_from_slice(b"[UNK]");
+        let dir = std::env::temp_dir().join(format!(
+            "skinki_static_embed_overflow_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("overflow.skemb");
+        std::fs::write(&path, &bytes).unwrap();
+        let err = StaticEmbedder::load(&path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
