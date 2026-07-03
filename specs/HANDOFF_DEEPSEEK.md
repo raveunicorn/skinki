@@ -101,9 +101,14 @@ The frontier review (`REVIEW_FRONTIER_2026_07.md`) produced seven new specs.
 Work them **in order**; every ticket table inside marks its tier. Start here:
 
 1. `STAGE_5C_HARDENING.md` — bug fixes + scale gate + store soak (all tickets
-   delegatable; T1/T3/T4 get a frontier diff review).
+   delegatable; T1/T3/T4 get a frontier diff review). **Status: merged (PR #8).**
 2. `STAGE_1B_STATIC_EMBEDDER.md` — static embedder + IVF serving (T1–T5
    delegatable behind the parity gate; D1 frontier).
+   - **T2 done** — `StaticEmbedder` Rust core landed (`feat/1b-static-embedder`):
+     `SKEMB001` reader + WordPiece tokenizer + Zipf pooling, toy artifact at
+     `fixtures/static_embed_toy.skemb`, 18 tests green, `cargo test -p skinki-vector
+     static_embed` is the gate. Next: T1 (real distillation) → D1 (verdict) →
+     T3/T4/T5 (wiring, IVF, coarse-to-fine).
 3. `STAGE_6B_AGENT_MEMORY.md` — `remember` / staleness / `memory_asof`
    (all delegatable; T2 semantics reviewed).
 
