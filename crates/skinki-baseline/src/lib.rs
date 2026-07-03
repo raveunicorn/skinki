@@ -95,10 +95,233 @@ impl RetrievalSystem for Bm25 {
     }
 }
 
+use skinki_vector::dot;
+use skinki_vector::embed::{Embedder, StaticHashEmbedder};
+
+/// How the production semantic retriever embeds text. `Hash` is the legacy
+/// deterministic hash-of-tokens embedder (zero deps, byte-reproducible);
+/// `Static` loads a `SKEMB001` artifact (Stage 1B's distilled token→vector
+/// table). `Hash` remains the default so existing benchmarks are not silently
+/// perturbed until D1 freezes the static bars.
+#[derive(Debug, Clone)]
+pub enum EmbedderSpec {
+    Hash,
+    /// `static:<path>` — load a `SKEMB001` artifact at `path`.
+    Static {
+        path: std::path::PathBuf,
+    },
+}
+
+impl EmbedderSpec {
+    /// Parse the `--embedder` flag value: `hash` or `static:<path>`. Anything
+    /// else is a loud error — a typo silently falling back to `hash` would
+    /// mislabel a benchmark column, which is worse than failing.
+    pub fn parse(flag: &str) -> Result<Self, String> {
+        if flag == "hash" {
+            return Ok(EmbedderSpec::Hash);
+        }
+        if let Some(rest) = flag.strip_prefix("static:") {
+            if rest.is_empty() {
+                return Err("--embedder static: needs a path (static:<path>)".to_string());
+            }
+            return Ok(EmbedderSpec::Static {
+                path: std::path::PathBuf::from(rest),
+            });
+        }
+        Err(format!(
+            "invalid --embedder '{flag}': expected 'hash' or 'static:<path>'"
+        ))
+    }
+
+    /// Construct the embedder described by this spec. `Hash` costs nothing;
+    /// `Static` mmaps the artifact (fallible).
+    pub fn build(&self) -> std::io::Result<Box<dyn Embedder>> {
+        match self {
+            EmbedderSpec::Hash => Ok(Box::new(StaticHashEmbedder::new(256))),
+            EmbedderSpec::Static { path } => Ok(Box::new(
+                skinki_vector::static_embed::StaticEmbedder::load(path)?,
+            )),
+        }
+    }
+}
+
+/// A cosine-similarity nearest-neighbor retriever over a fixed set of
+/// per-entry embeddings, generic-free over a boxed [`Embedder`]. Vectors
+/// produced by [`StaticHashEmbedder`] are L2-normalized so cosine == dot; the
+/// `SKEMB001` static path also yields unit-norm rows. This is the single
+/// production semantic retriever shared by the harness and `skinki-mcp`
+/// (Stage 1B T3 consolidation — previously duplicated in three crates).
+pub struct SemanticRetriever {
+    embedder: Box<dyn Embedder>,
+    vectors: Vec<Vec<f32>>,
+    ids: Vec<EntryId>,
+    name: String,
+}
+
+impl SemanticRetriever {
+    /// Build from an already-constructed embedder with a custom column name.
+    pub fn new(embedder: Box<dyn Embedder>, name: &str) -> Self {
+        SemanticRetriever {
+            embedder,
+            vectors: Vec::new(),
+            ids: Vec::new(),
+            name: name.to_string(),
+        }
+    }
+
+    /// Build from an [`EmbedderSpec`] (`hash` or `static:<path>`) with a
+    /// column name; mmaps the artifact if `Static`. Convenience constructor
+    /// for the harness / MCP paths.
+    pub fn from_spec(spec: &EmbedderSpec, name: &str) -> std::io::Result<Self> {
+        Ok(SemanticRetriever::new(spec.build()?, name))
+    }
+
+    /// The embedder's dimensionality (constant for an instance).
+    pub fn dim(&self) -> usize {
+        self.embedder.dim()
+    }
+}
+
+impl RetrievalSystem for SemanticRetriever {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn index(&mut self, corpus: &Corpus) {
+        self.vectors.clear();
+        self.ids.clear();
+        self.vectors.reserve(corpus.entries.len());
+        self.ids.reserve(corpus.entries.len());
+        for e in &corpus.entries {
+            self.vectors.push(self.embedder.embed(&e.text));
+            self.ids.push(e.id);
+        }
+    }
+
+    fn search(&self, query: &str, k: usize) -> Vec<EntryId> {
+        let qv = self.embedder.embed(query);
+        let mut scored: Vec<(f32, EntryId)> = self
+            .vectors
+            .iter()
+            .zip(self.ids.iter())
+            .map(|(v, &id)| (dot(&qv, v), id))
+            .collect();
+        // Sort by score descending, tie-break by ascending id for determinism.
+        scored.sort_by(|a, b| match b.0.partial_cmp(&a.0) {
+            Some(std::cmp::Ordering::Equal) | None => a.1.cmp(&b.1),
+            Some(ord) => ord,
+        });
+        scored.truncate(k);
+        scored.into_iter().map(|(_, id)| id).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use skinki_corpus::{generate, GenConfig};
+
+    /// Mark: tests for the new T3 embedder-selection seam live alongside the
+    /// baseline yardstick so a regression here is caught by `cargo test -p
+    /// skinki-baseline` (the same CI step that gates BM25).
+    mod embedder_spec {
+        use super::*;
+
+        #[test]
+        fn parse_hash() {
+            assert!(matches!(
+                EmbedderSpec::parse("hash"),
+                Ok(EmbedderSpec::Hash)
+            ));
+        }
+
+        #[test]
+        fn parse_static_path() {
+            match EmbedderSpec::parse("static:/tmp/model.skemb") {
+                Ok(EmbedderSpec::Static { path }) => {
+                    assert_eq!(path, std::path::PathBuf::from("/tmp/model.skemb"));
+                }
+                other => panic!("expected Static, got {other:?}"),
+            }
+        }
+
+        /// A typo must be a loud error, never a silent fall-back to `hash` —
+        /// a mislabeled benchmark column is worse than a failed run.
+        #[test]
+        fn parse_rejects_typos_and_empty() {
+            assert!(EmbedderSpec::parse("").is_err());
+            assert!(EmbedderSpec::parse("nope").is_err());
+            assert!(EmbedderSpec::parse("statik:/tmp/m.skemb").is_err());
+            assert!(EmbedderSpec::parse("Hash").is_err());
+            // `static:` with no path is an error too, not the hash default.
+            assert!(EmbedderSpec::parse("static:").is_err());
+        }
+
+        #[test]
+        fn build_hash_yields_working_embedder() {
+            let e = EmbedderSpec::Hash.build().expect("hash never fails");
+            let v = e.embed("hello world");
+            assert_eq!(v.len(), 256);
+            assert_eq!(e.dim(), 256);
+        }
+
+        #[test]
+        fn build_static_missing_file_errors() {
+            let spec = EmbedderSpec::Static {
+                path: std::path::PathBuf::from("/nonexistent/skinki-static-missing.skemb"),
+            };
+            assert!(
+                spec.build().is_err(),
+                "missing artifact must error, not panic"
+            );
+        }
+
+        #[test]
+        fn from_spec_hash_indexes_and_searches() {
+            let corpus = generate(&GenConfig {
+                seed: 7,
+                years: 1,
+                entries_per_day: 1,
+                difficulty: skinki_corpus::Difficulty::V1,
+            });
+            let mut r = SemanticRetriever::from_spec(&EmbedderSpec::Hash, "semantic-static")
+                .expect("hash build");
+            assert_eq!(r.name(), "semantic-static");
+            r.index(&corpus);
+            let hits = r.search("project", 5);
+            // Hits must be valid ids and deduplicated (a cosine retriever can
+            // never return the same id twice).
+            let mut seen = std::collections::BTreeSet::new();
+            for &id in &hits {
+                assert!(seen.insert(id), "duplicate id {id} in results");
+            }
+        }
+
+        /// The same string embeds to identical bytes (rule-2 determinism),
+        /// via the boxed trait object — this is the property that lets a
+        /// boxed `dyn Embedder` replace the old generic code path without
+        /// changing any downstream golden.
+        #[test]
+        fn hash_embedder_is_pure_through_box() {
+            let e = EmbedderSpec::Hash.build().unwrap();
+            let a = e.embed("skinki static embedder");
+            let b = e.embed("skinki static embedder");
+            assert_eq!(a, b, "embed must be pure through Box<dyn Embedder>");
+        }
+
+        /// Cosine-self == 1 for any non-empty text (the normalization
+        /// contract every consumer of `SemanticRetriever` relies on).
+        #[test]
+        fn hash_embeddings_are_unit_norm() {
+            let e = EmbedderSpec::Hash.build().unwrap();
+            let v = e.embed("the quick brown fox");
+            let mag = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            assert!(
+                (mag - 1.0).abs() < 1e-4,
+                "expected unit-norm embedding, got magnitude {mag}"
+            );
+        }
+    }
 
     fn recall_hit_rate(difficulty: skinki_corpus::Difficulty) -> f64 {
         let corpus = generate(&GenConfig {

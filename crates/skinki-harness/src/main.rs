@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use skinki_baseline::Bm25;
+use skinki_baseline::{Bm25, EmbedderSpec, SemanticRetriever};
 use skinki_corpus::{
     generate, Corpus, CorpusMeta, Difficulty, Entry, EntryId, GenConfig, GroundTruth, RecallQuery,
 };
@@ -24,7 +24,7 @@ use skinki_eval::{
 use skinki_store::{derive_units, RawEvent, Source, Store, StoreOptions};
 use skinki_telemetry::{peak_rss_bytes, LatencySummary};
 use skinki_vector::bench::{passes_gate, run_matrix, verdict, BenchReport, Budgets};
-use skinki_vector::embed::{synthetic_clusters, ClusterSampler, Embedder, StaticHashEmbedder};
+use skinki_vector::embed::{synthetic_clusters, ClusterSampler, StaticHashEmbedder};
 use skinki_vector::ivf::{IvfBuilder, IvfRaBitQ};
 use skinki_vector::quant::{RaBitQ, RaBitQBuilder};
 use skinki_vector::search::{ivf_two_stage_search, recall as recall_overlap, two_stage_search};
@@ -333,6 +333,12 @@ enum Cmd {
         /// regime the graph is meant to help). Default: all categories.
         #[arg(long)]
         category: Option<i64>,
+        /// Stage 1B T3: embedder for the `semantic-static` column.
+        /// `hash` (default — byte-reproducible legacy) or `static:<path>` to
+        /// serve a `SKEMB001` artifact. Hash stays the default until D1
+        /// freezes the static bars, so existing measurements are unchanged.
+        #[arg(long, default_value = "hash")]
+        embedder: String,
     },
     /// DEV-ONLY: score BM25 on the LongMemEval real-conversation benchmark
     /// (ICLR 2025). Each of 500 questions has its own compiled haystack of
@@ -380,6 +386,12 @@ enum Cmd {
         /// Optional precomputed query embeddings (pooled mode only).
         #[arg(long)]
         query_embeddings_file: Option<PathBuf>,
+        /// Stage 1B T3: embedder for the `semantic-static` column.
+        /// `hash` (default — byte-reproducible legacy) or `static:<path>` to
+        /// serve a `SKEMB001` artifact. Hash default keeps current
+        /// measurements unchanged until D1 freezes the static bars.
+        #[arg(long, default_value = "hash")]
+        embedder: String,
     },
 }
 
@@ -886,6 +898,7 @@ fn main() -> Result<()> {
             dump_texts,
             graph_artifacts,
             category,
+            embedder,
         } => {
             let sample = parse_locomo_sample(&sample)?;
             let corpus = load_locomo(&path, sample, category)?;
@@ -899,6 +912,7 @@ fn main() -> Result<()> {
                     embeddings_file.as_deref(),
                     query_embeddings_file.as_deref(),
                     graph_artifacts.as_deref(),
+                    EmbedderSpec::parse(&embedder).map_err(|e| anyhow::anyhow!(e))?,
                 )?;
             }
         }
@@ -912,6 +926,7 @@ fn main() -> Result<()> {
             pooled,
             embeddings_file,
             query_embeddings_file,
+            embedder,
         } => {
             let instances = load_longmemeval(&path, question_type.as_deref(), limit)?;
             if let Some(dir) = dump_texts {
@@ -927,6 +942,7 @@ fn main() -> Result<()> {
                     graph_artifacts_dir.as_deref(),
                     embeddings_file.as_deref(),
                     query_embeddings_file.as_deref(),
+                    EmbedderSpec::parse(&embedder).map_err(|e| anyhow::anyhow!(e))?,
                 )?;
             } else {
                 run_longmemeval_eval(&instances, k, graph_artifacts_dir.as_deref())?;
@@ -2772,63 +2788,6 @@ fn print_ledger_bench(r: &LedgerBenchReport) {
 // locomo-eval — dev-only real-text validation against LoCoMo10
 // ---------------------------------------------------------------------------
 
-/// Cosine-similarity nearest-neighbor retriever over a fixed set of
-/// per-entry embeddings, generic over [`Embedder`]. Vectors produced by
-/// [`StaticHashEmbedder`] are already L2-normalized, so cosine == dot. The
-/// real-transformer path (where both docs and queries are precomputed) is
-/// scored directly by [`locomo_score_precomputed`], not through this type.
-struct SemanticRetriever<E: Embedder> {
-    embedder: E,
-    vectors: Vec<Vec<f32>>,
-    ids: Vec<EntryId>,
-    name: String,
-}
-
-impl<E: Embedder> SemanticRetriever<E> {
-    fn new(embedder: E, name: &str) -> Self {
-        SemanticRetriever {
-            embedder,
-            vectors: Vec::new(),
-            ids: Vec::new(),
-            name: name.to_string(),
-        }
-    }
-}
-
-impl<E: Embedder> RetrievalSystem for SemanticRetriever<E> {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn index(&mut self, corpus: &Corpus) {
-        self.vectors.clear();
-        self.ids.clear();
-        self.vectors.reserve(corpus.entries.len());
-        self.ids.reserve(corpus.entries.len());
-        for e in &corpus.entries {
-            self.vectors.push(self.embedder.embed(&e.text));
-            self.ids.push(e.id);
-        }
-    }
-
-    fn search(&self, query: &str, k: usize) -> Vec<EntryId> {
-        let qv = self.embedder.embed(query);
-        let mut scored: Vec<(f32, EntryId)> = self
-            .vectors
-            .iter()
-            .zip(self.ids.iter())
-            .map(|(v, &id)| (dot(&qv, v), id))
-            .collect();
-        // Sort by score descending, tie-break by ascending id for determinism.
-        scored.sort_by(|a, b| match b.0.partial_cmp(&a.0) {
-            Some(std::cmp::Ordering::Equal) | None => a.1.cmp(&b.1),
-            Some(ord) => ord,
-        });
-        scored.truncate(k);
-        scored.into_iter().map(|(_, id)| id).collect()
-    }
-}
-
 /// Read a flat little-endian f32 embeddings file (`dim * n` floats, one row
 /// per corpus entry in entry-id order) into per-entry vectors.
 fn read_embeddings_file(path: &std::path::Path, dim: usize, n: usize) -> Result<Vec<Vec<f32>>> {
@@ -2947,6 +2906,7 @@ fn run_locomo_eval(
     embeddings_file: Option<&std::path::Path>,
     query_embeddings_file: Option<&std::path::Path>,
     graph_artifacts: Option<&std::path::Path>,
+    embedder: EmbedderSpec,
 ) -> Result<()> {
     println!("\n=== skinki — locomo-eval (LoCoMo10 real-conversation benchmark) ===");
     println!(
@@ -2963,7 +2923,7 @@ fn run_locomo_eval(
     bm25.index(corpus);
     cols.push(("bm25".into(), locomo_score(&bm25, corpus, k)));
 
-    let mut semantic = SemanticRetriever::new(StaticHashEmbedder::new(dim), "semantic-static");
+    let mut semantic = SemanticRetriever::from_spec(&embedder, "semantic-static")?;
     semantic.index(corpus);
     cols.push(("semantic-static".into(), locomo_score(&semantic, corpus, k)));
 
@@ -3133,6 +3093,7 @@ fn run_longmemeval_pooled_eval(
     graph_artifacts_dir: Option<&std::path::Path>,
     embeddings_file: Option<&std::path::Path>,
     query_embeddings_file: Option<&std::path::Path>,
+    embedder: EmbedderSpec,
 ) -> Result<()> {
     let Some((corpus, query_to_instance)) = build_pooled_corpus(instances) else {
         println!("\nNo scoreable instances (all had empty evidence).");
@@ -3154,8 +3115,10 @@ fn run_longmemeval_pooled_eval(
     bm25.index(&corpus);
     cols.push(("bm25".into(), locomo_score(&bm25, &corpus, k)));
 
-    // Semantic-static (hash-of-tokens).
-    let mut semantic = SemanticRetriever::new(StaticHashEmbedder::new(256), "semantic-static");
+    // Semantic-static (hash-of-tokens, or the SKEMB001 artifact if --embedder
+    // static:<path> was passed). Hash stays the default so existing pooled
+    // measurements are byte-unchanged until D1 freezes the static bars.
+    let mut semantic = SemanticRetriever::from_spec(&embedder, "semantic-static")?;
     semantic.index(&corpus);
     cols.push((
         "semantic-static".into(),
@@ -3748,7 +3711,8 @@ mod locomo_eval_tests {
     #[test]
     fn semantic_retriever_ranks_lexically_closest_first() {
         let corpus = tiny_corpus();
-        let mut system = SemanticRetriever::new(StaticHashEmbedder::new(64), "semantic-static");
+        let mut system =
+            SemanticRetriever::new(Box::new(StaticHashEmbedder::new(64)), "semantic-static");
         system.index(&corpus);
         let top = system.search("Alice's cat is named Whiskers", 1);
         assert_eq!(top, vec![0]);
@@ -3757,7 +3721,8 @@ mod locomo_eval_tests {
     #[test]
     fn semantic_retriever_scores_via_locomo_score() {
         let corpus = tiny_corpus();
-        let mut system = SemanticRetriever::new(StaticHashEmbedder::new(64), "semantic-static");
+        let mut system =
+            SemanticRetriever::new(Box::new(StaticHashEmbedder::new(64)), "semantic-static");
         system.index(&corpus);
         let scores = locomo_score(&system, &corpus, 10);
         assert_eq!(scores.queries, 1);
@@ -3775,6 +3740,31 @@ mod locomo_eval_tests {
             LocomoSample::One(3)
         ));
         assert!(parse_locomo_sample("bogus").is_err());
+    }
+
+    /// Stage 1B T3: the `--embedder` flag flows `EmbedderSpec::parse` →
+    /// `SemanticRetriever::from_spec` and the default-hash path produces the
+    /// same retriever the bench measured before (no silent behavior change
+    /// until D1 swaps the default). Static-with-a-bad-path must error, not
+    /// panic, so a misspelled CLI flag fails loud at construction.
+    #[test]
+    fn embedder_spec_hash_builds_and_static_missing_errors() {
+        let corpus = tiny_corpus();
+        let spec = EmbedderSpec::parse("hash").unwrap();
+        let mut r = SemanticRetriever::from_spec(&spec, "semantic-static").unwrap();
+        r.index(&corpus);
+        assert_eq!(r.name(), "semantic-static");
+        assert_eq!(r.dim(), 256);
+
+        let bad = EmbedderSpec::Static {
+            path: std::path::PathBuf::from("/nonexistent/skinki-static-bad.skemb"),
+        };
+        assert!(SemanticRetriever::from_spec(&bad, "x").is_err());
+
+        // A typo (incl. `static:` with no path) is a loud parse error, never
+        // a silent hash fallback that would mislabel a benchmark column.
+        assert!(EmbedderSpec::parse("static:").is_err());
+        assert!(EmbedderSpec::parse("statik:/m.skemb").is_err());
     }
 }
 

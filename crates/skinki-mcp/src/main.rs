@@ -11,6 +11,7 @@
 use std::io::{self, BufRead, Write};
 
 use anyhow::{Context, Result};
+use skinki_baseline::EmbedderSpec;
 use skinki_corpus::{Corpus, CorpusMeta, Difficulty, Entry, EntryId, EntryKind};
 use skinki_mcp::{parse_line, RetrieverKind, Server};
 use skinki_store::Store;
@@ -91,6 +92,9 @@ fn parse_args() -> Result<CliArgs> {
     let mut corpus = None;
     let mut store = None;
     let mut retriever = RetrieverKind::Graph;
+    // `--embedder hash|static:<path>` (Stage 1B T3). Default `hash` so the
+    // legacy semantic path is byte-unchanged until D1 freezes the static bars.
+    let mut embedder = EmbedderSpec::Hash;
     while let Some(arg) = args.next() {
         if arg == "--corpus" {
             corpus = Some(std::path::PathBuf::from(
@@ -110,19 +114,35 @@ fn parse_args() -> Result<CliArgs> {
                 .context("--retriever requires {graph, semantic}")?;
             retriever = match val.as_str() {
                 "graph" => RetrieverKind::Graph,
-                "semantic" => RetrieverKind::Semantic,
+                "semantic" => RetrieverKind::Semantic {
+                    embedder: embedder.clone(),
+                },
                 _ => anyhow::bail!("--retriever must be 'graph' or 'semantic', got '{val}'"),
             };
         } else if let Some(val) = arg.strip_prefix("--retriever=") {
             retriever = match val {
                 "graph" => RetrieverKind::Graph,
-                "semantic" => RetrieverKind::Semantic,
+                "semantic" => RetrieverKind::Semantic {
+                    embedder: embedder.clone(),
+                },
                 _ => anyhow::bail!("--retriever must be 'graph' or 'semantic', got '{val}'"),
             };
+        } else if arg == "--embedder" {
+            let val = args
+                .next()
+                .context("--embedder requires {hash, static:<path>}")?;
+            embedder = EmbedderSpec::parse(&val).map_err(|e| anyhow::anyhow!(e))?;
+        } else if let Some(val) = arg.strip_prefix("--embedder=") {
+            embedder = EmbedderSpec::parse(val).map_err(|e| anyhow::anyhow!(e))?;
         }
     }
     if corpus.is_none() && store.is_none() {
-        anyhow::bail!("usage: skinki-mcp --corpus <path.json> OR --store <dir> [--retriever {{graph,semantic}}]");
+        anyhow::bail!("usage: skinki-mcp --corpus <path.json> OR --store <dir> [--retriever {{graph,semantic}}] [--embedder {{hash,static:<path>}}]");
+    }
+    // If --embedder was set after --retriever semantic, retrofit the spec
+    // (the last value wins, matching CLI convention).
+    if let RetrieverKind::Semantic { embedder: e } = &mut retriever {
+        *e = embedder.clone();
     }
     Ok(CliArgs {
         corpus,

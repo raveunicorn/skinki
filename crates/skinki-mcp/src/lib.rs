@@ -22,61 +22,12 @@
 //! (in `main.rs`) does the actual stdin/stdout loop.
 
 use serde_json::{json, Value};
+use skinki_baseline::EmbedderSpec;
+use skinki_baseline::SemanticRetriever;
 use skinki_corpus::Corpus;
-use skinki_corpus::EntryId;
 use skinki_eval::RetrievalSystem;
 use skinki_graph::{assemble_context, RelationRetriever};
 use skinki_insight::{InsightEngine, InsightInput};
-use skinki_vector::dot;
-use skinki_vector::embed::{Embedder, StaticHashEmbedder};
-
-/// A cosine-similarity (dot product) retriever over an embedder.
-/// Generic over [`Embedder`] — works with any deterministic embedding.
-struct SemanticRetriever<E: Embedder> {
-    embedder: E,
-    vectors: Vec<Vec<f32>>,
-    ids: Vec<EntryId>,
-}
-
-impl<E: Embedder> SemanticRetriever<E> {
-    fn new(embedder: E) -> Self {
-        SemanticRetriever {
-            embedder,
-            vectors: Vec::new(),
-            ids: Vec::new(),
-        }
-    }
-}
-
-impl<E: Embedder> RetrievalSystem for SemanticRetriever<E> {
-    fn name(&self) -> &str {
-        "semantic"
-    }
-    fn index(&mut self, corpus: &Corpus) {
-        self.vectors = corpus
-            .entries
-            .iter()
-            .map(|e| self.embedder.embed(&e.text))
-            .collect();
-        self.ids = corpus.entries.iter().map(|e| e.id).collect();
-    }
-    fn search(&self, query: &str, k: usize) -> Vec<EntryId> {
-        let qv = self.embedder.embed(query);
-        let mut scored: Vec<(f32, EntryId)> = self
-            .vectors
-            .iter()
-            .zip(&self.ids)
-            .map(|(v, &id)| (dot(&qv, v), id))
-            .collect();
-        scored.sort_by(|a, b| {
-            b.0.partial_cmp(&a.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.1.cmp(&b.1))
-        });
-        scored.truncate(k);
-        scored.into_iter().map(|(_, id)| id).collect()
-    }
-}
 
 /// JSON-RPC error codes used by this server (standard JSON-RPC 2.0 codes).
 const PARSE_ERROR: i64 = -32700;
@@ -95,8 +46,11 @@ pub struct Server {
 }
 
 pub enum RetrieverKind {
-    Graph,    // RelationRetriever (typed edges + BM25 fusion)
-    Semantic, // StaticHashEmbedder (hash-of-tokens, fast, deterministic)
+    Graph, // RelationRetriever (typed edges + BM25 fusion)
+    // Static semantic retriever. Carries the Stage 1B embedder spec so the
+    // MCP host selects `hash` (legacy, zero-dep default) or `static:<path>`
+    // (the distilled `SKEMB001` artifact) without recompiling.
+    Semantic { embedder: EmbedderSpec },
 }
 
 impl Server {
@@ -107,8 +61,9 @@ impl Server {
                 r.index(&corpus);
                 Box::new(r)
             }
-            RetrieverKind::Semantic => {
-                let mut r = SemanticRetriever::new(StaticHashEmbedder::new(256));
+            RetrieverKind::Semantic { embedder } => {
+                let mut r = SemanticRetriever::from_spec(&embedder, "semantic")
+                    .expect("embedder build failed (static path missing or corrupt)");
                 r.index(&corpus);
                 Box::new(r)
             }
@@ -471,5 +426,46 @@ mod tests {
         let req = json!({ "jsonrpc": "2.0", "id": 6 });
         let resp = server.handle(&req).expect("has an id, so gets a response");
         assert_eq!(resp["error"]["code"], json!(-32600));
+    }
+
+    /// Stage 1B T3: the `Semantic` retriever variant with the default `hash`
+    /// embedder must build, index, and serve `search` tool calls — the same
+    /// contract the harness relies on for `--retriever semantic`.
+    #[test]
+    fn semantic_retriever_hash_serves_search() {
+        let server = Server::new(
+            tiny_corpus(),
+            RetrieverKind::Semantic {
+                embedder: EmbedderSpec::Hash,
+            },
+        );
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "search",
+                "arguments": { "query": "Dune meetup", "k": 5 }
+            }
+        });
+        let resp = server.handle(&req).expect("tools/call is a request");
+        assert_eq!(resp["result"]["isError"], json!(false));
+    }
+
+    /// A malformed `static:` spec (missing artifact) must surface a build error
+    /// at server construction — never a panic at search time. This is the
+    /// invariant that lets a host trust `--embedder static:<bad path>` to
+    /// fail loud, not silently degrade to the hash default.
+    #[test]
+    #[should_panic(expected = "embedder build failed")]
+    fn semantic_retriever_static_missing_artifact_panics_loud() {
+        let _ = Server::new(
+            tiny_corpus(),
+            RetrieverKind::Semantic {
+                embedder: EmbedderSpec::Static {
+                    path: std::path::PathBuf::from("/nonexistent/skinki-static-missing.skemb"),
+                },
+            },
+        );
     }
 }
