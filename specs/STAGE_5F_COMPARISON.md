@@ -1,0 +1,134 @@
+# Stage 5F — Same-harness comparison against other memory systems (SPEC)
+
+> Product backlog, batch 2026-07-B. **Deliberately last, and explicitly gated
+> on Stage 5D's verdict being positive.** External comparisons made before
+> our own end-to-end number exists are marketing; made after, they are the
+> vishenka. The rule (recorded in `specs/README.md`): a competitor is
+> compared only by running it through *our* deterministic harness on the same
+> corpus and questions — never by quoting their blog. Every number we publish
+> about someone else must be reproducible by them, from our repo, with one
+> command over checked-in fixtures.
+
+- **Status:** draft — **blocked on 5D D1 (positive verdict) by design.**
+- **Owner of the design (frontier/human):** frontier — the fairness protocol
+  is the whole stage; locked below. Human signs off on the published table.
+- **Delegatable to (cheaper model):** **yes** for the adapter/scorer plumbing
+  (T1–T3); each competitor run (P-tickets) is a supervised offline production
+  step; the write-up (D1) is frontier+human.
+
+> Read [`../AGENTS.md`](../AGENTS.md). Rule-3 shape end to end: competitor
+> systems run **offline, once**, producing result artifacts; the gate replays
+> artifacts, 0 network, no competitor code in CI. No new runtime deps
+> (adapters are standalone scripts under `scripts/compare/`, not workspace
+> code).
+
+## 1. Hypothesis
+
+On identical inputs (the pooled LongMemEval corpus, the same question set,
+the same k) skinki's production path is **competitive with or better than**
+the leading open memory systems on retrieval recall@10 — while being the
+only entrant that is local-only, deterministic, cited, and staleness-aware
+(reported as capability columns, not vibes). Falsifiable: if a competitor
+wins the retrieval column, we publish that too — the repo's credibility *is*
+the honest table, and a loss on one column with wins on others is a finding,
+not a failure.
+
+## 2. Budgets / fitness function (the gate)
+
+| Metric | Budget | How measured |
+| --- | --- | --- |
+| Fairness (hard) | every system: same corpus bytes, same questions, same k; config = the competitor's own documented best-practice defaults, version-pinned | protocol audit checklist in the report |
+| Reproducibility (hard) | each competitor's results replayed from a checked-in artifact; `compare-eval score` byte-deterministic | golden |
+| Coverage | ≥ 2 external systems (candidates: Mem0 OSS, Letta/MemGPT local, Zep CE — pick ones runnable fully offline; a system that cannot run offline is reported as "requires cloud" in the capability table and excluded from latency rows) | report |
+| Metrics reported | retrieval recall@10 / nDCG@10 per question type; ingest wall time; query p95; peak RSS; capability columns (local-only, deterministic, citations, staleness, embeddable) | the table |
+| Provenance | per system: exact version, config file, hardware, run date — checked in next to the artifact | fixture layout |
+| Skinki's own row | produced by the same adapter path (dump → artifact → score), not by a privileged code path | audit |
+
+> No end-to-end-QA comparison row unless the competitor documents an
+> equivalent offline QA path — retrieval is the honestly comparable layer;
+> say so in the write-up.
+
+## 3. Public interface
+
+```
+scripts/compare/<system>/run.py     # offline: ingest the dumped corpus into
+                                    # the competitor, ask each question,
+                                    # write results.jsonl (schema below)
+fixtures/compare/<system>-<version>/results.jsonl + config + env.txt
+```
+
+```jsonc
+// results.jsonl — one line per question, schema shared by all systems:
+{ "question_id": "...", "retrieved": ["<entry-key>", ...],  // ordered, k long
+  "latency_ms": 12.3 }                                       // optional
+```
+
+```rust
+// skinki-harness (module compare.rs):
+//   compare-eval dump  --lme <dataset> --out <dir>   # corpus + questions +
+//                                                    # entry-key mapping (the
+//                                                    # shared join key: stable
+//                                                    # hashes of entry text)
+//   compare-eval score --results <dir-of-results.jsonl...> [--assert-gate]
+//                       # per-system, per-type recall@10/ndcg@10 + the table
+```
+
+Entry-key contract (the subtle bit, locked): competitors return *their* ids,
+so the dump assigns every corpus entry a stable key = hex of
+`skinki-hash::sha256(entry text)[..16]`; adapters must map their hits back to
+keys by exact text match (the dump ships a `key ↔ text` file). A hit that
+maps to no key scores as a miss — misquoting the corpus is a retrieval error.
+
+## 4. Invariants (must always hold)
+
+- No competitor code, network, or inference in CI — artifacts only.
+- The published table and the repo fixtures are the same data (the table is
+  generated by `compare-eval score --markdown`, pasted verbatim).
+- Capability columns are verifiable claims with a one-line "how to check"
+  footnote each — no unverifiable adjectives.
+- Adverse results are published unedited (the Stage-3 precedent is the house
+  style).
+- Skinki's row uses the shipped default configuration (whatever `skinki-mcp`
+  serves out of the box at that release) — not a benchmark special.
+
+## 5. Test plan
+
+- **Unit:** key assignment stable; unmapped-hit-is-miss; scorer arithmetic.
+- **Golden:** a synthetic mini-comparison (two fake `results.jsonl`) →
+  locked table.
+- **Audit:** the fairness checklist rendered into the report; missing
+  provenance file fails `score`.
+- **Gate command:** `cargo run --release -p skinki-harness -- compare-eval
+  score --results fixtures/compare/* --assert-gate` (asserts reproducibility
+  + provenance completeness; never asserts "we win" — the table says what it
+  says).
+
+## 6. Task decomposition
+
+| Ticket | Type | Tier | Acceptance |
+| --- | --- | --- | --- |
+| T1 `compare-eval dump/score` + entry-key contract + goldens | impl | cheaper | unit + golden green |
+| T2 adapter template + the skinki adapter (self-row through the same path) | impl | cheaper | skinki row reproduces the 1B-gated numbers ±0.01 |
+| P1 competitor run #1 (pick the most-cited OSS system that runs offline) | production | human-supervised | artifact + provenance committed |
+| P2 competitor run #2 | production | human-supervised | same |
+| **D1** the write-up: table + capability matrix + methodology + limitations; human sign-off before anything is published | design | **frontier + human** | published README/blog section generated from fixtures |
+
+## 7. Definition of done
+
+- [ ] `compare-eval score --assert-gate` green in CI over ≥ 2 competitor
+      artifacts + the skinki row.
+- [ ] `cargo test`, clippy, fmt clean.
+- [ ] The table published (README or blog) with the reproduction command on
+      the first line, adverse cells included.
+- [ ] Decision recorded: where skinki lost, and which spec that feeds.
+
+## 8. Out of scope
+
+- Comparing cloud-only products' quality (capability table only — we will
+  not proxy-benchmark someone's SaaS through a network we then delete from
+  the story).
+- End-to-end QA comparisons without a documented equivalent path (see §2).
+- Marketing language of any kind in generated output — numbers, footnotes,
+  reproduction commands.
+- Re-running competitors on every release (pin, date, and re-run only when
+  publishing an updated table).
