@@ -90,8 +90,8 @@ pub fn jsonl_replay<T: DeserializeOwned>(path: &Path) -> io::Result<Vec<T>>;
   detectors) on V2 seeds 42 & 7; assert its surfaced set equals the union of
   `structural()`, `temporal()`, `contradiction()` outputs (same descriptions,
   same citation sets).
-- **T2 unit:** `contains_word("полная фрустрация сегодня", "раст") == false`;
-  `contains_word("выбрал раст для проекта", "раст") == true`;
+- **T2 unit:** `contains_word("сплошной контраст", "раст") == false`;
+  `contains_word("посадил раст в саду", "раст") == true`;
   `contains_word("distrust", "rust") == false`; `contains_word("rust!", "rust")
   == true`. Same cases through `profile_entity_days` end to end.
 - **T3 unit:** a candidate set mixing structural candidates (p ∈ {0.001…0.2})
@@ -115,11 +115,11 @@ pub fn jsonl_replay<T: DeserializeOwned>(path: &Path) -> io::Result<Vec<T>>;
 
 | Ticket | Type | Tier | Acceptance |
 | --- | --- | --- | --- |
-| **T1** candidate-id namespacing + per-family `validate` in `discover` | impl | cheaper (frontier reviews) | union test green; existing gate green; no golden moved |
-| **T2** Unicode `contains_word` + audit every `as_bytes`/`is_ascii_*` touch of entry text in `skinki-insight` | impl | cheaper | §5 T2 tests green on Cyrillic + ASCII |
-| **T3** per-family FDR (part of T1's `discover` change) + isolation test | impl | cheaper (frontier reviews) | §5 T3 test green |
-| **T4** temporal null rework: (a) delete the `1e-6` pre-filter; (b) replace the analytic binomial+Bonferroni p with a **circular-shift permutation p**: for `S = 999` seeded shifts `k_i = 1 + rng.below(max_day-1)`, shift B's day series by `k_i (mod max_day+1)`, recompute `best over all lags of count_at_lag`, and set `p = (1 + #{i: shifted_best ≥ observed_best}) / (S+1)`; feed that p to the per-family BH at `q=0.01`. Doc-comment states the procedure exactly. | impl (design frozen above) | cheaper, **frontier reviews** | temporal recall ≥ 0.50 & false-insight < 0.05 on seeds 42 & 7; null-corpus property test green; deterministic |
-| **T5** perf: lowercase every entry **once** per `propose` (shared with `profile_entities`), binary-search `b_days` in `count_at_lag` (they are sorted), prune (A,B) pairs to those co-occurring within ±`MAX_LAG` days at least `MIN_COUNT` times (computable from the sorted day lists before the lag scan); add `--scale-report` to `insight-eval` | impl | cheaper | §2 throughput floors; identical surfaced sets before/after (golden) |
+| ✅ **T1** candidate-id namespacing + per-family `validate` in `discover` | impl | done (frontier, PR #8) | union test green; existing gate green; no golden moved |
+| ✅ **T2** Unicode `contains_word` + audit every `as_bytes`/`is_ascii_*` touch of entry text in `skinki-insight` | impl | done (frontier, PR #8) | §5 T2 tests green on Cyrillic + ASCII |
+| ✅ **T3** per-family FDR (`validate_per_kind`) + isolation test | impl | done (frontier, PR #8) | §5 T3 test green; pooled-vs-per-family distortion demonstrated on a fixed vector |
+| ✅ **T4** temporal null rework — **done (frontier, PR #8)**, with a stronger design than first drafted: (a) the `1e-6` pre-filter and the analytic binomial+Bonferroni p are deleted; (b) **split-half selection** — the lag δ* is chosen on A's odd-indexed mention days and tested at that *fixed* lag on the held-out even half, so search optimism never reaches the p-value and no multiple-testing correction is needed; (c) the p-value is an **exact circular-shift enumeration**: `p = #{δ in 0..D : c_test(δ) ≥ c_test(δ*)} / D` with period `D = max_day+1` and B's days smeared ±tol — deterministic, **no RNG at all** (strictly better than the sampled-shift variant this ticket originally specified), resolution 1/D, and the null inherits B's real day distribution so shared burstiness is not mistaken for signal. Effect-size floors (MIN_COUNT=4, MIN_RATIO=0.35 on full data; MIN_TEST_COUNT=2 on the held-out half) stay as guards. Per-family BH at `q=0.01` gates the survivors. | impl (design frozen above) | done (frontier) | **Measured:** temporal recall 0.800, precision 1.000, false-insight 0.000 on seeds 42 & 7; day-shuffled null-corpus test silent on 3 fixed shuffles; gate PASS |
+| **T5** perf: ~~lowercase every entry **once** per `propose`~~ and ~~binary-search `b_days` in `count_at_lag`~~ (both done in PR #8); remaining: the same lowercase-once fix in `profile_entities`, and add `--scale-report` to `insight-eval` with the §2 throughput floors | impl | cheaper | §2 throughput floors; identical surfaced sets before/after (golden) |
 | **T6** store fixture isolation: every `skinki-store` test uses `temp_dir/skinki_<testname>_<pid>_<COUNTER.fetch_add>` dirs; add `scripts/store-test-soak.sh` | impl | cheaper | 20/20 soak green |
 | **T7** cleanups: extract `skinki-eval::jsonl` and port `ArtifactLog`/`NarrationLog` to it; move the duplicated `SemanticRetriever` to `skinki-baseline` (add its `skinki-vector` dep) and reuse from mcp+harness; delete `BitWriter::finish`'s no-op padding loop; make `record_insight_derivations` hash an explicitly-formatted string (no `{:?}`); fix the 0.075-vs-0.325 BM25 doc drift in `STAGE_3.md` | impl | cheaper | CI green; behavior-identical goldens |
 
