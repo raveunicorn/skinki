@@ -40,6 +40,50 @@ for the 20% that matters*.
 | 6 FFI/bindings | Low-med | Low-med | cheaper, frontier reviews `unsafe` | C-ABI, cbindgen, PyO3, Swift bridge. |
 | 7 macOS app | Medium (UX) | Medium | cheaper boilerplate, human UX | SwiftUI scaffolding is delegatable; interaction design is not. |
 
+## Batch 2026-07 — execution order (from `../REVIEW_FRONTIER_2026_07.md`)
+
+Seven specs, written to be delegated **in this order** (each names its own
+gate; later ones consume earlier ones' outputs):
+
+| # | Spec | What it delivers | Depends on |
+| --- | --- | --- | --- |
+| 1 | [`STAGE_5C_HARDENING.md`](STAGE_5C_HARDENING.md) | bug fixes (candidate-id collision, Unicode word boundaries, per-family FDR, honest temporal null), insight scale gate, store test soak, cleanups | — |
+| 2 | [`STAGE_1B_STATIC_EMBEDDER.md`](STAGE_1B_STATIC_EMBEDDER.md) | pure-Rust static-distilled semantic embedder + IVF-backed serving + coarse-to-fine productionized | 5C T7 |
+| 3 | [`STAGE_6B_AGENT_MEMORY.md`](STAGE_6B_AGENT_MEMORY.md) | MCP write path (`remember`), staleness-annotated results, `memory_asof`, full insight surface | 5C T1 |
+| 4 | [`STAGE_0B_V3_CORPUS.md`](STAGE_0B_V3_CORPUS.md) | V3: LLM-paraphrased corpus, artifact-frozen — measures the template-coupling transfer gap | — (parallel-safe) |
+| 5 | [`STAGE_5D_LAW1_EVAL.md`](STAGE_5D_LAW1_EVAL.md) | **the Law-1 experiment**: end-to-end QA, small model ± substrate, on LongMemEval | 1B; 5B's judgment seam |
+| 6 | [`STAGE_2C_INTEGRITY.md`](STAGE_2C_INTEGRITY.md) | from-scratch SHA-256 + CRC record frames + scrub-on-sleep job | — (parallel-safe) |
+| 7 | [`STAGE_4B_SALIENCE.md`](STAGE_4B_SALIENCE.md) | reinforcement/decay ranking, near-dup consolidation, forgetting-as-demotion | 1B, 6B |
+
+[`STAGE_5B_REAL_INSIGHT.md`](STAGE_5B_REAL_INSIGHT.md) (already specced)
+slots between 4 and 5: build its T2 judgment seam early (5D reuses it), run
+its detectors after V3's transfer verdict (0B D2) says what they must survive.
+
+**On external benchmark comparisons** (memory products: Mem0, Zep, Letta,
+etc.): do **not** chase their marketing tables. The credible sequence is
+(a) the Law-1 experiment (5D) with reproducible fixtures, (b) LongMemEval /
+LoCoMo numbers anyone can re-run with one command, and only then (c) a
+same-harness comparison where a competitor is run through *our* gate, not
+their blog's. A comparison we can't make deterministic and reproducible is
+marketing, and this repo's whole identity is that it never publishes those.
+The (c) protocol is specced in [`STAGE_5F_COMPARISON.md`](STAGE_5F_COMPARISON.md),
+deliberately blocked on 5D's verdict.
+
+## Batch 2026-07-B — product & production backlog (pick up any time)
+
+Independent of batch A's order; each is a complete delegation contract. Only
+listed dependencies constrain when to start:
+
+| Spec | What it delivers | Depends on |
+| --- | --- | --- |
+| [`STAGE_6C_DISTRIBUTION.md`](STAGE_6C_DISTRIBUTION.md) | release binaries + one-line install + install smoke gate + semver/CHANGELOG + PRIVACY.md | — |
+| [`STAGE_6D_PORTABLE_MEMORY.md`](STAGE_6D_PORTABLE_MEMORY.md) | `skinki export/import` — your memory as one verified file (`SKPKG001`) | 2C strengthens hashes |
+| [`STAGE_6E_CONNECTORS.md`](STAGE_6E_CONNECTORS.md) | `skinki-connect`: Markdown/Obsidian, Telegram, WhatsApp, jsonl, txt + the `skinki watch` poller (README open-problem #5) | — |
+| [`STAGE_6F_WASM.md`](STAGE_6F_WASM.md) | `wasm32` target behind a `no-mmap` feature + native↔wasm parity gate + in-browser demo page | — |
+| [`STAGE_2D_ROBUSTNESS.md`](STAGE_2D_ROBUSTNESS.md) | fuzzing every decoder (total-decoder contract) + `skinki doctor` + `FORMATS.md` registry & migration policy | 2C for the CRC row |
+| [`STAGE_5E_DOGFOOD.md`](STAGE_5E_DOGFOOD.md) | the owner-corpus measurement protocol: personal QA, owner-judged false-insight, "genuine & new" counter | 6E; best after 1B |
+| [`STAGE_5F_COMPARISON.md`](STAGE_5F_COMPARISON.md) | same-harness competitor comparison, fixtures-replayed, honest table | **blocked on 5D verdict** |
+
 ## Index
 
 **Safe to delegate now** (mechanical impl behind a fixed interface; subtle design
