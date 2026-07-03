@@ -95,6 +95,21 @@ real entity source; the **LLM oracle judge is replayed** from a fixture (rule 3)
 | **T2** oracle-judge replay seam | `feat/insight-oracle-judge` | `skinki-insight` | `dump_manifest` (insight + cited text) + `JudgmentLog` replay + `score_real_false_insight` + a small fixture. | `rebuild(log)` byte-identical; false-insight from replay; ⚠ frontier reviews the contract. |
 | **T4** wire real-signal detectors | `feat/insight-real-detectors` | `skinki-insight` | Behind T3's frontier design: structural via embedding communities, contradiction via stance/extraction, temporal over extracted day-series. | false-insight < 0.05 (oracle) + recall bars on the instrument; ⚠ frontier owns the cores (T3). |
 
+## Batch 2026-07 (next up — see `specs/README.md` for the full order)
+
+The frontier review (`REVIEW_FRONTIER_2026_07.md`) produced seven new specs.
+Work them **in order**; every ticket table inside marks its tier. Start here:
+
+1. `STAGE_5C_HARDENING.md` — bug fixes + scale gate + store soak (all tickets
+   delegatable; T1/T3/T4 get a frontier diff review).
+2. `STAGE_1B_STATIC_EMBEDDER.md` — static embedder + IVF serving (T1–T5
+   delegatable behind the parity gate; D1 frontier).
+3. `STAGE_6B_AGENT_MEMORY.md` — `remember` / staleness / `memory_asof`
+   (all delegatable; T2 semantics reviewed).
+
+Same standing rules: one ticket = one branch = one PR; never weaken a gate;
+put the gate command + output in the PR body.
+
 ## How to verify locally (copy/paste)
 
 ```bash
