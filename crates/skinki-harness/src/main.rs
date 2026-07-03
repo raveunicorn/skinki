@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use skinki_baseline::{Bm25, EmbedderSpec, SemanticRetriever};
+use skinki_baseline::{Bm25, EmbedderSpec, RrfFusion, SemanticRetriever};
 use skinki_corpus::{
     generate, Corpus, CorpusMeta, Difficulty, Entry, EntryId, GenConfig, GroundTruth, RecallQuery,
 };
@@ -3124,6 +3124,14 @@ fn run_longmemeval_pooled_eval(
         "semantic-static".into(),
         locomo_score(&semantic, &corpus, k),
     ));
+
+    // T8 hybrid (measure-first): RRF over the two already-indexed retrievers
+    // at depth = k, i.e. pure top-k consensus. The T8 depth sweep
+    // ({10,20,50,100} -> recall@10 {0.145,0.128,0.122,0.124} vs BM25 0.134 on
+    // the D1 row) showed fusing beyond top-k only dilutes BM25's top ranks
+    // with the static embedder's noise.
+    let hybrid = RrfFusion::new(&bm25, &semantic, k);
+    cols.push(("hybrid-rrf".into(), locomo_score(&hybrid, &corpus, k)));
 
     // Semantic-real (EmbeddingGemma — the SOTA baseline).
     match (embeddings_file, query_embeddings_file) {

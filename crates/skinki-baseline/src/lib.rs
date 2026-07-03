@@ -216,10 +216,176 @@ impl RetrievalSystem for SemanticRetriever {
     }
 }
 
+/// The standard reciprocal-rank-fusion constant (Cormack et al. 2009). Large
+/// enough that a few ranks' difference in one list cannot drown the other
+/// list's signal; small enough that top ranks still dominate.
+pub const RRF_K: f64 = 60.0;
+
+/// Stage 1B T8: deterministic reciprocal-rank fusion over two
+/// **already-indexed** retrievers — the cheap architecture change *around*
+/// the embedder. BM25 and the static semantic retriever have disjoint
+/// failure modes (exact-term misses vs common-word crowding); RRF fuses
+/// rankings without needing comparable scores:
+/// `score(d) = Σ_i 1/(RRF_K + rank_i(d))` over each system's top-`depth`.
+///
+/// Borrows its components (they are indexed and owned by the caller), so
+/// [`RetrievalSystem::index`] is a documented no-op here — constructing a
+/// fusion over un-indexed retrievers is a caller bug and will simply search
+/// empty indexes.
+pub struct RrfFusion<'a> {
+    a: &'a dyn RetrievalSystem,
+    b: &'a dyn RetrievalSystem,
+    depth: usize,
+    name: String,
+}
+
+impl<'a> RrfFusion<'a> {
+    /// `depth` is how deep each component list goes before fusing (T8 uses
+    /// 100: deep enough to rescue docs one system ranks poorly, shallow
+    /// enough to stay O(depth log depth) per query).
+    pub fn new(a: &'a dyn RetrievalSystem, b: &'a dyn RetrievalSystem, depth: usize) -> Self {
+        RrfFusion {
+            a,
+            b,
+            depth,
+            name: format!("rrf({}+{})", a.name(), b.name()),
+        }
+    }
+}
+
+impl RetrievalSystem for RrfFusion<'_> {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// No-op: the fused components are indexed by their owners (see the
+    /// struct docs).
+    fn index(&mut self, _corpus: &Corpus) {}
+
+    fn search(&self, query: &str, k: usize) -> Vec<EntryId> {
+        // BTreeMap: deterministic iteration (rule 2). Each id accumulates at
+        // most two additions, in the fixed order a-then-b.
+        let mut score: std::collections::BTreeMap<EntryId, f64> = std::collections::BTreeMap::new();
+        for list in [
+            self.a.search(query, self.depth),
+            self.b.search(query, self.depth),
+        ] {
+            for (rank, id) in list.into_iter().enumerate() {
+                *score.entry(id).or_insert(0.0) += 1.0 / (RRF_K + rank as f64 + 1.0);
+            }
+        }
+        let mut scored: Vec<(f64, EntryId)> = score.into_iter().map(|(id, s)| (s, id)).collect();
+        // Sort by fused score descending, tie-break by ascending id.
+        scored.sort_by(|x, y| match y.0.partial_cmp(&x.0) {
+            Some(std::cmp::Ordering::Equal) | None => x.1.cmp(&y.1),
+            Some(ord) => ord,
+        });
+        scored.truncate(k);
+        scored.into_iter().map(|(_, id)| id).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use skinki_corpus::{generate, GenConfig};
+
+    /// T8: reciprocal-rank fusion — pure ranking arithmetic, tested against
+    /// fixed fake rankings so every property is exact, not statistical.
+    mod rrf_fusion {
+        use super::*;
+
+        /// A fake retriever serving a fixed ranking (best first).
+        struct FixedList {
+            ids: Vec<EntryId>,
+            name: &'static str,
+        }
+        impl RetrievalSystem for FixedList {
+            fn name(&self) -> &str {
+                self.name
+            }
+            fn index(&mut self, _corpus: &Corpus) {}
+            fn search(&self, _query: &str, k: usize) -> Vec<EntryId> {
+                self.ids.iter().copied().take(k).collect()
+            }
+        }
+
+        #[test]
+        fn doc_in_both_lists_beats_single_list_docs() {
+            // 30 is rank 2 in both lists; 10/20 are rank 1 in only one.
+            // 2/(60+2) > 1/(60+1), so consensus wins.
+            let a = FixedList {
+                ids: vec![10, 30],
+                name: "a",
+            };
+            let b = FixedList {
+                ids: vec![20, 30],
+                name: "b",
+            };
+            let f = RrfFusion::new(&a, &b, 100);
+            assert_eq!(f.search("q", 3), vec![30, 10, 20]);
+        }
+
+        #[test]
+        fn equal_scores_tie_break_by_ascending_id() {
+            // 10 and 20 each appear at rank 1 of exactly one list: same score.
+            let a = FixedList {
+                ids: vec![20],
+                name: "a",
+            };
+            let b = FixedList {
+                ids: vec![10],
+                name: "b",
+            };
+            let f = RrfFusion::new(&a, &b, 100);
+            assert_eq!(f.search("q", 2), vec![10, 20]);
+        }
+
+        #[test]
+        fn depth_caps_each_component_list() {
+            // With depth 1 only the top-1 of each list is fused; 30 (rank 2
+            // in both) disappears entirely.
+            let a = FixedList {
+                ids: vec![10, 30],
+                name: "a",
+            };
+            let b = FixedList {
+                ids: vec![20, 30],
+                name: "b",
+            };
+            let f = RrfFusion::new(&a, &b, 1);
+            assert_eq!(f.search("q", 10), vec![10, 20]);
+        }
+
+        #[test]
+        fn deterministic_and_named() {
+            let a = FixedList {
+                ids: vec![1, 2, 3],
+                name: "bm25",
+            };
+            let b = FixedList {
+                ids: vec![3, 2, 9],
+                name: "semantic-static",
+            };
+            let f = RrfFusion::new(&a, &b, 100);
+            assert_eq!(f.name(), "rrf(bm25+semantic-static)");
+            assert_eq!(f.search("q", 10), f.search("q", 10));
+        }
+
+        #[test]
+        fn k_truncates_fused_output() {
+            let a = FixedList {
+                ids: vec![1, 2, 3, 4],
+                name: "a",
+            };
+            let b = FixedList {
+                ids: vec![5, 6, 7, 8],
+                name: "b",
+            };
+            let f = RrfFusion::new(&a, &b, 100);
+            assert_eq!(f.search("q", 3).len(), 3);
+        }
+    }
 
     /// Mark: tests for the new T3 embedder-selection seam live alongside the
     /// baseline yardstick so a regression here is caught by `cargo test -p

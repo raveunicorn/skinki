@@ -131,7 +131,13 @@ Work them **in order**; every ticket table inside marks its tier. Start here:
      0.116, potion-retrieval-32M (130 MB, deliberately over budget) 0.086 on
      the full pool — bigger decays *faster*; the failure is architectural
      (context-free token vectors), not budget. Static closed in all forms.
-     Next: **T8 hybrid RRF fusion** (measure-first), then the sidecar spec.
+   - **T8 done (2026-07-04)** — hybrid RRF fusion (`skinki_baseline::RrfFusion`,
+     BM25 + potion-8M static, depth = k): recall@10 **0.145** vs BM25 0.134 —
+     first config to beat the yardstick on the D1 row; ndcg +12%; answer@10
+     −7%. NOT flipped to served default (margin within noise on 121 queries;
+     artifact not shipped); `hybrid-rrf` column ships as an instrument.
+     Next: the sidecar spec (real sentence encoder) — fusion is the pattern
+     to re-apply once a discriminative base lands.
 3. `STAGE_6B_AGENT_MEMORY.md` — `remember` / staleness / `memory_asof`
    (all delegatable; T2 semantics reviewed).
 
