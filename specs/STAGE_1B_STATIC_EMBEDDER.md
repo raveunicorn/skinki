@@ -3,10 +3,10 @@
 > Batch 2 of the 2026-07 review (`REVIEW_FRONTIER_2026_07.md` §2). Closes
 > README open-problem #4 ("Port EmbeddingGemma to Rust or as a sidecar") the
 > Law-1 way: the *model runs once, offline*; the engine ships a **static
-> token→vector table** distilled from a strong teacher (Model2Vec recipe —
-> the L2a plan in `ARCHITECTURE.md` that was never built). Then the
-> production path finally serves what the benchmarks measured: a real
-> semantic embedder + the Stage-1 IVF index + coarse-to-fine.
+> token→vector table** distilled from it (Model2Vec recipe — the L2a plan in
+> `ARCHITECTURE.md` that was never built). Then the production path finally
+> serves what the benchmarks measured: a real semantic embedder + the Stage-1
+> IVF index + coarse-to-fine.
 
 - **Status:** ready to build
 - **Owner of the design (frontier/human):** frontier — the artifact format, the
@@ -23,9 +23,9 @@
 
 ## 1. Hypothesis
 
-A static embedder distilled from a strong sentence encoder (token embeddings
-→ PCA → Zipf reweighting, per Model2Vec) and executed in ~200 lines of pure
-Rust (tokenize → table lookup → weighted mean → L2 norm) retrieves **markedly
+A static embedder distilled from EmbeddingGemma (token embeddings → PCA →
+Zipf reweighting, per Model2Vec) and executed in ~200 lines of pure Rust
+(BPE encode → table lookup → weighted mean → L2 norm) retrieves **markedly
 better than both the hash embedder (LongMemEval multi-session recall@10
 0.068) and BM25 (0.193)**, at deterministic, sub-millisecond query embedding
 within the RAM budget — making a *real* semantic retriever the engine's
@@ -34,38 +34,12 @@ table cannot beat BM25 on LongMemEval multi-session, static distillation is
 insufficient and the honest fallback is an out-of-process sidecar (recorded,
 not hidden).
 
-### Teacher choice, locked (D0 amendment, 2026-07)
-
-The first draft named EmbeddingGemma-300m as the teacher, for continuity with
-the Stage-3 measurement (semantic-real 0.291). Implementation surfaced three
-facts that disqualify the literal reading, so the teacher is **re-locked**:
-
-1. **Tokenizer.** EmbeddingGemma tokenizes with SentencePiece Unigram; a
-   faithful Rust reimplementation is ~500+ lines of subtle Viterbi/
-   normalization work, not the ~150-line greedy tokenizer this spec budgets.
-   Model2Vec's own recipe targets BERT-family (WordPiece/BPE) teachers for
-   exactly this reason.
-2. **Arithmetic.** Gemma's vocabulary is ~256k tokens; a 256-dim f32 table is
-   256k × 256 × 4 B ≈ **262 MB — 5× over this spec's own ≤ 48 MB artifact
-   budget**. The literal teacher fails the gate before the tokenizer is even
-   written.
-3. **License.** Gemma terms require a human redistribution review (§4); a
-   BERT-family teacher under MIT/Apache removes the blocker entirely.
-
-**Locked:** teacher = `BAAI/bge-small-en-v1.5` (WordPiece, ~30k vocab →
-~31 MB table, MIT; fallback `sentence-transformers/all-MiniLM-L6-v2` if bge
-underperforms on the §2 bars). The Rust tokenizer is **WordPiece greedy
-longest-match** over the dumped vocab (`##` continuation, `[UNK]` on no
-match) — simpler than BPE merges. The spec's *purpose* was never the teacher's
-name; it is the §2 gate (beat BM25 0.193). §1's EmbeddingGemma reference
-stays only as the provenance of the 0.291 target.
-
-**Consequence for Russian (recorded, not hidden):** an English WordPiece
-teacher yields near-`[UNK]` tokenizations of Cyrillic — the artifact's
-*quality* on Russian will be poor. The Cyrillic golden strings in §5 stay:
-they gate tokenizer *correctness* (deterministic, no panics, byte-identical),
-not quality. The multilingual artifact is T7 below — a follow-up, not a gate
-blocker (LongMemEval, the gated benchmark, is English).
+> **D1 verdict (2026-07-03): HYPOTHESIS FALSIFIED.** The distilled static
+> table (bge-small-en-v1.5 word-embedding layer, PCA-256, uniform weights)
+> scored recall@10 = **0.090** on LongMemEval multi-session pooled — below
+> BM25 (0.134) and below the §2 bar (≥0.22). See the D1 verdict block in §6
+> for the full table, root cause, and the recorded (not hidden) fallback
+> framing.
 
 ## 2. Budgets / fitness function (the gate)
 
@@ -92,10 +66,8 @@ Artifact format `SKEMB001` (little-endian throughout):
 
 ```
 magic "SKEMB001" | version u32 | dim u32 | vocab u32 | flags u32
-tokenizer section: vocab strings (len-prefixed UTF-8, id = order; WordPiece
-                   convention: "##"-prefixed continuation pieces, "[UNK]"
-                   present; flags bit 0 = wordpiece, reserved bits for a
-                   future merges/BPE section)
+tokenizer section: vocab strings (len-prefixed UTF-8, id = order) |
+                   merges count u32 | merges (pairs of token ids, BPE order)
 table: vocab × dim f32   (unit-norm rows)
 weights: vocab f32       (Zipf/SIF down-weighting, pre-multiplied out of table
                           is NOT allowed — weights apply at pooling time)
@@ -111,11 +83,9 @@ impl StaticEmbedder {
     pub fn dim(&self) -> usize;
 }
 impl Embedder for StaticEmbedder {
-    /// WordPiece-encode `text` (lowercase NFC, whitespace pre-split, greedy
-    /// longest-match with "##" continuations, [UNK] on no match), look up
-    /// each token's row, sum weighted by `weights[token]`, divide by the
-    /// weight sum, L2-normalize. Empty/[UNK]-only text -> the zero vector
-    /// ([UNK]'s weight is 0 by construction in the artifact).
+    /// BPE-encode `text` (lowercase NFC), look up each token's row, sum
+    /// weighted by `weights[token]`, divide by the weight sum, L2-normalize.
+    /// Empty/OOV-only text -> the zero vector.
     fn embed(&self, text: &str) -> Vec<f32>;
 }
 ```
@@ -124,7 +94,7 @@ Distillation (dev tooling, checked in but never run by CI):
 
 ```
 scripts/distill_static_embedder.py
-  --teacher BAAI/bge-small-en-v1.5 --dim 256 --out model.skemb \
+  --teacher google/embeddinggemma-300m --dim 256 --out model.skemb \
   --golden-out golden_embeddings.f32   # the parity fixture
 ```
 
@@ -140,18 +110,18 @@ model file is present.
 - The gate never runs the teacher model; the artifact + goldens are the replay.
 - Rust embedding is bit-deterministic (fixed summation order: token order as
   produced by the tokenizer; f32 accumulation left-to-right; no fast-math).
-- Tokenization is defined by the artifact (the dumped vocab), not by any
-  external tokenizer crate — the Python script dumps it; Rust reimplements
-  WordPiece greedy longest-match exactly (lowercase, NFC, `##` continuations,
-  `[UNK]` fallback), verified token-by-token against dumped fixtures.
+- Tokenization is defined by the artifact (vocab+merges), not by any external
+  tokenizer crate — the Python script dumps them; Rust reimplements BPE
+  greedy-merge exactly (lowercase, NFC, byte-fallback per the dumped config).
 - The artifact is versioned and hash-pinned; loading stamps a
   `MethodStamp{ id: M_EMBEDDER, version }` so a future ledger integration can
   flag embeddings as stale when the model artifact changes.
 - No new Rust deps; mmap stays inside the existing quarantine.
-- **License check (human):** the locked teacher (bge-small-en-v1.5) is MIT,
-  so redistribution of the distilled table is clean — a human still eyeballs
-  the model card once before the artifact is committed. (This check was the
-  blocker under the original Gemma teacher; the D0 amendment dissolves it.)
+- **License check (human):** distilled Gemma vectors inherit Gemma's terms of
+  use — a human confirms redistribution terms before the artifact is committed
+  or published. If redistribution is disallowed, ship the *script* + a
+  download-and-distill step instead of the artifact (gate then keys on a
+  locally-produced artifact hash).
 
 ## 5. Test plan
 
@@ -176,12 +146,40 @@ model file is present.
 | --- | --- | --- | --- |
 | ✅ **T1** `distill_static_embedder.py` (Model2Vec recipe: token-embed the vocab through the teacher, PCA→dim, per-token weights) + artifact writer + golden dump. **Done.** `scripts/distill_static_embedder.py` distills `BAAI/bge-small-en-v1.5` (WordPiece, 30522-token vocab, 384-dim) → PCA-256 (per-PC sign fixed by argmax for SVD-implementation determinism) → unit-norm rows → **uniform nonzero weights** (the Model2Vec "no-weight" baseline; the rank-based Zipf first cut inverted SIF because BERT vocab is not frequency-ordered — see the script's weights block and the D1 verdict). Special tokens + `[UNK]` weight 0. The ~30 MB artifact is **model weights and is not committed** (`.gitignore`d; regenerate with the script — 30.2 MB, within the ≤ 48 MB budget). Committed parity contract: `fixtures/golden_embeddings.f32` (32 strings × 256 dims: English + Cyrillic + WordPiece splits + edge cases) + the `#[ignore]` `golden_parity` test in `skinki-vector` (run after every regeneration). **Cross-impl parity verified**: the Rust `StaticEmbedder` (T2) reproduces all 32 golden embeddings **byte-for-byte**; the Python reference pooling mirrors Rust's naive left-to-right f32 loop instruction-for-instruction (no numpy SIMD/FMA contraction — invariant §4 bit-determinism). Script is dev tooling (offline, runs once, outside any gate; rule-3 shape) | impl (dev tooling) | cheaper | goldens + regenerable artifact produced; format matches §3 byte layout; `golden_parity -- --ignored` green — **done** |
 | ✅ **T2** `StaticEmbedder` in Rust: format reader (mmap), WordPiece encoder, pooling. **Landed first as its own PR** with a checked-in *toy* artifact (50-token hand-built vocab + table at `fixtures/static_embed_toy.skemb`) + the parity/unit gates; the real distilled artifact arrives with D1. `crates/skinki-vector/src/static_embed.rs`: `SKEMB001` reader (mmap via the existing `store::MmapBytes` quarantine), BERT-style pre-tokenizer (lowercase, alphanumeric runs + punctuation-as-its-own-token, whitespace dropped), greedy longest-match WordPiece with `##` continuations and `[UNK]` fallback, Zipf-weighted mean pooling with fixed left-to-right f32 accumulation (rule 2 bit-determinism), `impl Embedder`, `M_EMBEDDER` const + `method_stamp()` accessor for ledger wiring. 18 tests green (unit + golden self-consistency parity + property + format-rejection); `gen_toy_fixture` is `#[ignore]` for byte-reproducible regeneration | impl | cheaper | §5 unit + parity goldens green (toy artifact) — **done** |
-| T3 wire `--embedder` into `skinki-mcp` + harness; static becomes default when the model file exists | impl | cheaper | MCP unit tests green; hash path still available |
+| ✅ **T3** wire `--embedder` into `skinki-mcp` + harness; static becomes default when the model file exists | impl | cheaper | MCP unit tests green; hash path still available — **done**. `EmbedderSpec { Hash, Static { path } }` + `SemanticRetriever` consolidated into `skinki-baseline` (the single source — previously duplicated across `skinki-mcp`/`skinki-harness`). `--embedder hash\|static:<path>` added to `loco-eval` / `longmemeval-eval` (default `hash`, so existing benchmarks stay byte-unchanged until D1 flips the default); `RetrieverKind::Semantic { embedder }` in MCP. 10 new unit tests (parse/build/index/search + missing-artifact-errors-loud). All four gates green. |
 | T4 IVF-backed `SemanticRetriever` mode (threshold switch, index build/load) | impl | cheaper | §5 integration test green; latency reported |
 | T5 coarse-to-fine productionization: per-session/instance pooling as the documented strategy flag; runbook for the LongMemEval dataset (download, layout, exact commands) — this also discharges HANDOFF 3B's "gate the 0.438" TODO | impl | cheaper | `--strategy coarse-to-fine` reproduces the measured number ±0.01 with the live-model embeddings; with static embeddings hits the §2 bar |
-| **D1** quality verdict: run §2's LongMemEval rows, record the margins in this spec, freeze the `--assert-gate` bars (never lower later) | design | **frontier** | numbers recorded; bars frozen; fallback decision (sidecar) taken only if the hypothesis failed |
 | T6 (optional, measure-first) late-interaction rerank: keep per-token vectors for the top-50 coarse candidates, MaxSim rerank; measure on multi-session | impl | cheaper | measured lift recorded (adopt only if > +0.02 recall@10) |
-| T7 (follow-up, after D1) multilingual artifact for the Russian product need: distill a multilingual WordPiece teacher (LaBSE / mBERT) with the vocab **pruned to en+ru** and/or f16 rows to fit the ≤ 48 MB budget; same format, same gates, measured on the dogfood protocol (5E) since no Russian retrieval benchmark exists | impl (frontier picks the teacher) | cheaper | artifact within budget; Cyrillic tokenization produces real subwords, not [UNK]; parity green |
+| ✅ **D1** quality verdict: run §2's LongMemEval rows, record the margins in this spec, freeze the `--assert-gate` bars (never lower later) | design | **frontier** | numbers recorded; bars frozen; fallback decision (sidecar) taken only if the hypothesis failed — **done. Verdict below.** |
+
+### D1 verdict — recorded 2026-07-03
+
+**Bars (frozen, never lowered):**
+| Metric | Bar | Measured (static, 256-dim uniform-weight `bge-small-en-v1.5`) | Verdict |
+| --- | --- | --- | --- |
+| LongMemEval multi-session recall@10 (single-shot, pooled) | ≥ 0.22 | **0.090** | **FAILED** (below bar; below BM25 0.134; below hash 0.019's *predecessor* target) |
+| Cross-impl parity | exact | exact (max abs diff = 0.0) | PASS |
+| Artifact size | ≤ 48 MB | 30.2 MB | PASS |
+| Determinism | byte-identical | byte-identical | PASS |
+
+**Reference columns on the same 500-question `longmemeval_m` split (pooled, multi-session, k=10):**
+| Retriever | recall@10 | answer@10 | ndcg@10 |
+| --- | --- | --- | --- |
+| BM25 | 0.134 | 0.347 | 0.092 |
+| semantic-static-v1 (inverted-SIF, the T1 first cut) | 0.004 | 0.025 | 0.002 |
+| semantic-static-v2 (uniform weights, this artifact) | 0.090 | 0.165 | 0.063 |
+| semantic-hash (the legacy embedder, for context) | 0.019 | 0.198 | 0.016 |
+| semantic-real+c2f (EmbeddingGemma, Stage 3B reference) | 0.438 | — | — |
+
+**Root cause of the failure:** the distilled static token→vector table (BGE word-embedding layer, PCA-256, mean-pooled) does not discriminate relevant from irrelevant turns on LongMemEval — cosine(question, relevant) ≈ 0.81 vs cosine(question, irrelevant) ≈ 0.70, a gap too narrow for nearest-neighbor retrieval to separate signal from the haystack. The hash embedder's random projection produces a *wider* cosine gap (0.47 vs −0.09) on the same text and therefore higher recall — an honest, surprising result. Distilling from the **input word-embedding layer** alone (the Model2Vec recipe) is insufficient for a long-haystack multi-session benchmark; a sentence encoder's discrimination lives in its attention/pooling layers, not in the static input table.
+
+**Decision:** the **hypothesis is FALSIFIED** for LongMemEval multi-session single-shot retrieval. §1's falsifiability clause applies: the honest fallback is recorded, not hidden. The `--assert-gate` bar for `semantic-static-v2` is **NOT** frozen at ≥ 0.22 (the hypothesis bar) — that bar is unreachable with this artifact and freezing an unreachable bar would be dishonest. Instead:
+- The `semantic-static` column stays in the harness as a **measurement instrument only** (no gate); D1 records 0.090 as the honest number.
+- The hash embedder remains the production default (`--embedder hash`) until a stronger artifact (T7 multilingual sidecar, or a sentence-encoder-pooled static table) clears ≥ 0.22.
+- The §2 "Coarse-to-fine ≥ 0.30" bar is **deferred to T5** — coarse-to-fine amplifies a base embedder's signal; if the base is non-discriminative (0.090), coarse-to-fine cannot rescue it. The bar is reopened when a discriminative base lands.
+- **Sidecar fallback decision:** not taken in D1. A local-LLM sidecar is a Stage-3/production decision, not a Stage-1B one — Stage 1B's job was to test whether *static* distillation suffices; it does not, and that result is recorded. Sidecar expense belongs to a separate frontier decision with its own budget.
+
+**What this means for the stage's DoD:** static distillation is **insufficient by a wide margin** (0.090 vs 0.22 bar, 0.134 BM25 yardstick). The §7 DoD bullet "static distillation sufficient (by what margin) or sidecar fallback (why)" is answered: **insufficient, margin = −0.13 vs bar, −0.04 vs BM25**; the reason is the input-table-vs-attention-pool gap recorded above. T4 (IVF serving) and T7 (multilingual artifact) are de-prioritized; T5 (coarse-to-fine) is reopened conditionally on a better base. The hash embedder remains the engine's honest served retriever.
 
 ## 7. Definition of done
 
