@@ -820,6 +820,56 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 
+    /// Cross-impl parity (T1, invariant §4): the Rust embedder must reproduce
+    /// the Python distillation's committed `fixtures/golden_embeddings.f32`
+    /// byte-for-byte from the real distilled artifact. The ~30 MB artifact is
+    /// model weights and is not committed (see .gitignore), so this test is
+    /// `#[ignore]`d in CI; run it manually after every regeneration:
+    ///
+    /// ```text
+    /// python3 scripts/distill_static_embedder.py \
+    ///     --teacher BAAI/bge-small-en-v1.5 --dim 256 \
+    ///     --out fixtures/static_embed_bge_small_256.skemb \
+    ///     --golden-out fixtures/golden_embeddings.f32
+    /// cargo test -p skinki-vector golden_parity -- --ignored
+    /// ```
+    ///
+    /// Golden format: u32 count | u32 dim | count x (u32 len | UTF-8 string)
+    /// | count x dim f32 LE rows (strings first so this test can iterate).
+    #[test]
+    #[ignore = "needs fixtures/static_embed_bge_small_256.skemb — regenerate with scripts/distill_static_embedder.py"]
+    fn golden_parity_real_artifact() {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+        let artifact = fixtures.join("static_embed_bge_small_256.skemb");
+        let golden = fixtures.join("golden_embeddings.f32");
+        let e = StaticEmbedder::load(&artifact).expect("load distilled artifact");
+
+        let raw = std::fs::read(&golden).expect("read golden fixture");
+        let mut r = Reader::new(&raw);
+        let count = r.u32().unwrap() as usize;
+        let dim = r.u32().unwrap() as usize;
+        assert_eq!(dim, e.dim(), "golden dim vs artifact dim");
+        let mut strings = Vec::with_capacity(count);
+        for _ in 0..count {
+            let len = r.u32().unwrap() as usize;
+            strings.push(String::from_utf8(r.take(len).unwrap().to_vec()).unwrap());
+        }
+        for (si, s) in strings.iter().enumerate() {
+            let got = e.embed(s);
+            assert_eq!(got.len(), dim);
+            for (i, g) in got.iter().enumerate() {
+                let want = f32::from_le_bytes(r.take(4).unwrap().try_into().unwrap());
+                assert_eq!(
+                    g.to_le_bytes(),
+                    want.to_le_bytes(),
+                    "cross-impl mismatch: string {si} {s:?} dim {i}: rust {g}, python {want}"
+                );
+            }
+        }
+        // The golden file must end exactly at the last row.
+        assert_eq!(r.pos(), raw.len(), "golden fixture has trailing bytes");
+    }
+
     /// Property: cosine(embed(s), embed(s)) == 1 for non-empty, non-UNK-only.
     #[test]
     fn embed_self_cosine_is_one() {

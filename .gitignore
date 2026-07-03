@@ -36,6 +36,12 @@ Models/
 *.safetensors
 *.mlx
 *.riv.backup
+# Stage 1B distilled static-embedder artifacts are model weights too (~30 MB):
+# regenerate with scripts/distill_static_embedder.py. The committed parity
+# contract is fixtures/golden_embeddings.f32 + the #[ignore] golden_parity
+# test in skinki-vector. The hand-built 4 KB toy fixture stays committed.
+fixtures/static_embed_*.skemb
+!fixtures/static_embed_toy.skemb
 
 # Secrets / signing
 *.p12

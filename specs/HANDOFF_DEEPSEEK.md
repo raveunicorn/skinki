@@ -107,8 +107,14 @@ Work them **in order**; every ticket table inside marks its tier. Start here:
    - **T2 done** — `StaticEmbedder` Rust core landed (`feat/1b-static-embedder`):
      `SKEMB001` reader + WordPiece tokenizer + Zipf pooling, toy artifact at
      `fixtures/static_embed_toy.skemb`, 18 tests green, `cargo test -p skinki-vector
-     static_embed` is the gate. Next: T1 (real distillation) → D1 (verdict) →
-     T3/T4/T5 (wiring, IVF, coarse-to-fine).
+     static_embed` is the gate.
+   - **T1 done** — `scripts/distill_static_embedder.py` distills
+     `BAAI/bge-small-en-v1.5` → `SKEMB001` (30.2 MB ≤ 48 MB budget; **not
+     committed** — model weights, regenerate with the script) +
+     `fixtures/golden_embeddings.f32` (32 strings, committed). **Cross-impl
+     parity verified**: the `#[ignore]` `golden_parity` test reproduces all 32
+     golden embeddings byte-for-byte; rerun it after every regeneration. Next:
+     T3 (wiring) → D1 (verdict).
 3. `STAGE_6B_AGENT_MEMORY.md` — `remember` / staleness / `memory_asof`
    (all delegatable; T2 semantics reviewed).
 
