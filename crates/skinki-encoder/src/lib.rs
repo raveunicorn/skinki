@@ -24,6 +24,7 @@
 //! will inherit this exact property for free.
 
 pub mod bench;
+pub mod format;
 pub mod gemm;
 
 pub use gemm::gemm;

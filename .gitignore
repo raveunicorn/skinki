@@ -42,6 +42,13 @@ Models/
 # test in skinki-vector. The hand-built 4 KB toy fixture stays committed.
 fixtures/static_embed_*.skemb
 !fixtures/static_embed_toy.skemb
+# Stage 1C-B encoder weight artifacts (~130 MB): regenerate with
+# scripts/convert_encoder_to_skenc.py. Committed parity contract:
+# fixtures/encoder_layer_golden.f32 + fixtures/encoder_golden_embeddings.f32
+# + the #[ignore] parity tests in skinki-encoder. The seeded 22 KB toy
+# fixture stays committed.
+fixtures/*.skenc
+!fixtures/encoder_toy.skenc
 
 # Secrets / signing
 *.p12
