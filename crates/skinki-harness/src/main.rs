@@ -1050,17 +1050,6 @@ fn run_encoder_gemm_bench(
 
     let (worst_p5, (wm, wn, wk, wt)) =
         bench::ShapeResult::worst_p5(&results).expect("at least one result");
-    let (mean_at_worst_threads, _) = {
-        // For reporting clarity, also report the mean across 4-thread shapes.
-        let four: Vec<_> = results.iter().filter(|r| r.threads == 4).cloned().collect();
-        if four.is_empty() {
-            (worst_p5, 0)
-        } else {
-            let m = four.iter().map(|r| r.gflops_mean).fold(0.0f64, f64::max);
-            (m, 4)
-        }
-    };
-    let _ = mean_at_worst_threads;
 
     println!();
     println!(
@@ -1069,12 +1058,21 @@ fn run_encoder_gemm_bench(
     );
 
     if assert_gate {
-        // The §2 bar judges on the **4-thread** worst-case sustained p5.
-        let four_p5 = results
+        // The §2 bar judges on the **4-thread** worst-case sustained p5. A
+        // gate must never pass vacuously: no 4-thread measurements = no
+        // verdict, not a PASS.
+        let four: Vec<f64> = results
             .iter()
             .filter(|r| r.threads == 4)
             .map(|r| r.gflops_p5)
-            .fold(f64::INFINITY, f64::min);
+            .collect();
+        if four.is_empty() {
+            anyhow::bail!(
+                "--assert-gate needs 4-thread results (the §2 bar is defined at 4 threads); \
+                 rerun with --threads 4 or the default 1/2/4 sweep"
+            );
+        }
+        let four_p5 = four.into_iter().fold(f64::INFINITY, f64::min);
         if four_p5 >= bench::T0_GATE_GFLOPS {
             println!(
                 "GATE: PASS (4-thread min p5 = {:.2} ≥ {:.0} GF/s)",

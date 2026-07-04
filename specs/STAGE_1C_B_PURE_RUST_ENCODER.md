@@ -134,7 +134,7 @@ impl BatchEmbedder for RustEncoder { /* per-sequence forward, threads across
 | Ticket | Type | Tier | Acceptance |
 | --- | --- | --- | --- |
 | **T0 kill-switch bench**: blocked/tiled safe-Rust f32 GEMM (the exact loop structure T2 will use) + `encoder-bench --gemm`; sustained 10-min run on the M1 Air at 384-class shapes (K=384, N∈{384,1536}), 1/2/4 threads | impl (bench frontier-reviewed) | cheaper | GFLOP/s table recorded in §2; ≥ 40 sustained → D1 go. **Status:** bench implemented (`crates/skinki-encoder/{gemm,bench}.rs` + `encoder-bench` CLI); **M1 Max 10-min sustained: 4-thread min p5 = 46.94 GF/s, GATE PASS.** Note the M1 Max has 8 P-cores vs the Air's 4; the Air number is still TBD but §1's 40%-of-one-P-core projection was set on the Air's hardware envelope. |
-| **D1 go/no-go** on T0 numbers (+ backfill/latency projections recomputed from measured rates) | design | **frontier + human** | decision recorded here; on no-go → `STAGE_1C` variant A resumes with T0 data attached |
+| ✅ **D1 go/no-go** on T0 numbers (+ backfill/latency projections recomputed from measured rates) | design | **frontier + human** | **GO — decided by the human 2026-07-04, on M1 Max data.** T0's question was "is a hand-written encoder worth building": worst-case sustained p5 = 46.94 GF/s with means ≈ 57–61 across shapes answers yes with margin. The M1 Air of §1's original sizing is **not available and not expected** — recorded as a measurement gap, not hidden: the dev/serving machine *is* the Max; Air-class passive-cooling hardware would land ~15–30% lower (possibly at/under the bar) and must be re-benched (one `encoder-bench --gemm --full-run --threads 4 --assert-gate` run) before any Stage-7 claim on such hardware. T3's backfill/latency projections use the measured Max rates **with an explicit ~25% derating column** for Air-class targets. T1/T2 unblocked. |
 | T1 `SKENC001` format + `convert_encoder_to_skenc.py` + toy artifact + golden dumps (layer + e2e) | impl | cheaper | loader tests + toy goldens green |
 | **T2 encoder core**: embeddings→12×(MHA+FFN+LN)→pooling, in-crate transcendentals, fixed-order reductions | impl | **frontier** | layer goldens byte-green; parity cosine ≥ 0.999; determinism properties green |
 | T3 batch driver: per-sequence forward, deterministic thread fan-out, Stage-4 backfill job (interruptible/resumable) | impl | cheaper | thread-invariance test green; backfill-sim numbers recorded |
@@ -159,10 +159,11 @@ A on kill-switch.**
       `encoder-bench --gemm` CLI.
 - [x] **T0 10-min sustained on M1 Max (2026-07-04)** — 4-thread min p5 =
       **46.94 GF/s**, GATE PASS (≥ 40 by ~17%). Numbers in §2.
-- [ ] T0 10-min sustained on the **M1 Air** (the spec's target hardware —
-      4 P-cores, not the Max's 8) + **D1 go/no-go** recorded. The M1 Max
-      pass is strong evidence but not the letter of §1; D1 still gates the
-      encoder core.
+- [x] **D1 go/no-go recorded (human, 2026-07-04): GO on M1 Max data.** The
+      M1 Air of §1's original sizing is unavailable and not expected; the
+      gap is recorded in the D1 row (§6) together with the ~25% derating
+      rule for Air-class projections and the exact re-bench command should
+      such hardware ever matter (Stage 7).
 - [ ] On go: §2 bars green from replayed logs; goldens/parity/determinism
       green in CI; `cargo test`/clippy/fmt clean; deps unchanged.
 - [ ] README honest-status + HANDOFF updated; served-default decision

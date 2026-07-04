@@ -226,32 +226,70 @@ mod tests {
         c
     }
 
-    fn seeded_inputs(m: usize, n: usize, k: usize) -> (Vec<f32>, Vec<f32>) {
-        // Deterministic LCG — no `rand`, no platform dependency.
-        let mut s: u64 = 0x9E3779B97F4A7C15;
-        let mut next = || {
-            s = s
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            ((s >> 33) as i32 as f32) / (1u64 << 31) as f32 - 1.0
-        };
-        let a = (0..m * k).map(|_| next()).collect::<Vec<_>>();
-        let b = (0..k * n).map(|_| next()).collect::<Vec<_>>();
-        (a, b)
+    use crate::bench::seeded_inputs;
+
+    /// An independent scalar implementation of the *documented* association:
+    /// for each `(i, j)`, `c[i,j] += a[i,p] * b[p,j]` applied `p = 0..k`
+    /// strictly left-to-right, accumulating straight into C. This is exactly
+    /// the order the module docs promise; the tiled kernel must reproduce it
+    /// bit-for-bit no matter how it blocks or vectorizes.
+    fn reference_documented_order(m: usize, n: usize, k: usize, a: &[f32], b: &[f32]) -> Vec<f32> {
+        let mut c = vec![0.0f32; m * n];
+        for i in 0..m {
+            for p in 0..k {
+                let aip = a[i * k + p];
+                for j in 0..n {
+                    c[i * n + j] += aip * b[p * n + j];
+                }
+            }
+        }
+        c
+    }
+
+    /// The rule-2 contract test: the kernel computes exactly the documented
+    /// association, bit-for-bit, against an independent scalar reference.
+    /// Any future tiling/vectorization change that silently reorders the
+    /// per-element sum shows up here as a bit diff. (This also demonstrates
+    /// that no FMA contraction occurs: rustc never fuses `c += a*b` into an
+    /// FMA without an explicit `mul_add`, on any platform — which is what
+    /// makes the output byte-identical across arm64/x86_64.)
+    #[test]
+    fn kernel_matches_documented_order_bit_exact() {
+        let shapes: &[(usize, usize, usize)] = &[
+            (1, 1, 1),
+            (33, 77, 91),
+            (100, 100, 100),
+            (384, 384, 384), // multi-chunk K (BK = 256)
+            (128, 1536, 384),
+            (384, 1536, 384),
+        ];
+        for &(m, n, k) in shapes {
+            let (a, b) = seeded_inputs(m, n, k);
+            let want = reference_documented_order(m, n, k, &a, &b);
+            let mut got = vec![0.0f32; m * n];
+            gemm(m, n, k, &a, &b, &mut got, 1).unwrap();
+            let diffs = got
+                .iter()
+                .zip(want.iter())
+                .filter(|(g, w)| g.to_bits() != w.to_bits())
+                .count();
+            assert_eq!(
+                diffs, 0,
+                "shape ({m},{n},{k}): kernel deviates from the documented sum order"
+            );
+        }
     }
 
     #[test]
     fn correctness_against_chunked_reference() {
-        // The tiled kernel and the chunked reference use the **same**
-        // left-to-right K order, so they agree to within f32 rounding.
-        // Bit-identical equality is *not* asserted here: on arm64 LLVM may
-        // contract `c += a*b` to FMA in the kernel's memory-backed
-        // accumulate while the reference uses a local-variable accumulator,
-        // which can diverge by a ULP per element. That is acceptable — the
-        // rule-2 contract is byte-determinism **across runs and thread
-        // counts** (asserted below), not bit-equivalence to a reference.
-        // The chunked reference here is a sanity check that we are computing
-        // the right matrix to high precision.
+        // High-precision sanity check against a *different* association: the
+        // reference accumulates each BK chunk in a local variable and adds it
+        // to C once, while the kernel accumulates into C per `p`. For a
+        // single-chunk K (k ≤ BK) the two orders coincide exactly (the
+        // initial `0.0 + acc` is exact), so bit-equality is asserted; for
+        // multi-chunk K they legitimately differ by summation association —
+        // a few ULPs — so a small relative tolerance applies. (No FMA is
+        // involved anywhere; see `kernel_matches_documented_order_bit_exact`.)
         let shapes: &[(usize, usize, usize)] = &[
             (1, 1, 1),
             (16, 16, 16),
@@ -266,10 +304,7 @@ mod tests {
             let want = reference_chunked(m, n, k, &a, &b);
             let mut got = vec![0.0f32; m * n];
             gemm(m, n, k, &a, &b, &mut got, 1).unwrap();
-            // Relative tolerance: tiny shapes (K ≤ 16) where no FMA
-            // contraction can hide must still match exactly; larger shapes
-            // allow a few ULPs of FMA drift.
-            let tol = if k <= 16 { 0.0 } else { 1e-3 };
+            let tol = if k <= BK { 0.0 } else { 1e-3 };
             for (idx, (g, w)) in got.iter().zip(want.iter()).enumerate() {
                 let abs = (g - w).abs();
                 let rel = abs / w.abs().max(1e-6);
@@ -284,9 +319,10 @@ mod tests {
     #[test]
     fn accumulates_into_existing_c() {
         // C is pre-populated; gemm must add, not overwrite. The reference
-        // uses a local-variable accumulator; the kernel accumulates into the
-        // C memory in place, which on arm64 may contract to FMA — so allow a
-        // small relative tolerance (the *additive* behavior is the point).
+        // uses a local-variable accumulator added to C once, so its
+        // association differs from the kernel's per-`p` in-place adds —
+        // allow a small relative tolerance (the *additive* behavior is the
+        // point, not the sum order; that is asserted bit-exactly elsewhere).
         let (m, n, k) = (32, 32, 32);
         let (a, b) = seeded_inputs(m, n, k);
         let mut c = vec![0.5f32; m * n];

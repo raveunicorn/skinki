@@ -139,12 +139,16 @@ Work them **in order**; every ticket table inside marks its tier. Start here:
      Next: `STAGE_1C_SIDECAR_EMBEDDER.md` — fusion is the pattern to
      re-apply once a discriminative base lands.
 2b. `STAGE_1C_B_PURE_RUST_ENCODER.md` — the real sentence encoder, **pure-Rust
-   variant, human-decided B-first (2026-07-04)**. Start with **T0: the
-   kill-switch GEMM bench** (≥ 40 GFLOP/s sustained, 4 threads, M1 Air —
-   below the bar variant B dies on arithmetic and
-   `STAGE_1C_SIDECAR_EMBEDDER.md` (A, on hold) resumes mechanically against
-   the same seam/logs/bars). T0/T1/T3/T4 delegatable; T2 (forward pass +
-   in-crate transcendentals) frontier.
+   variant, human-decided B-first (2026-07-04)**.
+   - **T0 done** — kill-switch GEMM bench (`crates/skinki-encoder`,
+     `encoder-bench --gemm`): M1 Max 10-min sustained, 4-thread min p5 =
+     **46.94 GF/s ≥ 40 bar, GATE PASS** (means ≈ 57–61).
+   - **D1 done — GO** (human, 2026-07-04, on Max data; Air unavailable —
+     gap + ~25% derating rule recorded in the spec's D1 row).
+   - **Next: T1** (`SKENC001` format + converter + toy fixture + golden
+     dumps — delegatable) and **T2** (forward pass + in-crate
+     transcendentals — frontier). T3/T4 follow; A stays the recorded
+     fallback if the D2 quality/latency verdict fails.
 3. `STAGE_6B_AGENT_MEMORY.md` — `remember` / staleness / `memory_asof`
    (all delegatable; T2 semantics reviewed).
 

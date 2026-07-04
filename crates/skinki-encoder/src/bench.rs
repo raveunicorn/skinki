@@ -178,6 +178,11 @@ fn measure_shape(m: usize, n: usize, k: usize, threads: usize, cfg: &BenchConfig
     }
     eprintln!(); // newline after the ticker
 
+    // Insurance against a future compiler proving `c` unused and eliding the
+    // work — today's codegen keeps the stores, but a bench that can silently
+    // measure nothing is not a bench.
+    std::hint::black_box(&c);
+
     let total_secs = (Instant::now() - start).as_secs_f64().max(1e-9);
     let total_flops = 2.0 * (m as f64) * (n as f64) * (k as f64) * (iters as f64);
     let gflops_mean = total_flops / total_secs / 1e9;
@@ -213,7 +218,8 @@ fn percentile(xs: &[f64], p: f64) -> Option<f64> {
 }
 
 /// Deterministic LCG inputs — no `rand`, byte-reproducible across platforms.
-fn seeded_inputs(m: usize, n: usize, k: usize) -> (Vec<f32>, Vec<f32>) {
+/// Shared with the gemm unit tests (single source for the probe inputs).
+pub(crate) fn seeded_inputs(m: usize, n: usize, k: usize) -> (Vec<f32>, Vec<f32>) {
     let mut s: u64 = 0x9E3779B97F4A7C15;
     let mut next = || {
         s = s
