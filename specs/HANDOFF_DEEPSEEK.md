@@ -145,10 +145,40 @@ Work them **in order**; every ticket table inside marks its tier. Start here:
      **46.94 GF/s ≥ 40 bar, GATE PASS** (means ≈ 57–61).
    - **D1 done — GO** (human, 2026-07-04, on Max data; Air unavailable —
      gap + ~25% derating rule recorded in the spec's D1 row).
-   - **Next: T1** (`SKENC001` format + converter + toy fixture + golden
-     dumps — delegatable) and **T2** (forward pass + in-crate
-     transcendentals — frontier). T3/T4 follow; A stays the recorded
-     fallback if the D2 quality/latency verdict fails.
+   - **T1 done (PR #18)** — `SKENC001` format + bounds-checked loader,
+     `scripts/convert_encoder_to_skenc.py` (real bge-small converted,
+     133 MB, gitignored), layer + e2e goldens committed, toy fixture,
+     WordPiece extracted to shared `skinki_vector::wordpiece`.
+   - **T2 done (PR #19)** — pure-Rust forward pass (`math.rs` no-libm
+     exp64/erf64/GELU + f64 LN/softmax stats; `encoder.rs` gemm-based
+     MHA/FFN, threads across sequences only). **Teacher parity: per-layer
+     ≤ 4.1e-6, e2e min cosine 1.0000000 over the 32 goldens.** Recorded
+     for D2: warm 22-id query p95 ≈ 67 ms vs the 50 ms bar; ~12 turns/s
+     at 4 threads (backfill bar ≥ 6 clears ×2).
+   - **Open, delegatable behind the committed goldens/gates:**
+     - **T3a embeddings dump CLI** (the D2 unblocker): harness subcommand
+       `encoder-embed --artifact <skenc> --texts <dir from --dump-texts>
+       --out <f32> --threads N` producing files byte-compatible with the
+       existing `--embeddings-file`/`--query-embeddings-file` replay path
+       of `longmemeval-eval --pooled`. Acceptance: byte-identical output
+       for any `--threads`; round-trips through the pooled eval on a
+       `--limit` smoke; clippy/fmt/tests green.
+     - **T3b query-latency perf pass** (before the D2 latency verdict):
+       p95 ≤ 50 ms warm on ≤ 32-token queries **without changing any
+       committed golden byte** (`encoder_toy_golden.f32` + teacher-parity
+       suite are the regression gate; determinism properties must stay
+       green). Known levers: small-M GEMM path, cheaper deterministic
+       gelu. If a lever changes numerics, STOP — that is a frontier
+       decision, not a perf tweak.
+     - **T4 wiring**: `EmbedderSpec::Encoder { path }` (`encoder:<path>`,
+       loud parse errors like `static:`), `hybrid-rrf` over the encoder,
+       and the append-only emb artifact log per `STAGE_1C` §3 (base64
+       f32 LE + `model_info` stamp, `rebuild(log)` determinism tests).
+     - **D2 quality verdict — frontier + human, NOT delegatable**: run
+       the D1 row from dumped embeddings (single-shot + RRF columns),
+       record margins vs the ≥ 0.22 / ≥ 0.30 bars and the 0.438
+       semantic-real reference, take the served-default decision.
+     A stays the recorded fallback if D2 fails.
 3. `STAGE_6B_AGENT_MEMORY.md` — `remember` / staleness / `memory_asof`
    (all delegatable; T2 semantics reviewed).
 
