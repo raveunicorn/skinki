@@ -219,6 +219,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "skinki-encoder"
+version = "0.1.0"
+dependencies = [
+ "skinki-vector",
+]
+
+[[package]]
 name = "skinki-eval"
 version = "0.1.0"
 dependencies = [
@@ -256,6 +263,7 @@ dependencies = [
  "serde_json",
  "skinki-baseline",
  "skinki-corpus",
+ "skinki-encoder",
  "skinki-eval",
  "skinki-graph",
  "skinki-insight",

@@ -393,6 +393,30 @@ enum Cmd {
         #[arg(long, default_value = "hash")]
         embedder: String,
     },
+    /// Stage 1C-B T0: kill-switch microbench for the pure-Rust f32 GEMM that
+    /// the future BERT forward pass would use. Sustained GFLOP/s at 384-class
+    /// shapes; ≥ 40 GFLOP/s (4 threads) keeps variant B alive. See
+    /// `specs/STAGE_1C_B_PURE_RUST_ENCODER.md` §1–2.
+    EncoderBench {
+        /// Run the GEMM microbench.
+        #[arg(long, default_value_t = true)]
+        gemm: bool,
+        /// Full 10-minute sustained run for honest D1 numbers (default: a
+        /// ~10 s/shape/threads short run for fast iteration and CI smoke).
+        #[arg(long, default_value_t = false)]
+        full_run: bool,
+        /// CI smoke variant: short, no gate assertions possible.
+        #[arg(long, default_value_t = false)]
+        smoke: bool,
+        /// Restrict to this thread count (default: sweep 1/2/4).
+        #[arg(long)]
+        threads: Option<usize>,
+        /// Exit non-zero if the §2 sustained bar (≥ 40 GFLOP/s, min p5 across
+        /// 384-class shapes at 4 threads) is not met. Local-only gate — CI
+        /// machines are not M1 Airs.
+        #[arg(long, default_value_t = false)]
+        assert_gate: bool,
+    },
 }
 
 struct QItem<'a> {
@@ -947,6 +971,121 @@ fn main() -> Result<()> {
             } else {
                 run_longmemeval_eval(&instances, k, graph_artifacts_dir.as_deref())?;
             }
+        }
+        Cmd::EncoderBench {
+            gemm,
+            full_run,
+            smoke,
+            threads,
+            assert_gate,
+        } => {
+            if !gemm {
+                anyhow::bail!("--gemm is the only mode currently supported");
+            }
+            run_encoder_gemm_bench(full_run, smoke, threads, assert_gate)?;
+        }
+    }
+    Ok(())
+}
+
+/// Stage 1C-B T0: GEMM kill-switch bench. See
+/// `specs/STAGE_1C_B_PURE_RUST_ENCODER.md` §1–2.
+fn run_encoder_gemm_bench(
+    full_run: bool,
+    smoke: bool,
+    threads: Option<usize>,
+    assert_gate: bool,
+) -> Result<()> {
+    use skinki_encoder::bench::{self, BenchConfig};
+
+    let mut cfg = if smoke {
+        BenchConfig::smoke()
+    } else if full_run {
+        BenchConfig::full_run()
+    } else {
+        BenchConfig::default()
+    };
+    if let Some(t) = threads {
+        cfg.threads = vec![t];
+    }
+
+    println!("Stage 1C-B T0 — pure-Rust f32 GEMM kill-switch bench");
+    println!(
+        "  shapes:  M∈{{{}}}, N∈{{{}}}, K={}",
+        cfg.shapes
+            .iter()
+            .map(|(m, _, _)| m.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        {
+            let mut ns: Vec<String> = cfg.shapes.iter().map(|(_, n, _)| n.to_string()).collect();
+            ns.sort();
+            ns.dedup();
+            ns.join(",")
+        },
+        cfg.shapes.first().map(|(_, _, k)| *k).unwrap_or(0)
+    );
+    println!("  threads: {:?}", cfg.threads);
+    println!(
+        "  duration: {:.0}s/shape/threads ({}); window {:.0}ms",
+        cfg.duration.as_secs_f64(),
+        if full_run { "FULL RUN" } else { "short" },
+        cfg.window.as_millis()
+    );
+    let total_measurements = cfg.threads.len() * cfg.shapes.len();
+    let per_measurement = cfg.duration.as_secs_f64() + cfg.warmup.as_secs_f64();
+    let est_total = total_measurements as f64 * per_measurement;
+    println!(
+        "  measurements: {total_measurements}  (estimated total ≈ {est_total:.0}s = {est_min:.1}m)",
+        est_min = est_total / 60.0
+    );
+    println!(
+        "  tip: to clear the D1 bar you only need a 4-thread sustained pass;\n\
+         \x20        use `--threads 4` to skip the 1/2-thread sweep and run 4× faster."
+    );
+    println!();
+
+    let results = bench::run(&cfg);
+    print!("{}", bench::format_table(&results));
+
+    let (worst_p5, (wm, wn, wk, wt)) =
+        bench::ShapeResult::worst_p5(&results).expect("at least one result");
+
+    println!();
+    println!(
+        "  worst-case p5: {:.2} GF/s at (M={wm}, N={wn}, K={wk}, threads={wt})",
+        worst_p5
+    );
+
+    if assert_gate {
+        // The §2 bar judges on the **4-thread** worst-case sustained p5. A
+        // gate must never pass vacuously: no 4-thread measurements = no
+        // verdict, not a PASS.
+        let four: Vec<f64> = results
+            .iter()
+            .filter(|r| r.threads == 4)
+            .map(|r| r.gflops_p5)
+            .collect();
+        if four.is_empty() {
+            anyhow::bail!(
+                "--assert-gate needs 4-thread results (the §2 bar is defined at 4 threads); \
+                 rerun with --threads 4 or the default 1/2/4 sweep"
+            );
+        }
+        let four_p5 = four.into_iter().fold(f64::INFINITY, f64::min);
+        if four_p5 >= bench::T0_GATE_GFLOPS {
+            println!(
+                "GATE: PASS (4-thread min p5 = {:.2} ≥ {:.0} GF/s)",
+                four_p5,
+                bench::T0_GATE_GFLOPS
+            );
+        } else {
+            anyhow::bail!(
+                "Stage 1C-B T0 gate FAILED: 4-thread min p5 = {:.2} GF/s < {:.0} GF/s bar. \
+                 This is the kill-switch: variant A resumes with these numbers attached.",
+                four_p5,
+                bench::T0_GATE_GFLOPS
+            );
         }
     }
     Ok(())

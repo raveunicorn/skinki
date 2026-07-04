@@ -24,3 +24,4 @@ skinki-sleep.workspace = true
 skinki-ledger.workspace = true
 skinki-graph.workspace = true
 skinki-insight.workspace = true
+skinki-encoder.workspace = true

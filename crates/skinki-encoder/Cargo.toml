@@ -1,0 +1,9 @@
+[package]
+name = "skinki-encoder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure-Rust, dependency-free, forbid(unsafe_code) BERT-class encoder (Stage 1C-B)."
+
+[dependencies]
+skinki-vector.workspace = true
