@@ -417,6 +417,32 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         assert_gate: bool,
     },
+    /// Stage 1C-B T3a: dump embeddings from a `SKENC001` artifact as flat
+    /// little-endian f32 files, byte-compatible with the existing
+    /// `--embeddings-file` / `--query-embeddings-file` replay path of
+    /// `longmemeval-eval --pooled`. This is the D2 unblocker — it produces
+    /// the vectors the replay-only eval needs without touching the engine
+    /// wiring (T4) or the artifact log. See `HANDOFF_DEEPSEEK.md` T3a.
+    EncoderEmbed {
+        /// Path to the `SKENC001` weight artifact (from the T1 converter).
+        #[arg(long)]
+        artifact: PathBuf,
+        /// Directory containing `entries.json` and `queries.json` (as produced
+        /// by `longmemeval-eval --pooled --dump-texts <dir>`). Embeddings are
+        /// written back into this directory as `entries.f32` and `queries.f32`.
+        #[arg(long)]
+        texts: PathBuf,
+        /// Override the output directory (default: same as `--texts`).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Thread count for `embed_batch` (threads partition sequences; output
+        /// is byte-identical for any value, including 1 vs 4).
+        #[arg(long, default_value_t = 4)]
+        threads: usize,
+        /// Skip the queries file if absent (entries-only dump).
+        #[arg(long, default_value_t = false)]
+        entries_only: bool,
+    },
 }
 
 struct QItem<'a> {
@@ -984,6 +1010,15 @@ fn main() -> Result<()> {
             }
             run_encoder_gemm_bench(full_run, smoke, threads, assert_gate)?;
         }
+        Cmd::EncoderEmbed {
+            artifact,
+            texts,
+            out,
+            threads,
+            entries_only,
+        } => {
+            run_encoder_embed(artifact, texts, out, threads, entries_only)?;
+        }
     }
     Ok(())
 }
@@ -1089,6 +1124,113 @@ fn run_encoder_gemm_bench(
         }
     }
     Ok(())
+}
+
+/// Stage 1C-B T3a: dump embeddings from a `SKENC001` artifact as flat f32 LE
+/// files. Reads `<texts>/entries.json` and (unless `--entries-only`)
+/// `<texts>/queries.json`, encodes them with `RustEncoder::embed_batch`, and
+/// writes `<out>/entries.f32` and `<out>/queries.f32` — byte-compatible with
+/// `read_embeddings_file`, so the result drops into `longmemeval-eval
+/// --pooled --embeddings-file … --query-embeddings-file …`.
+fn run_encoder_embed(
+    artifact: PathBuf,
+    texts_dir: PathBuf,
+    out: Option<PathBuf>,
+    threads: usize,
+    entries_only: bool,
+) -> Result<()> {
+    let out_dir = out.unwrap_or_else(|| texts_dir.clone());
+    std::fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+
+    println!("Stage 1C-B T3a — encoder embeddings dump");
+    println!("  artifact: {}", artifact.display());
+    println!("  texts:    {}", texts_dir.display());
+    println!("  out:      {}", out_dir.display());
+    println!("  threads:  {threads}");
+
+    let encoder = skinki_encoder::RustEncoder::load(&artifact)
+        .with_context(|| format!("loading SKENC001 artifact {}", artifact.display()))?;
+    let dim = encoder.dim();
+    let (mid, mver) = encoder.method_stamp();
+    println!("  loaded: dim={dim} method_stamp=(id={mid}, version={mver})");
+
+    // Entries.
+    let entries_path = texts_dir.join("entries.json");
+    let entries: Vec<String> = read_json_string_array(&entries_path)
+        .with_context(|| format!("reading {}", entries_path.display()))?;
+    let entries_out = out_dir.join("entries.f32");
+    let n_entries = dump_embeddings(&encoder, &entries, threads, dim, &entries_out)?;
+    println!(
+        "  entries: {n_entries} texts -> {} ({} bytes)",
+        entries_out.display(),
+        entries.len() * dim * std::mem::size_of::<f32>()
+    );
+
+    // Queries (optional).
+    if !entries_only {
+        let queries_path = texts_dir.join("queries.json");
+        match read_json_string_array(&queries_path) {
+            Ok(queries) => {
+                let queries_out = out_dir.join("queries.f32");
+                let n_queries = dump_embeddings(&encoder, &queries, threads, dim, &queries_out)?;
+                println!(
+                    "  queries: {n_queries} texts -> {} ({} bytes)",
+                    queries_out.display(),
+                    queries.len() * dim * std::mem::size_of::<f32>()
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                println!("  queries.json not found; skipping (use --entries-only to silence)");
+            }
+            Err(e) => {
+                return Err(anyhow::Error::new(e))
+                    .with_context(|| format!("reading {}", queries_path.display()));
+            }
+        }
+    }
+
+    println!(
+        "\nNext: re-run with\n  longmemeval-eval --pooled \\\n    --embeddings-file {out}/entries.f32 \\\n    --query-embeddings-file {out}/queries.f32",
+        out = out_dir.display()
+    );
+    Ok(())
+}
+
+/// Read a `["a", "b", ...]` JSON file as a `Vec<String>`.
+fn read_json_string_array(path: &std::path::Path) -> std::io::Result<Vec<String>> {
+    let bytes = std::fs::read(path)?;
+    let v: Vec<String> = serde_json::from_slice(&bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    Ok(v)
+}
+
+/// Embed `texts` with `encoder` and write them as a flat little-endian f32
+/// blob (`dim * n * 4` bytes, row-major, input order) to `out_path`. Returns
+/// the number of rows written. The format is byte-identical to what
+/// `read_embeddings_file` expects.
+fn dump_embeddings(
+    encoder: &skinki_encoder::RustEncoder,
+    texts: &[String],
+    threads: usize,
+    dim: usize,
+    out_path: &std::path::Path,
+) -> Result<usize> {
+    let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+    let vecs = encoder.embed_batch(&refs, threads);
+    // Defensive: every row must have the encoder's dim.
+    anyhow::ensure!(
+        vecs.iter().all(|v| v.len() == dim),
+        "encoder produced a row with dim != {dim}"
+    );
+
+    let mut buf: Vec<u8> = Vec::with_capacity(vecs.len() * dim * std::mem::size_of::<f32>());
+    for v in &vecs {
+        for &f in v {
+            buf.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+    std::fs::write(out_path, &buf).with_context(|| format!("writing {}", out_path.display()))?;
+    Ok(vecs.len())
 }
 
 /// Parse `--sample`: "all" or a 0-based integer index.
@@ -4032,6 +4174,142 @@ mod longmemeval_eval_tests {
         let dir = tmp_dir("graph_empty");
         let instances = vec![tiny_instance("s1", "single-session-user")];
         run_longmemeval_eval(&instances, 5, Some(&dir)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod encoder_embed_tests {
+    use super::*;
+
+    /// Path to the committed T1 toy `SKENC001` artifact (2 layers, dim 16).
+    fn toy_artifact() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/encoder_toy.skenc")
+    }
+
+    fn write_json_array(path: &std::path::Path, items: &[&str]) {
+        let v: Vec<&str> = items.to_vec();
+        std::fs::write(path, serde_json::to_vec(&v).unwrap()).unwrap();
+    }
+
+    /// The dump format must be byte-identical for any thread count (rule 2
+    /// invariant — `embed_batch` partitions sequences, never arithmetic).
+    #[test]
+    fn dump_is_byte_identical_across_thread_counts() {
+        let artifact = toy_artifact();
+        if !artifact.exists() {
+            eprintln!("skipping: {} missing", artifact.display());
+            return;
+        }
+        let encoder = skinki_encoder::RustEncoder::load(&artifact).unwrap();
+        let dim = encoder.dim();
+        let texts: Vec<&str> = vec!["hello world", "alice adopted a cat", "transfer 500 euros"];
+
+        let vecs1: Vec<Vec<f32>> = encoder.embed_batch(&texts, 1);
+        let vecs4: Vec<Vec<f32>> = encoder.embed_batch(&texts, 4);
+        assert_eq!(
+            vecs1, vecs4,
+            "embed_batch output differs across thread counts"
+        );
+
+        // And the on-disk dump (the format T3a writes) must match too.
+        let dir = std::env::temp_dir().join("skinki_t3a_threadinv");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("entries.f32");
+        let texts_owned: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
+        dump_embeddings(&encoder, &texts_owned, 1, dim, &out).unwrap();
+        let bytes_one = std::fs::read(&out).unwrap();
+        dump_embeddings(&encoder, &texts_owned, 4, dim, &out).unwrap();
+        let bytes_four = std::fs::read(&out).unwrap();
+        assert_eq!(
+            bytes_one, bytes_four,
+            "on-disk f32 dump differs across threads"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The dump must round-trip through `read_embeddings_file` — that is the
+    /// reader `longmemeval-eval --pooled --embeddings-file …` uses.
+    #[test]
+    fn dump_round_trips_through_read_embeddings_file() {
+        let artifact = toy_artifact();
+        if !artifact.exists() {
+            eprintln!("skipping: {} missing", artifact.display());
+            return;
+        }
+        let encoder = skinki_encoder::RustEncoder::load(&artifact).unwrap();
+        let dim = encoder.dim();
+        let texts: Vec<String> = vec![
+            "the quick brown fox".to_string(),
+            "jumps over the lazy dog".to_string(),
+            "a third unrelated sentence".to_string(),
+        ];
+        let dir = std::env::temp_dir().join("skinki_t3a_roundtrip");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("entries.f32");
+        let n = dump_embeddings(&encoder, &texts, 4, dim, &out).unwrap();
+        assert_eq!(n, texts.len());
+
+        let reloaded = read_embeddings_file(&out, dim, n).unwrap();
+        // Re-embed directly and compare byte-for-byte — the f32 file must
+        // carry the exact same bits the encoder produced.
+        let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+        let direct = encoder.embed_batch(&refs, 1);
+        assert_eq!(
+            reloaded, direct,
+            "round-trip through f32 file lost precision"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `run_encoder_embed` end-to-end on the toy artifact: writes
+    /// entries.f32 + queries.f32 from entries.json + queries.json.
+    #[test]
+    fn run_encoder_embed_end_to_end() {
+        let artifact = toy_artifact();
+        if !artifact.exists() {
+            eprintln!("skipping: {} missing", artifact.display());
+            return;
+        }
+        let texts = std::env::temp_dir().join("skinki_t3a_e2e_texts");
+        let _ = std::fs::remove_dir_all(&texts);
+        std::fs::create_dir_all(&texts).unwrap();
+        write_json_array(
+            &texts.join("entries.json"),
+            &["one entry", "another entry", "a third entry"],
+        );
+        write_json_array(&texts.join("queries.json"), &["the question"]);
+
+        run_encoder_embed(artifact, texts.clone(), None, 2, false).unwrap();
+
+        // Both files exist with the right size: dim * n * 4 bytes. Re-load
+        // the artifact to read its dim — the encoder doesn't expose it
+        // without an instance.
+        let enc = skinki_encoder::RustEncoder::load(
+            &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../fixtures/encoder_toy.skenc"),
+        )
+        .unwrap();
+        let dim = enc.dim();
+        let e_bytes = std::fs::metadata(texts.join("entries.f32")).unwrap().len() as usize;
+        assert_eq!(e_bytes, dim * 3 * std::mem::size_of::<f32>());
+        let q_bytes = std::fs::metadata(texts.join("queries.f32")).unwrap().len() as usize;
+        assert_eq!(q_bytes, dim * std::mem::size_of::<f32>());
+        let _ = std::fs::remove_dir_all(&texts);
+    }
+
+    #[test]
+    fn read_json_string_array_round_trip() {
+        let dir = std::env::temp_dir().join("skinki_t3a_json");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.json");
+        write_json_array(&path, &["alpha", "beta", "gamma"]);
+        let got = read_json_string_array(&path).unwrap();
+        assert_eq!(got, vec!["alpha", "beta", "gamma"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

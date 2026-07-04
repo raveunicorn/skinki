@@ -163,6 +163,14 @@ Work them **in order**; every ticket table inside marks its tier. Start here:
        of `longmemeval-eval --pooled`. Acceptance: byte-identical output
        for any `--threads`; round-trips through the pooled eval on a
        `--limit` smoke; clippy/fmt/tests green.
+       **Status: DONE (2026-07-04).** `encoder-embed` subcommand shipped in
+       `skinki-harness` (reads `<texts>/entries.json` + `queries.json`,
+       writes `<out>/entries.f32` + `queries.f32` flat f32 LE). Verified by
+       4 unit tests including byte-identical 1-vs-4-thread dump and
+       `read_embeddings_file` round-trip. D2 can now run: produce a dump
+       from `encoder_bge_small.skenc` over the pooled `--dump-texts` output,
+       then replay via `longmemeval-eval --pooled --embeddings-file
+       <out>/entries.f32 --query-embeddings-file <out>/queries.f32`.
      - **T3b query-latency perf pass** (before the D2 latency verdict):
        p95 ≤ 50 ms warm on ≤ 32-token queries **without changing any
        committed golden byte** (`encoder_toy_golden.f32` + teacher-parity
