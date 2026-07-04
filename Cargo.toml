@@ -12,6 +12,7 @@ members = [
     "crates/skinki-harness",
     "crates/skinki-graph",
     "crates/skinki-insight",
+    "crates/skinki-encoder",
     "crates/skinki-ffi",
     "crates/skinki-mcp",
 ]
@@ -44,6 +45,7 @@ skinki-sleep = { path = "crates/skinki-sleep" }
 skinki-ledger = { path = "crates/skinki-ledger" }
 skinki-graph = { path = "crates/skinki-graph" }
 skinki-insight = { path = "crates/skinki-insight" }
+skinki-encoder = { path = "crates/skinki-encoder" }
 skinki-ffi = { path = "crates/skinki-ffi" }
 skinki-mcp = { path = "crates/skinki-mcp" }
 

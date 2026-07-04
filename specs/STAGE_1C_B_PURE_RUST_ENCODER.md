@@ -52,7 +52,7 @@ core's peak across four throttled cores — aggressive but not heroic.
 
 | Metric | Budget | How measured |
 | --- | --- | --- |
-| **T0 kill-switch: sustained f32 GEMM, 4 threads, 384-class shapes** | **≥ 40 GFLOP/s** (10-min sustained; below → variant A) | `encoder-bench --gemm` on the M1 Air, numbers recorded here |
+| **T0 kill-switch: sustained f32 GEMM, 4 threads, 384-class shapes** | **≥ 40 GFLOP/s** (10-min sustained; below → variant A) | `encoder-bench --gemm --full-run --threads 4` (10-min sustained per shape, 4-thread sweep only). **M1 Max, 2026-07-04:** 4-thread min p5 = **46.94 GF/s** (worst case over M∈{32,128}, N∈{384,1536}, K=384); per-shape p5: M32/N384 = 46.94, M32/N1536 = 56.54, M128/N384 = 57.29, M128/N1536 = 61.16. **GATE: PASS** (≥ 40 by ~17%). Note: this is an M1 *Max* (8 P-cores), not the M1 *Air* (4 P-cores) the §1 budget was sized for — the Air will land lower; the §1 arithmetic (~40% of one P-core peak across four throttled cores) should be re-checked against an actual Air before locking D1. |
 | Query embed latency (≤ 32 tokens, warm) | p95 ≤ 50 ms | telemetry over the eval query set |
 | Backfill throughput (aggregate, sleep-time) | ≥ 6 turns/s sustained (5M ≤ 10 days, interruptible/resumable via Stage 4) | `encoder-bench --backfill-sim` + telemetry |
 | Incremental daily ingestion (~300 entries) | ≤ 60 s | derived from throughput bench |
@@ -133,7 +133,7 @@ impl BatchEmbedder for RustEncoder { /* per-sequence forward, threads across
 
 | Ticket | Type | Tier | Acceptance |
 | --- | --- | --- | --- |
-| **T0 kill-switch bench**: blocked/tiled safe-Rust f32 GEMM (the exact loop structure T2 will use) + `encoder-bench --gemm`; sustained 10-min run on the M1 Air at 384-class shapes (K=384, N∈{384,1536}), 1/2/4 threads | impl (bench frontier-reviewed) | cheaper | GFLOP/s table recorded in §2; ≥ 40 sustained → D1 go |
+| **T0 kill-switch bench**: blocked/tiled safe-Rust f32 GEMM (the exact loop structure T2 will use) + `encoder-bench --gemm`; sustained 10-min run on the M1 Air at 384-class shapes (K=384, N∈{384,1536}), 1/2/4 threads | impl (bench frontier-reviewed) | cheaper | GFLOP/s table recorded in §2; ≥ 40 sustained → D1 go. **Status:** bench implemented (`crates/skinki-encoder/{gemm,bench}.rs` + `encoder-bench` CLI); **M1 Max 10-min sustained: 4-thread min p5 = 46.94 GF/s, GATE PASS.** Note the M1 Max has 8 P-cores vs the Air's 4; the Air number is still TBD but §1's 40%-of-one-P-core projection was set on the Air's hardware envelope. |
 | **D1 go/no-go** on T0 numbers (+ backfill/latency projections recomputed from measured rates) | design | **frontier + human** | decision recorded here; on no-go → `STAGE_1C` variant A resumes with T0 data attached |
 | T1 `SKENC001` format + `convert_encoder_to_skenc.py` + toy artifact + golden dumps (layer + e2e) | impl | cheaper | loader tests + toy goldens green |
 | **T2 encoder core**: embeddings→12×(MHA+FFN+LN)→pooling, in-crate transcendentals, fixed-order reductions | impl | **frontier** | layer goldens byte-green; parity cosine ≥ 0.999; determinism properties green |
@@ -155,8 +155,14 @@ A on kill-switch.**
 
 ## 8. Definition of done
 
-- [ ] T0 numbers + D1 go/no-go recorded (either way — a measured "no" closes
-      this spec honestly and hands 1C-A the data).
+- [x] **T0 bench implemented** — `crates/skinki-encoder` (GEMM + bench) +
+      `encoder-bench --gemm` CLI.
+- [x] **T0 10-min sustained on M1 Max (2026-07-04)** — 4-thread min p5 =
+      **46.94 GF/s**, GATE PASS (≥ 40 by ~17%). Numbers in §2.
+- [ ] T0 10-min sustained on the **M1 Air** (the spec's target hardware —
+      4 P-cores, not the Max's 8) + **D1 go/no-go** recorded. The M1 Max
+      pass is strong evidence but not the letter of §1; D1 still gates the
+      encoder core.
 - [ ] On go: §2 bars green from replayed logs; goldens/parity/determinism
       green in CI; `cargo test`/clippy/fmt clean; deps unchanged.
 - [ ] README honest-status + HANDOFF updated; served-default decision
