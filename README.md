@@ -99,6 +99,23 @@ the naive versions hallucinated 60–78% false insights. The next frontier:
 validate on **real** data (the synthetic win must transfer — Stage 3 just taught
 us it need not) and complete the narration with a live (replayed) LLM narrator.
 
+**The embedder path: static distillation falsified, a pure-Rust encoder built
+instead (Stages 1B → 1C-B).** The Model2Vec bet — that a static token→vector
+table could replace a live sentence encoder — was measured to death on the
+594k-entry LongMemEval pooled row: our distillation 0.090, canonical
+potion-base-8M 0.116, a deliberately over-budget 130 MB retrieval-tuned
+potion-32M **0.086** (bigger decays *faster*) — all below BM25's 0.134; the
+failure is architectural (context-free token vectors lose word order and
+negation; NN margins collapse at scale). Two things survived: a deterministic
+**RRF fusion** (top-k consensus, recall@10 0.145 — the first configuration to
+beat BM25 on that row) and the falsification record itself. The replacement is
+under way: **`skinki-encoder`, a BERT-class forward pass in pure safe Rust** —
+zero dependencies, no `libm`, byte-deterministic across runs, thread counts
+and architectures — which already **reproduces its torch teacher to min cosine
+1.0000000** (per-layer drift ≤ 4.1e-6) on the committed golden suite. The
+quality verdict on real data (D2: ≥ 0.22 single-shot / ≥ 0.30 fused, vs the
+0.438 live-model reference) is the next measurement.
+
 **The multi-hop gap is partially closed — by retrieval strategy, not graph.**
 Coarse-to-fine (instance-level embedding + targeted fine search) lifts
 LongMemEval multi-session recall@10 from semantic-real 0.291 to **0.438
