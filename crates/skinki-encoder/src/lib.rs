@@ -24,7 +24,11 @@
 //! will inherit this exact property for free.
 
 pub mod bench;
+pub mod encoder;
 pub mod format;
 pub mod gemm;
+pub mod math;
+
+pub use encoder::RustEncoder;
 
 pub use gemm::gemm;
