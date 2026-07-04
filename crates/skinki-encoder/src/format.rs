@@ -301,7 +301,11 @@ impl EncoderArtifact {
         };
 
         // Vocab section, then tokenizer with the required special pieces.
-        let mut pieces = Vec::with_capacity(vocab);
+        // `vocab` is untrusted header data: never pre-allocate from it
+        // (a corrupt u32::MAX would demand ~96 GiB and abort on Linux, where
+        // allocation failure does not unwind). Growth is amortized; a corrupt
+        // count dies at the first truncated string read instead.
+        let mut pieces = Vec::new();
         for _ in 0..vocab {
             let len = r.u32()? as usize;
             let s = std::str::from_utf8(r.take(len)?)
