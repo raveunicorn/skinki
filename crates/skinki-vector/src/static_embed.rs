@@ -11,12 +11,12 @@
 //! `store::CodeStore` mmap quarantine; only the small vocab strings and the
 //! lookup index live in resident RAM. See [`StaticEmbedder::load`].
 
-use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
 
 use crate::embed::Embedder;
 use crate::store::CodeStore;
+use crate::wordpiece::WordPieceTokenizer;
 
 /// Method id for "static embedder" derivations (local constant — method ids are
 /// per-crate in this repo, cf. `M_INTRO`/`M_REC` in `skinki-graph`). Wired into
@@ -30,11 +30,10 @@ const FORMAT_VERSION: u32 = 1;
 /// merges/BPE section.
 const FLAG_WORDPIECE: u32 = 1;
 
-/// The WordPiece unknown token. Must be present in every artifact; its weight is
-/// 0 by construction so OOV tokens contribute nothing to the pooled vector.
-const UNK: &str = "[UNK]";
-/// Continuation-piece prefix (BERT WordPiece convention).
-const CONT: &str = "##";
+/// The WordPiece unknown token (re-exported from `wordpiece`): required in
+/// every artifact; its weight is 0 by construction so OOV tokens contribute
+/// nothing to the pooled vector.
+pub use crate::wordpiece::UNK;
 
 /// A static embedder backed by a `SKEMB001` artifact (mmap'd table + parsed
 /// WordPiece vocab). Construct via [`StaticEmbedder::load`].
@@ -42,10 +41,8 @@ pub struct StaticEmbedder {
     /// Owns the mmap (unix) or the read-back bytes (non-unix fallback).
     view: CodeStore,
     dim: usize,
-    /// `piece string -> id`. BTreeMap so iteration is deterministic (rule 2);
-    /// lookup order never affects results, but we avoid `HashMap` on principle.
-    piece_to_id: BTreeMap<String, u32>,
-    unk_id: u32,
+    /// Shared BERT-style WordPiece tokenizer (see `crate::wordpiece`).
+    tok: WordPieceTokenizer,
     /// Byte offset of the `vocab × dim` f32 table within `view`.
     table_offset: usize,
     /// Byte offset of the `vocab` f32 weights within `view`.
@@ -58,7 +55,7 @@ impl std::fmt::Debug for StaticEmbedder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StaticEmbedder")
             .field("dim", &self.dim)
-            .field("vocab", &self.piece_to_id.len())
+            .field("vocab", &self.tok.vocab_len())
             .field("version", &self.version)
             .finish()
     }
@@ -106,24 +103,15 @@ impl StaticEmbedder {
         }
 
         // Vocab section: `vocab_count` len-prefixed UTF-8 strings (id = order).
-        let mut piece_to_id = BTreeMap::new();
-        let mut unk_id = None;
-        for id in 0..vocab_count as u32 {
+        let mut pieces = Vec::with_capacity(vocab_count);
+        for _ in 0..vocab_count {
             let len = r.u32()? as usize;
             let s = std::str::from_utf8(r.take(len)?)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
                 .to_owned();
-            if s == UNK {
-                unk_id = Some(id);
-            }
-            piece_to_id.insert(s, id);
+            pieces.push(s);
         }
-        let unk_id = unk_id.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("artifact vocab has no '{UNK}' token"),
-            )
-        })?;
+        let tok = WordPieceTokenizer::from_pieces(pieces)?;
 
         let table_offset = r.pos();
         // All size arithmetic is checked: a corrupt header (huge dim/vocab)
@@ -155,8 +143,7 @@ impl StaticEmbedder {
         Ok(StaticEmbedder {
             view,
             dim,
-            piece_to_id,
-            unk_id,
+            tok,
             table_offset,
             weights_offset,
             version: version as u64,
@@ -185,65 +172,11 @@ impl StaticEmbedder {
         f32::from_le_bytes([b[0], b[1], b[2], b[3]])
     }
 
-    /// WordPiece-encode `text` to a sequence of token ids.
-    ///
-    /// Preprocessing matches the uncased-BERT recipe this artifact is distilled
-    /// from: lowercase (NFC is the teacher script's job and is applied before
-    /// the table is dumped; Rust lowercasing is byte-stable here), then
-    /// pre-tokenize into whitespace/punctuation-separated words, then greedy
-    /// longest-match WordPiece with `##` continuations and `[UNK]` fallback.
+    /// WordPiece-encode `text` to a sequence of token ids (no `[CLS]`/`[SEP]`
+    /// framing — pooling is over content pieces only). Delegates to the shared
+    /// `crate::wordpiece` tokenizer; see its docs for the exact preprocessing.
     pub fn encode(&self, text: &str) -> Vec<u32> {
-        let lowered = text.to_lowercase();
-        let mut ids = Vec::new();
-        for word in pretokenize(&lowered) {
-            self.wordpiece(word, &mut ids);
-        }
-        ids
-    }
-
-    /// Greedy longest-match WordPiece for a single pre-token. On any full-miss
-    /// the whole word collapses to a single `[UNK]`.
-    fn wordpiece(&self, word: &str, out: &mut Vec<u32>) {
-        let chars: Vec<char> = word.chars().collect();
-        if chars.is_empty() {
-            return;
-        }
-        let mut start = 0;
-        let mut sub_tokens = Vec::new();
-        let mut is_bad = false;
-        while start < chars.len() {
-            let mut end = chars.len();
-            let mut cur_id = None;
-            while start < end {
-                let substr: String = chars[start..end].iter().collect();
-                let key = if start > 0 {
-                    // Continuation piece: stored with the `##` prefix.
-                    format!("{CONT}{substr}")
-                } else {
-                    substr
-                };
-                if let Some(&id) = self.piece_to_id.get(&key) {
-                    cur_id = Some(id);
-                    break;
-                }
-                end -= 1;
-            }
-            match cur_id {
-                Some(id) => {
-                    sub_tokens.push(id);
-                    start = end;
-                }
-                None => {
-                    is_bad = true;
-                    break;
-                }
-            }
-        }
-        if is_bad {
-            out.push(self.unk_id);
-        } else {
-            out.extend(sub_tokens);
-        }
+        self.tok.encode(text)
     }
 
     /// Pooling: weighted mean of the token rows, L2-normalized.
@@ -287,36 +220,6 @@ impl Embedder for StaticEmbedder {
     fn dim(&self) -> usize {
         self.dim
     }
-}
-
-/// BERT-style pre-tokenization: split into runs of alphanumeric chars (Unicode
-/// aware) or single punctuation chars; whitespace separates and is dropped.
-/// Deterministic and order-preserving. Returns `&str` slices into the input.
-fn pretokenize(text: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut word_start: Option<usize> = None;
-    for (idx, c) in text.char_indices() {
-        let end = idx + c.len_utf8();
-        if c.is_alphanumeric() {
-            // Extend the current alphanumeric run.
-            if word_start.is_none() {
-                word_start = Some(idx);
-            }
-        } else {
-            // Flush any in-flight alphanumeric word.
-            if let Some(start) = word_start.take() {
-                out.push(&text[start..idx]);
-            }
-            // Punctuation is its own token; whitespace is dropped entirely.
-            if !c.is_whitespace() {
-                out.push(&text[idx..end]);
-            }
-        }
-    }
-    if let Some(start) = word_start {
-        out.push(&text[start..]);
-    }
-    out
 }
 
 // --- A tiny cursor over the mmap'd bytes. ----------------------------------
@@ -502,7 +405,7 @@ mod tests {
         let p = write_toy();
         let e = StaticEmbedder::load(&p).unwrap();
         assert_eq!(e.dim(), 16);
-        assert_eq!(e.piece_to_id.len(), TOY_VOCAB.len());
+        assert_eq!(e.tok.vocab_len(), TOY_VOCAB.len());
         assert_eq!(e.method_stamp(), (M_EMBEDDER, 1));
         let _ = std::fs::remove_file(&p);
     }
@@ -622,7 +525,7 @@ mod tests {
         // "memory" is in vocab as a whole word.
         let ids = e.encode("memory");
         assert!(!ids.is_empty());
-        assert_ne!(ids[0], e.unk_id);
+        assert_ne!(ids[0], e.tok.unk_id());
         let _ = std::fs::remove_file(&p);
     }
 
@@ -636,8 +539,8 @@ mod tests {
         // in vocab but "memory" + "##s" should be the greedy split.
         let ids = e.encode("memorys");
         // Expect [memory, ##s], not [UNK].
-        let memory_id = e.piece_to_id["memory"];
-        let cont_s = e.piece_to_id["##s"];
+        let memory_id = e.tok.piece_id("memory").unwrap();
+        let cont_s = e.tok.piece_id("##s").unwrap();
         assert_eq!(ids, vec![memory_id, cont_s]);
         let _ = std::fs::remove_file(&p);
     }
@@ -648,7 +551,7 @@ mod tests {
         let e = StaticEmbedder::load(&p).unwrap();
         // "zzqx" has no greedy match at all.
         let ids = e.encode("zzqx");
-        assert_eq!(ids, vec![e.unk_id]);
+        assert_eq!(ids, vec![e.tok.unk_id()]);
         let _ = std::fs::remove_file(&p);
     }
 
@@ -666,8 +569,8 @@ mod tests {
         let p = write_toy();
         let e = StaticEmbedder::load(&p).unwrap();
         // "memory," -> [memory, ","] ("," is in vocab).
-        let memory_id = e.piece_to_id["memory"];
-        let comma_id = e.piece_to_id[","];
+        let memory_id = e.tok.piece_id("memory").unwrap();
+        let comma_id = e.tok.piece_id(",").unwrap();
         let ids = e.encode("memory,");
         assert_eq!(ids, vec![memory_id, comma_id]);
         let _ = std::fs::remove_file(&p);
@@ -679,7 +582,7 @@ mod tests {
         let e = StaticEmbedder::load(&p).unwrap();
         // "память" is a planted whole-word Cyrillic token.
         let ids = e.encode("память");
-        let id = e.piece_to_id["память"];
+        let id = e.tok.piece_id("память").unwrap();
         assert_eq!(ids, vec![id]);
         // Lowercase folding: "ПАМЯТЬ" -> "память".
         assert_eq!(e.encode("ПАМЯТЬ"), vec![id]);
@@ -763,7 +666,7 @@ mod tests {
 
         // Recompute table/weights offsets exactly as load() does.
         let mut header = 8 + 4 * 4;
-        let vocab_count = e.piece_to_id.len();
+        let vocab_count = e.tok.vocab_len();
         for _ in 0..vocab_count {
             let len = u32::from_le_bytes(raw[header..header + 4].try_into().unwrap()) as usize;
             header += 4 + len;
@@ -911,7 +814,7 @@ mod tests {
         // Round-trip: the committed artifact must load.
         let e = StaticEmbedder::load(&path).unwrap();
         assert_eq!(e.dim(), 16);
-        assert_eq!(e.piece_to_id.len(), TOY_VOCAB.len());
+        assert_eq!(e.tok.vocab_len(), TOY_VOCAB.len());
         let v = e.embed("memory engine");
         let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((n - 1.0).abs() < 1e-4);
