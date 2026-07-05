@@ -34,6 +34,7 @@ pub mod rotate;
 pub mod search;
 pub mod static_embed;
 pub mod store;
+pub mod unigram;
 pub mod wordpiece;
 
 /// A tiny deterministic SplitMix64 PRNG (matches the corpus generator's), so the
