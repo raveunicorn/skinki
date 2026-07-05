@@ -142,6 +142,59 @@ impl BatchEmbedder for RustEncoder { /* per-sequence forward, threads across
 | **D2 quality/latency verdict** on §2 bars; served-default decision; A-fallback executed if failed | design | **frontier** | numbers + decision recorded here |
 | T5 (parked until D2 passes) multilingual escalation: SentencePiece Unigram tokenizer port (~500 lines) + multilingual-e5-small artifact (mean pooling flag; 250k-vocab embedding table mmap) | impl | frontier-reviewed | tokenizer parity vs HF on a golden corpus; D1-row rerun recorded |
 
+### D2 verdict (2026-07-05, human decision: trend-close)
+
+**The §2 quality bars are falsified-by-trend for bge-small; the encoder
+itself and all its infrastructure are keepers.** Measured on the pooled
+**trend row** — 41 multi-session questions over the first 201,233 entries of
+the D1 corpus (verified byte-exact prefix of the full 594,708-entry pool;
+`--limit` pools are prefixes of larger ones, so partial backfills are
+evaluable early):
+
+| column | recall@10 | answer@10 | ndcg@10 |
+| --- | --- | --- | --- |
+| bm25 | 0.341 | 0.244 | 0.240 |
+| semantic-real (bge-small, prefixed queries) | **0.362** | 0.268 | 0.248 |
+| `rrf(bm25+real)` (depth = k) | **0.411** | **0.317** | **0.262** |
+
+Findings, in order of importance:
+
+1. **BGE query prefix is mandatory.** Embedding queries raw scored 0.289
+   (below BM25); prepending the model's documented instruction
+   `"Represent this sentence for searching relevant passages: "` to
+   *queries only* (documents stay raw) lifted recall +25% to 0.362. Any
+   serving path (T4 `EmbedderSpec::Encoder`) must apply this prefix at
+   query time. Entry embeddings are unaffected — backfills stay valid.
+2. **Fusion beats both parents on every metric** (+21% recall vs BM25,
+   +14% vs encoder solo) — real complementarity, unlike 1B's static
+   fusion (+8%, "instrument, not default"). The `rrf(bm25+real)` pooled
+   column (PrecomputedSemantic adapter + T8 `RrfFusion`) is the new
+   second-bar instrument, landed with this verdict.
+3. **The absolute §2 bars are out of reach for this model.** On the full
+   row (BM25 = 0.134) the bars demand encoder/BM25 ratios of 1.64×
+   (solo ≥ 0.22) and 2.24× (RRF ≥ 0.30); the trend row measures 1.06×
+   and 1.21×. No plausible pool-size effect closes a 2× ratio gap —
+   33M params is a different weight class from the 300M reference
+   (semantic-real+c2f 0.438). Coarse-to-fine *hurts* with this model
+   (0.362 → 0.122): 384-dim instance-mean vectors are too weak for the
+   coarse stage, confirming the base-model ceiling.
+
+**Decisions (human, 2026-07-05):** the full-row rerun is **waived** — no
+decision depends on the exact full-pool number (bge-small will not be the
+served default either way), and the opportunistic shard backfill
+(resumable runner, 37/115 shards at close) may append the archival number
+later. The A-fallback (sidecar) is **rejected as a product shape** for the
+embedder: the memory engine stays a self-contained binary; the LLM stays
+an external, swappable interface — that boundary is the product. The
+earned path forward is **`STAGE_1D`**: mid-size cleanly-licensed
+multilingual encoder (T5's e5-small first) + int8 escalation (§9's
+recorded escalation, now human-approved for design) + a closed-form
+space-bridge for query-time latency. Hash remains the served default
+until a 1D candidate clears its bars. Deliverables kept: `skinki-encoder`
+(parity 1.0000000, byte-deterministic), `SKENC001` + converter + goldens,
+`encoder-embed` dump CLI, the prefix finding, the `rrf(bm25+real)`
+instrument, and the prefix-evaluability of pooled backfills.
+
 ## 7. Relationship to `STAGE_1C` (variant A)
 
 Everything A defined stays true and shared: the `EmbedderSpec` seam, the
@@ -164,10 +217,14 @@ A on kill-switch.**
       gap is recorded in the D1 row (§6) together with the ~25% derating
       rule for Air-class projections and the exact re-bench command should
       such hardware ever matter (Stage 7).
-- [ ] On go: §2 bars green from replayed logs; goldens/parity/determinism
-      green in CI; `cargo test`/clippy/fmt clean; deps unchanged.
-- [ ] README honest-status + HANDOFF updated; served-default decision
-      recorded in D2.
+- [x] **D2 verdict recorded (human, 2026-07-05): §2 quality bars
+      falsified-by-trend for bge-small; trend-close, full-row rerun
+      waived.** Numbers, the query-prefix finding, and the kept
+      deliverables are in the §6 verdict block. Goldens/parity/determinism
+      green; `cargo test`/clippy/fmt clean; deps unchanged.
+- [x] Served-default decision recorded in D2: hash stays the served
+      default; the sidecar fallback is rejected as a product shape;
+      `STAGE_1D` is the earned continuation.
 
 ## 9. Out of scope
 
