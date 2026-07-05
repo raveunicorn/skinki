@@ -49,6 +49,13 @@ fixtures/static_embed_*.skemb
 # fixture stays committed.
 fixtures/*.skenc
 !fixtures/encoder_toy.skenc
+# Stage 1D K0 SentencePiece Unigram tokenizer artifact (multilingual-e5-small
+# vocab + charsmap, a few MB): regenerate with
+# scripts/dump_unigram_fixtures.py. Committed parity contract:
+# fixtures/unigram_parity.json + the #[ignore] parity tests in skinki-vector.
+# The hand-authored KB-sized toy fixture stays committed.
+fixtures/*.sku
+!fixtures/unigram_toy.sku
 
 # Secrets / signing
 *.p12
