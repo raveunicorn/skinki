@@ -34,9 +34,25 @@ fn tokenize(text: &str) -> impl Iterator<Item = &str> {
 /// A text -> fixed-dim vector embedder. The swappable seam: ship a static
 /// embedder by default; a real transformer (EmbeddingGemma/nomic) plugs in
 /// behind this same trait via precomputed vectors.
+///
+/// Asymmetric embedders (e5, bge, …) need different text on the query vs the
+/// passage side — a prefix in e5's case. The trait keeps `embed` as the
+/// passage/default path used at index time, and adds `embed_query` for the
+/// search-time path. The default delegates to `embed`, so symmetric embedders
+/// (every existing impl) are unchanged; an asymmetric one overrides
+/// `embed_query` to apply its query-side contract. The lesson is Stage 1C-B
+/// D2's: a forgotten query prefix costs ~25% recall, so the prefix lives where
+/// the model contract lives, not at a call site.
 pub trait Embedder {
+    /// Embed `text` as a passage / document (the index-time path).
     fn embed(&self, text: &str) -> Vec<f32>;
     fn dim(&self) -> usize;
+    /// Embed `text` as a query (the search-time path). Default: same as
+    /// `embed`, since most embedders are symmetric. Override in asymmetric
+    /// embedders (e.g. e5's `query:` / `passage:` prefix discipline).
+    fn embed_query(&self, text: &str) -> Vec<f32> {
+        self.embed(text)
+    }
 }
 
 /// A static (non-contextual) embedder: token -> seeded random vector, averaged.
@@ -216,6 +232,19 @@ mod tests {
         let v = boxed.embed("hello world");
         assert_eq!(v.len(), 32);
         assert!((dot(&v, &v) - 1.0).abs() < 1e-5);
+    }
+
+    /// The default `embed_query` must equal `embed` for symmetric embedders —
+    /// this is the contract every existing `Embedder` impl inherits, and the
+    /// property an asymmetric override (e5 query prefix) is allowed to break.
+    #[test]
+    fn default_embed_query_equals_embed() {
+        let e = StaticHashEmbedder::new(32);
+        let boxed: &dyn Embedder = &e;
+        assert_eq!(
+            boxed.embed_query("memory engine"),
+            boxed.embed("memory engine")
+        );
     }
 
     #[test]

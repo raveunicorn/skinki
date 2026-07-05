@@ -206,6 +206,7 @@ name = "skinki-baseline"
 version = "0.1.0"
 dependencies = [
  "skinki-corpus",
+ "skinki-encoder",
  "skinki-eval",
  "skinki-vector",
 ]

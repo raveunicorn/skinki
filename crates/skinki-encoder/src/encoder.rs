@@ -51,21 +51,56 @@ impl RustEncoder {
         self.art.method_stamp()
     }
 
-    /// `[CLS] wordpiece(text) [SEP]`, truncated to `max_pos` total tokens.
+    /// The model-contract query prefix (e5: `"query: "`, bge: `""` — the
+    /// engine never hardcodes a prefix; it is read from the artifact).
+    pub fn query_prefix(&self) -> &str {
+        &self.art.query_prefix
+    }
+
+    /// The model-contract passage prefix (e5: `"passage: "`).
+    pub fn passage_prefix(&self) -> &str {
+        &self.art.passage_prefix
+    }
+
+    /// `[BOS] tok.encode_content(text) [EOS]`, truncated to `max_pos` total
+    /// tokens. BOS/EOS are `[CLS]`/`[SEP]` for WordPiece, `<s>`/`</s>` for
+    /// Unigram (XLM-R) — both come straight from the artifact's tokenizer.
     pub fn encode_ids(&self, text: &str) -> Vec<u32> {
         let d = &self.art.dims;
-        let mut content = self.art.tok.encode(text);
+        let mut content = self.art.tok.encode_content(text);
         content.truncate(d.max_pos - 2);
         let mut ids = Vec::with_capacity(content.len() + 2);
-        ids.push(self.art.cls_id);
+        ids.push(self.art.tok.bos_id());
         ids.extend(content);
-        ids.push(self.art.sep_id);
+        ids.push(self.art.tok.eos_id());
         ids
     }
 
-    /// Embed one text: tokenize → forward → pool → L2-normalize.
+    /// Embed one text as a **passage** (index-time path): apply the model's
+    /// passage prefix, then tokenize → forward → pool → L2-normalize. For
+    /// symmetric embedders (bge, where both prefixes are empty) this is
+    /// identical to the raw embed.
     pub fn embed(&self, text: &str) -> Vec<f32> {
-        let ids = self.encode_ids(text);
+        let prefixed = if self.art.passage_prefix.is_empty() {
+            text.to_string()
+        } else {
+            format!("{}{}", self.art.passage_prefix, text)
+        };
+        let ids = self.encode_ids(&prefixed);
+        self.forward_pooled(&ids)
+    }
+
+    /// Embed one text as a **query** (search-time path): apply the model's
+    /// query prefix, then the rest. Stage 1C-B D2's finding — a forgotten
+    /// query prefix cost bge ~25% recall — is the reason the prefix lives in
+    /// the artifact and is applied here, not at a call site.
+    pub fn embed_query(&self, text: &str) -> Vec<f32> {
+        let prefixed = if self.art.query_prefix.is_empty() {
+            text.to_string()
+        } else {
+            format!("{}{}", self.art.query_prefix, text)
+        };
+        let ids = self.encode_ids(&prefixed);
         self.forward_pooled(&ids)
     }
 
@@ -264,6 +299,11 @@ impl Embedder for RustEncoder {
     fn dim(&self) -> usize {
         RustEncoder::dim(self)
     }
+    /// Override the default so the model's query prefix is applied at search
+    /// time (Stage 1D T1). `SemanticRetriever::search` routes here.
+    fn embed_query(&self, text: &str) -> Vec<f32> {
+        RustEncoder::embed_query(self, text)
+    }
 }
 
 #[cfg(test)]
@@ -291,15 +331,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_text_embeds_cls_sep_only() {
+    fn empty_text_embeds_bos_eos_only() {
         let e = toy();
         let ids = e.encode_ids("");
-        assert_eq!(ids, vec![e.art.cls_id, e.art.sep_id]);
+        assert_eq!(ids, vec![e.art.tok.bos_id(), e.art.tok.eos_id()]);
         let v = e.embed("");
         assert_eq!(v.len(), 16);
         // CLS pooling of a real forward — non-zero, normalized.
         let norm: f64 = v.iter().map(|&x| x as f64 * x as f64).sum();
-        assert!((norm.sqrt() - 1.0).abs() < 1e-5);
+        assert!((norm.sqrt() - 1.0).abs() < 1e-5, "norm {}", norm.sqrt());
     }
 
     #[test]
@@ -309,7 +349,7 @@ mod tests {
         let long = vec!["memory"; 100].join(" ");
         let ids = e.encode_ids(&long);
         assert_eq!(ids.len(), 16);
-        assert_eq!(*ids.last().unwrap(), e.art.sep_id);
+        assert_eq!(*ids.last().unwrap(), e.art.tok.eos_id());
         let _ = e.embed(&long); // must not panic
     }
 
@@ -351,6 +391,48 @@ mod tests {
     fn different_texts_differ() {
         let e = toy();
         assert_ne!(e.embed("memory engine"), e.embed("rust search"));
+    }
+
+    /// Prefix-aware embed: with non-empty query/passage prefixes (built into
+    /// the toy artifact), `embed_query` and `embed` must produce different
+    /// vectors for the same text — this is the property the e5 query prefix
+    /// depends on at search time. Also checks the trait override is wired.
+    /// Prefixes are chosen so the toy WordPiece vocab tokenizes them
+    /// distinctly (both `memory` and `engine` are in the toy vocab), so the
+    /// query/passage id sequences actually differ.
+    #[test]
+    fn embed_query_uses_query_prefix() {
+        use crate::format::toy::build_toy_wordpiece;
+        let dims = crate::format::EncoderDims {
+            pooling: crate::format::Pooling::Mean,
+            ..crate::format::toy::TOY_DIMS
+        };
+        let bytes = build_toy_wordpiece(dims, 0x5E5, "memory ", "engine ");
+        let e = RustEncoder::from_bytes(&bytes).unwrap();
+        assert_eq!(e.query_prefix(), "memory ");
+        assert_eq!(e.passage_prefix(), "engine ");
+        assert_ne!(
+            e.embed_query("rust vector"),
+            e.embed("rust vector"),
+            "query/passage prefixes must yield different embeddings"
+        );
+        // The trait route hits the same override.
+        let boxed: Box<dyn Embedder> = Box::new(RustEncoder::from_bytes(&bytes).unwrap());
+        assert_eq!(
+            boxed.embed_query("rust vector"),
+            e.embed_query("rust vector")
+        );
+    }
+
+    /// With empty prefixes the artifact is symmetric: query path == passage
+    /// path (the bge case, where the engine-side prefix lesson does not apply
+    /// inside the artifact).
+    #[test]
+    fn empty_prefixes_mean_query_equals_passage() {
+        let e = toy();
+        assert!(e.query_prefix().is_empty());
+        assert!(e.passage_prefix().is_empty());
+        assert_eq!(e.embed_query("memory engine"), e.embed("memory engine"));
     }
 
     #[test]
@@ -440,11 +522,11 @@ mod tests {
 
     /// Layer-by-layer parity against the teacher's activation dump: a
     /// numerics bug localizes to the first layer whose max abs diff blows up.
-    #[test]
-    #[ignore = "needs fixtures/encoder_bge_small.skenc — regenerate with scripts/convert_encoder_to_skenc.py"]
-    fn layer_parity_vs_teacher() {
-        let e = RustEncoder::load(&fixtures().join("encoder_bge_small.skenc")).unwrap();
-        let bytes = std::fs::read(fixtures().join("encoder_layer_golden.f32")).unwrap();
+    /// The shared body is invoked once per converted artifact so both the bge
+    /// (WordPiece/CLS) and e5 (Unigram/mean) shapes stay covered.
+    fn layer_parity_body(artifact: &std::path::Path, golden: &std::path::Path) {
+        let e = RustEncoder::load(artifact).unwrap();
+        let bytes = std::fs::read(golden).unwrap();
         let mut r = 0usize;
         let n_states = read_u32(&bytes, &mut r) as usize;
         let seq = read_u32(&bytes, &mut r) as usize;
@@ -479,12 +561,28 @@ mod tests {
         assert_eq!(r, bytes.len());
     }
 
-    /// End-to-end parity: cosine ≥ 0.999 per golden vector (§2 bar).
     #[test]
     #[ignore = "needs fixtures/encoder_bge_small.skenc — regenerate with scripts/convert_encoder_to_skenc.py"]
-    fn e2e_parity_vs_teacher() {
-        let e = RustEncoder::load(&fixtures().join("encoder_bge_small.skenc")).unwrap();
-        let bytes = std::fs::read(fixtures().join("encoder_golden_embeddings.f32")).unwrap();
+    fn layer_parity_vs_teacher_bge() {
+        layer_parity_body(
+            &fixtures().join("encoder_bge_small.skenc"),
+            &fixtures().join("encoder_layer_golden.f32"),
+        );
+    }
+
+    #[test]
+    #[ignore = "needs fixtures/encoder_e5_small.skenc — regenerate with scripts/convert_encoder_to_skenc.py"]
+    fn layer_parity_vs_teacher_e5() {
+        layer_parity_body(
+            &fixtures().join("encoder_e5_small.skenc"),
+            &fixtures().join("encoder_e5_layer_golden.f32"),
+        );
+    }
+
+    /// End-to-end parity: cosine ≥ 0.999 per golden vector (§2 bar).
+    fn e2e_parity_body(artifact: &std::path::Path, golden: &std::path::Path) {
+        let e = RustEncoder::load(artifact).unwrap();
+        let bytes = std::fs::read(golden).unwrap();
         let mut r = 0usize;
         let count = read_u32(&bytes, &mut r) as usize;
         let dim = read_u32(&bytes, &mut r) as usize;
@@ -526,5 +624,23 @@ mod tests {
         }
         assert_eq!(r, bytes.len());
         eprintln!("min cosine over {count} strings: {min_cos:.7}");
+    }
+
+    #[test]
+    #[ignore = "needs fixtures/encoder_bge_small.skenc — regenerate with scripts/convert_encoder_to_skenc.py"]
+    fn e2e_parity_vs_teacher_bge() {
+        e2e_parity_body(
+            &fixtures().join("encoder_bge_small.skenc"),
+            &fixtures().join("encoder_golden_embeddings.f32"),
+        );
+    }
+
+    #[test]
+    #[ignore = "needs fixtures/encoder_e5_small.skenc — regenerate with scripts/convert_encoder_to_skenc.py"]
+    fn e2e_parity_vs_teacher_e5() {
+        e2e_parity_body(
+            &fixtures().join("encoder_e5_small.skenc"),
+            &fixtures().join("encoder_e5_golden_embeddings.f32"),
+        );
     }
 }

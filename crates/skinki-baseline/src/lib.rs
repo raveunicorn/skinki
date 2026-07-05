@@ -101,7 +101,11 @@ use skinki_vector::embed::{Embedder, StaticHashEmbedder};
 /// How the production semantic retriever embeds text. `Hash` is the legacy
 /// deterministic hash-of-tokens embedder (zero deps, byte-reproducible);
 /// `Static` loads a `SKEMB001` artifact (Stage 1B's distilled token→vector
-/// table). `Hash` remains the default so existing benchmarks are not silently
+/// table); `Encoder` loads a `SKENC001` artifact (Stage 1C-B / 1D) and runs
+/// the pure-Rust forward — bge-small (WordPiece / CLS) or multilingual-e5-small
+/// (Unigram / mean). The query/passage prefixes are read from the artifact,
+/// never hardcoded: the encoder's `embed` / `embed_query` apply them.
+/// `Hash` remains the default so existing benchmarks are not silently
 /// perturbed until D1 freezes the static bars.
 #[derive(Debug, Clone)]
 pub enum EmbedderSpec {
@@ -110,12 +114,19 @@ pub enum EmbedderSpec {
     Static {
         path: std::path::PathBuf,
     },
+    /// `encoder:<path>` — load a `SKENC001` v2 artifact (Stage 1C-B / 1D) at
+    /// `path`. Query/passage prefixes come from the artifact header, so the
+    /// CLI surface stays a bare path (no query-string).
+    Encoder {
+        path: std::path::PathBuf,
+    },
 }
 
 impl EmbedderSpec {
-    /// Parse the `--embedder` flag value: `hash` or `static:<path>`. Anything
-    /// else is a loud error — a typo silently falling back to `hash` would
-    /// mislabel a benchmark column, which is worse than failing.
+    /// Parse the `--embedder` flag value: `hash`, `static:<path>` or
+    /// `encoder:<path>`. Anything else is a loud error — a typo silently
+    /// falling back to `hash` would mislabel a benchmark column, which is
+    /// worse than failing.
     pub fn parse(flag: &str) -> Result<Self, String> {
         if flag == "hash" {
             return Ok(EmbedderSpec::Hash);
@@ -128,19 +139,30 @@ impl EmbedderSpec {
                 path: std::path::PathBuf::from(rest),
             });
         }
+        if let Some(rest) = flag.strip_prefix("encoder:") {
+            if rest.is_empty() {
+                return Err("--embedder encoder: needs a path (encoder:<path>)".to_string());
+            }
+            return Ok(EmbedderSpec::Encoder {
+                path: std::path::PathBuf::from(rest),
+            });
+        }
         Err(format!(
-            "invalid --embedder '{flag}': expected 'hash' or 'static:<path>'"
+            "invalid --embedder '{flag}': expected 'hash', 'static:<path>' or 'encoder:<path>'"
         ))
     }
 
     /// Construct the embedder described by this spec. `Hash` costs nothing;
-    /// `Static` mmaps the artifact (fallible).
+    /// `Static` and `Encoder` mmap their artifacts (fallible).
     pub fn build(&self) -> std::io::Result<Box<dyn Embedder>> {
         match self {
             EmbedderSpec::Hash => Ok(Box::new(StaticHashEmbedder::new(256))),
             EmbedderSpec::Static { path } => Ok(Box::new(
                 skinki_vector::static_embed::StaticEmbedder::load(path)?,
             )),
+            EmbedderSpec::Encoder { path } => {
+                Ok(Box::new(skinki_encoder::RustEncoder::load(path)?))
+            }
         }
     }
 }
@@ -199,7 +221,11 @@ impl RetrievalSystem for SemanticRetriever {
     }
 
     fn search(&self, query: &str, k: usize) -> Vec<EntryId> {
-        let qv = self.embedder.embed(query);
+        // Search-time path: `embed_query`, so an asymmetric embedder (e5 query
+        // prefix) applies here while `index` keeps the passage-side `embed`.
+        // For symmetric embedders the trait's default makes this identical to
+        // `embed`, so no behavior change for `Hash` / `Static`.
+        let qv = self.embedder.embed_query(query);
         let mut scored: Vec<(f32, EntryId)> = self
             .vectors
             .iter()
@@ -411,6 +437,16 @@ mod tests {
             }
         }
 
+        #[test]
+        fn parse_encoder_path() {
+            match EmbedderSpec::parse("encoder:/tmp/model.skenc") {
+                Ok(EmbedderSpec::Encoder { path }) => {
+                    assert_eq!(path, std::path::PathBuf::from("/tmp/model.skenc"));
+                }
+                other => panic!("expected Encoder, got {other:?}"),
+            }
+        }
+
         /// A typo must be a loud error, never a silent fall-back to `hash` —
         /// a mislabeled benchmark column is worse than a failed run.
         #[test]
@@ -419,8 +455,20 @@ mod tests {
             assert!(EmbedderSpec::parse("nope").is_err());
             assert!(EmbedderSpec::parse("statik:/tmp/m.skemb").is_err());
             assert!(EmbedderSpec::parse("Hash").is_err());
-            // `static:` with no path is an error too, not the hash default.
+            // `static:` / `encoder:` with no path are errors too, not the hash default.
             assert!(EmbedderSpec::parse("static:").is_err());
+            assert!(EmbedderSpec::parse("encoder:").is_err());
+        }
+
+        #[test]
+        fn build_encoder_missing_file_errors() {
+            let spec = EmbedderSpec::Encoder {
+                path: std::path::PathBuf::from("/nonexistent/skinki-encoder-missing.skenc"),
+            };
+            assert!(
+                spec.build().is_err(),
+                "missing artifact must error, not panic"
+            );
         }
 
         #[test]
@@ -461,6 +509,60 @@ mod tests {
             for &id in &hits {
                 assert!(seen.insert(id), "duplicate id {id} in results");
             }
+        }
+
+        /// `search` routes through `embed_query` (Stage 1D T1): a fake embedder
+        /// that records which side its query method was called on proves an
+        /// asymmetric embedder (e5 query prefix) is honored at search time
+        /// without changing the index path.
+        #[test]
+        fn search_uses_embed_query_not_embed() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static EMBED: AtomicUsize = AtomicUsize::new(0);
+            static QUERY: AtomicUsize = AtomicUsize::new(0);
+            struct Spy;
+            impl Embedder for Spy {
+                fn embed(&self, _text: &str) -> Vec<f32> {
+                    EMBED.fetch_add(1, Ordering::SeqCst);
+                    vec![1.0, 0.0]
+                }
+                fn dim(&self) -> usize {
+                    2
+                }
+                fn embed_query(&self, _text: &str) -> Vec<f32> {
+                    QUERY.fetch_add(1, Ordering::SeqCst);
+                    vec![1.0, 0.0]
+                }
+            }
+            EMBED.store(0, Ordering::SeqCst);
+            QUERY.store(0, Ordering::SeqCst);
+            let corpus = generate(&GenConfig {
+                seed: 1,
+                years: 1,
+                entries_per_day: 1,
+                difficulty: skinki_corpus::Difficulty::V1,
+            });
+            let mut r = SemanticRetriever::new(Box::new(Spy), "spy");
+            r.index(&corpus);
+            // Index used `embed` once per entry, never `embed_query`.
+            assert_eq!(
+                QUERY.load(Ordering::SeqCst),
+                0,
+                "index must use embed (passage), not embed_query"
+            );
+            assert!(EMBED.load(Ordering::SeqCst) > 0);
+            let pre = EMBED.load(Ordering::SeqCst);
+            let _ = r.search("anything", 3);
+            assert_eq!(
+                QUERY.load(Ordering::SeqCst),
+                1,
+                "search must use embed_query (the asymmetric query path)"
+            );
+            assert_eq!(
+                EMBED.load(Ordering::SeqCst),
+                pre,
+                "search must not re-call embed"
+            );
         }
 
         /// The same string embeds to identical bytes (rule-2 determinism),
