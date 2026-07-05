@@ -45,11 +45,16 @@ killable moves, ordered by predictability:
   deterministic by construction. Kill-switch: if the bridged query
   loses > 10% of the big tower's own-query recall on the trend row,
   the bridge is dead and queries pay the big-tower latency instead.
-- **M3 — int8 escalation (design ticket, human-approved 2026-07-05).**
-  Quantized weights + i8→i32 blocked GEMM in safe Rust (autovectorized;
-  **no SDOT `unsafe` without a separate human D-ticket**). Integer
-  accumulation is *more* deterministic than f32, not less. Only needed
-  if an M1-escalation model busts latency/backfill budgets at f32.
+- **M3 — int8, default-on (human decision 2026-07-05: "не сжать —
+  расточительство").** Quantized weights + i8→i32 blocked GEMM in safe
+  Rust (autovectorized; **no SDOT `unsafe` without a separate human
+  D-ticket**). Integer accumulation is *more* deterministic than f32,
+  not less. Sequencing is Law-2-mandatory: the f32 baseline (T1/T2)
+  lands first *because it is the ruler* — int8 ships only if its
+  trend-row `rrf` recall drop vs own-f32 is ≤ 0.01 and embeddings stay
+  byte-deterministic; otherwise f32 stays and the delta is recorded.
+  Wins either way: 4× artifact/RSS (472 MB → ~120 MB for e5-small),
+  2–3× GEMM as measured, and headroom for the base-class escalation.
 
 Falsifiable per move, and jointly: if no combination clears the §2 bars
 on the D1 row, the honest record is that engine-internal encoding caps
@@ -73,12 +78,13 @@ below reference class, and the served default remains
 
 | Ticket | Type | Tier | Acceptance |
 | --- | --- | --- | --- |
-| **K0 kill-switch: SentencePiece Unigram tokenizer** in pure Rust (~500 lines; 1C-B T5's port, promoted) | impl | frontier-reviewed | byte-parity vs HF tokenizer on a 1k-string multilingual golden corpus; deterministic |
+| **K0 kill-switch: SentencePiece Unigram tokenizer** in pure Rust (~500 lines; 1C-B T5's port, promoted). Design constraints: Rust never parses the SP protobuf — the converter (Python dev tooling) extracts vocab+scores **and the `precompiled_charsmap`** into our own table format; Rust normalization = trie longest-match over that shipped table + SP whitespace/`▁` handling (NOT a hand-rolled NFKC); Viterbi over log-probs with fixed tie-break | impl | frontier-reviewed | byte-parity vs HF `AutoTokenizer` (incl. specials + XLM-R id offset) on a ≥ 1k-string EN/RU/DE/ES/CJK/emoji/edge-case golden corpus; deterministic; no new deps |
 | T1 multilingual-e5-small: converter path (mean pooling flag, query/passage prefixes in `EmbedderSpec`), artifact + layer/e2e goldens | impl | cheaper | parity ≥ 0.999 cosine on goldens; loads under §2 budgets |
 | T2 trend-row eval of T1 (prefixed both sides) + fusion | impl | cheaper | trend-row table recorded here; GO/NO-GO vs bge-small numbers |
 | **D1 bridge design**: pair-corpus recipe, ridge/Procrustes choice, artifact layout for the 384×D map | design | **frontier** | written before T3; kill criterion frozen (≤ 10% recall loss vs big-tower queries) |
 | T3 bridge fit (dev tooling, offline, no GPU) + `SKENC001` map section + GEMV apply | impl | cheaper | trend-row bridged-query recall within kill criterion; determinism tests |
-| T4 (conditional) escalation model at f32; **T5 (conditional) int8 GEMM bench + quantized forward** — T0-style sustained bench *before* the forward is written | impl | frontier (T5 core) | bench table here; §2 latency/backfill green |
+| **T5 int8 (default-on, after the T2 f32 baseline)**: quantization recipe in the converter + i8→i32 blocked GEMM bench (T0-style sustained, *before* the forward is written) + quantized forward | impl | frontier (GEMM core + recipe review) | bench table here; trend-row `rrf` drop vs own-f32 ≤ 0.01; byte-determinism preserved; §2 latency/backfill green |
+| T4 (conditional) base-class escalation model (e5-base / gte-base / arctic-m) on the int8 path | impl | cheaper | trend-row table; §2 budgets hold |
 | T6 (exploratory, delegatable) sleep-time doc2query spike: local-LLM generated per-session questions → artifact log → indexed alongside entries; measures BM25-only lift first | impl | cheaper | trend-row lift recorded; replay-only; zero query-time cost |
 | **D2 verdict**: served-default decision on §2 bars (full D1-row replay) | design | **frontier + human** | numbers + decision recorded here |
 
