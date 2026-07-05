@@ -3125,6 +3125,45 @@ fn dump_locomo_texts(corpus: &Corpus, dir: &std::path::Path) -> Result<()> {
 /// (cosine == dot on L2-normalized rows): the real-model path, where BOTH sides
 /// come from the same embedder. `query_vecs[i]` corresponds to
 /// `corpus.ground_truth.recall[i]`; `entry_vecs[j]` to `corpus.entries[j]`.
+/// Precomputed-embedding retriever: serves ranked lists from replayed
+/// entry/query vectors so `RrfFusion` can fuse BM25 with a real encoder
+/// without live inference (gates replay artifacts, never infer). Queries
+/// are looked up by exact text; unknown text returns no hits, which makes
+/// the fused column degrade to BM25 rather than panic.
+struct PrecomputedSemantic<'a> {
+    entry_vecs: &'a [Vec<f32>],
+    entry_ids: Vec<EntryId>,
+    query_vecs: std::collections::BTreeMap<&'a str, &'a Vec<f32>>,
+}
+
+impl RetrievalSystem for PrecomputedSemantic<'_> {
+    fn name(&self) -> &str {
+        "semantic-real"
+    }
+
+    /// No-op: the vectors are replayed, not built from the corpus.
+    fn index(&mut self, _corpus: &Corpus) {}
+
+    fn search(&self, query: &str, k: usize) -> Vec<EntryId> {
+        let Some(qv) = self.query_vecs.get(query) else {
+            return Vec::new();
+        };
+        let mut scored: Vec<(f32, EntryId)> = self
+            .entry_vecs
+            .iter()
+            .zip(self.entry_ids.iter())
+            .map(|(v, &id)| (dot(qv, v), id))
+            .collect();
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.1.cmp(&b.1))
+        });
+        scored.truncate(k);
+        scored.into_iter().map(|(_, id)| id).collect()
+    }
+}
+
 fn locomo_score_precomputed(
     entry_vecs: &[Vec<f32>],
     query_vecs: &[Vec<f32>],
@@ -3516,6 +3555,26 @@ fn run_longmemeval_pooled_eval(
                     ndcg_at_k: c2f_ndcg / nq,
                     answer_in_topk: c2f_answer / nq,
                 },
+            ));
+
+            // 1C-B D2 instrument: `RRF(BM25 + replayed encoder)` at depth = k —
+            // the second §2 bar (≥ 0.30). Mirrors the T8 hybrid above with the
+            // real encoder replacing the static embedder.
+            let pre = PrecomputedSemantic {
+                entry_vecs: &entry_vecs,
+                entry_ids: corpus.entries.iter().map(|e| e.id).collect(),
+                query_vecs: corpus
+                    .ground_truth
+                    .recall
+                    .iter()
+                    .enumerate()
+                    .map(|(qi, q)| (q.question.as_str(), &query_vecs[qi]))
+                    .collect(),
+            };
+            let hybrid_real = RrfFusion::new(&bm25, &pre, k);
+            cols.push((
+                "rrf(bm25+real)".into(),
+                locomo_score(&hybrid_real, &corpus, k),
             ));
         }
         (Some(_), None) => anyhow::bail!("--embeddings-file requires --query-embeddings-file too"),
@@ -4175,6 +4234,29 @@ mod longmemeval_eval_tests {
         let instances = vec![tiny_instance("s1", "single-session-user")];
         run_longmemeval_eval(&instances, 5, Some(&dir)).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod precomputed_semantic_tests {
+    use super::*;
+
+    /// Ranking is by dot product (desc), tie-broken by ascending id, and an
+    /// unknown query text degrades to no hits instead of panicking — the
+    /// properties `RrfFusion` relies on when fusing with BM25.
+    #[test]
+    fn ranks_by_dot_and_handles_unknown_query() {
+        let entry_vecs = vec![vec![1.0, 0.0], vec![0.0, 1.0], vec![0.7, 0.7]];
+        let qv = vec![1.0f32, 0.1];
+        let pre = PrecomputedSemantic {
+            entry_vecs: &entry_vecs,
+            entry_ids: vec![10, 20, 30],
+            query_vecs: [("q", &qv)].into_iter().collect(),
+        };
+        // dots: id10 = 1.0, id30 = 0.77, id20 = 0.1
+        assert_eq!(pre.search("q", 2), vec![10, 30]);
+        assert_eq!(pre.search("q", 10), vec![10, 30, 20]);
+        assert!(pre.search("unknown", 2).is_empty());
     }
 }
 
