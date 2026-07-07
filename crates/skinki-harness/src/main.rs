@@ -1154,25 +1154,34 @@ fn run_encoder_embed(
     let (mid, mver) = encoder.method_stamp();
     println!("  loaded: dim={dim} method_stamp=(id={mid}, version={mver})");
 
-    // Entries.
+    // Entries — passage-side (index-time): apply the artifact's passage
+    // prefix. `embed_batch` partitions sequences across threads (not
+    // arithmetic), so its output is byte-identical for any `threads`.
     let entries_path = texts_dir.join("entries.json");
     let entries: Vec<String> = read_json_string_array(&entries_path)
         .with_context(|| format!("reading {}", entries_path.display()))?;
     let entries_out = out_dir.join("entries.f32");
-    let n_entries = dump_embeddings(&encoder, &entries, threads, dim, &entries_out)?;
+    let n_entries = dump_embeddings(&encoder, &entries, threads, dim, &entries_out, false)?;
     println!(
         "  entries: {n_entries} texts -> {} ({} bytes)",
         entries_out.display(),
         entries.len() * dim * std::mem::size_of::<f32>()
     );
 
-    // Queries (optional).
+    // Queries (optional) — query-side (search-time): apply the artifact's
+    // query prefix (e.g. e5's "query: "). Earlier revisions ran these
+    // through `embed_batch` — i.e. the *passage* prefix — which silently
+    // destroyed the asymmetric e5 gain. The prefix lives in the artifact
+    // (SKENC001 v2); the engine-side texts must NOT be hand-prefixed, or
+    // the prefix gets applied twice (the failure mode this dump path got
+    // wrong in the 1D-T2 row before this fix).
     if !entries_only {
         let queries_path = texts_dir.join("queries.json");
         match read_json_string_array(&queries_path) {
             Ok(queries) => {
                 let queries_out = out_dir.join("queries.f32");
-                let n_queries = dump_embeddings(&encoder, &queries, threads, dim, &queries_out)?;
+                let n_queries =
+                    dump_embeddings(&encoder, &queries, threads, dim, &queries_out, true)?;
                 println!(
                     "  queries: {n_queries} texts -> {} ({} bytes)",
                     queries_out.display(),
@@ -1208,15 +1217,53 @@ fn read_json_string_array(path: &std::path::Path) -> std::io::Result<Vec<String>
 /// blob (`dim * n * 4` bytes, row-major, input order) to `out_path`. Returns
 /// the number of rows written. The format is byte-identical to what
 /// `read_embeddings_file` expects.
+///
+/// `as_queries` selects the model-contract prefix path: `false` routes
+/// through `embed_batch` (passage prefix / index-time); `true` routes through
+/// `embed_query` per row (query prefix / search-time). Both share one
+/// encoder arithmetic core — only the applied prefix differs. Asymmetric
+/// embedders (e5: `"query: "`/`"passage: "`) get the wrong recall if queries
+/// are dumped passage-side, so this branch is the load-bearing distinction
+/// for the 1D-T2 trend row.
 fn dump_embeddings(
     encoder: &skinki_encoder::RustEncoder,
     texts: &[String],
     threads: usize,
     dim: usize,
     out_path: &std::path::Path,
+    as_queries: bool,
 ) -> Result<usize> {
     let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-    let vecs = encoder.embed_batch(&refs, threads);
+    // Threaded query path mirrors `RustEncoder::embed_batch`'s partitioning:
+    // sequences are split into bands, never the per-row arithmetic, so the
+    // dump stays byte-identical for any thread count (rule 2). The encoder
+    // exposes no batched query-side entry point (it lives inside the
+    // quarantined crate we don't touch here), so the band loop is inlined.
+    let vecs: Vec<Vec<f32>> = if as_queries {
+        if threads <= 1 || refs.len() <= 1 {
+            refs.iter().map(|t| encoder.embed_query(t)).collect()
+        } else {
+            let bands = threads.min(refs.len());
+            let chunk = refs.len().div_ceil(bands);
+            let mut out: Vec<Vec<Vec<f32>>> = Vec::with_capacity(bands);
+            std::thread::scope(|s| {
+                let mut handles = Vec::with_capacity(bands);
+                for band in refs.chunks(chunk) {
+                    handles.push(s.spawn(move || {
+                        band.iter()
+                            .map(|t| encoder.embed_query(t))
+                            .collect::<Vec<_>>()
+                    }));
+                }
+                for h in handles {
+                    out.push(h.join().expect("encoder query worker panicked"));
+                }
+            });
+            out.into_iter().flatten().collect()
+        }
+    } else {
+        encoder.embed_batch(&refs, threads)
+    };
     // Defensive: every row must have the encoder's dim.
     anyhow::ensure!(
         vecs.iter().all(|v| v.len() == dim),
@@ -4301,9 +4348,9 @@ mod encoder_embed_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let out = dir.join("entries.f32");
         let texts_owned: Vec<String> = texts.iter().map(|s| s.to_string()).collect();
-        dump_embeddings(&encoder, &texts_owned, 1, dim, &out).unwrap();
+        dump_embeddings(&encoder, &texts_owned, 1, dim, &out, false).unwrap();
         let bytes_one = std::fs::read(&out).unwrap();
-        dump_embeddings(&encoder, &texts_owned, 4, dim, &out).unwrap();
+        dump_embeddings(&encoder, &texts_owned, 4, dim, &out, false).unwrap();
         let bytes_four = std::fs::read(&out).unwrap();
         assert_eq!(
             bytes_one, bytes_four,
@@ -4332,7 +4379,7 @@ mod encoder_embed_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let out = dir.join("entries.f32");
-        let n = dump_embeddings(&encoder, &texts, 4, dim, &out).unwrap();
+        let n = dump_embeddings(&encoder, &texts, 4, dim, &out, false).unwrap();
         assert_eq!(n, texts.len());
 
         let reloaded = read_embeddings_file(&out, dim, n).unwrap();
@@ -4392,6 +4439,294 @@ mod encoder_embed_tests {
         write_json_array(&path, &["alpha", "beta", "gamma"]);
         let got = read_json_string_array(&path).unwrap();
         assert_eq!(got, vec!["alpha", "beta", "gamma"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- prefixed toy artifact (mirrors `skinki_encoder::format::toy` ----
+    // The crate-internal toy builder is `pub(crate)` behind `#[cfg(test)]`,
+    // so the harness cannot reach it cross-crate. We deliberately duplicate
+    // the WORDPIECE builder here — same convention as the encoder/static-
+    // embedder toys in `skinki-encoder` itself — to obtain a toy `SKENC001
+    // v2` image whose query/passage prefixes are non-empty. That asymmetry
+    // is what makes the Step-0 routing test observable: with empty prefixes
+    // `embed_query` reduces to `embed` and the bug is invisible, so the
+    // prefix MUST be set.
+
+    const TOY_MAGIC: &[u8; 8] = b"SKENC001";
+    const TOY_FORMAT_VERSION: u32 = 2;
+    const TOY_ARCH_BERT: u32 = 1;
+    const TOY_TOK_WORDPIECE: u32 = 0;
+
+    const TOY_VOCAB: &[&str] = &[
+        "[UNK]",
+        "[CLS]",
+        "[SEP]",
+        "[PAD]",
+        "the",
+        "a",
+        "and",
+        "of",
+        "to",
+        "in",
+        "is",
+        "it",
+        "that",
+        "for",
+        "on",
+        "with",
+        "as",
+        "at",
+        "by",
+        "be",
+        "memory",
+        "engine",
+        "rust",
+        "vector",
+        "search",
+        "recall",
+        "sleep",
+        "insight",
+        "graph",
+        "store",
+        "embed",
+        "compress",
+        "happy",
+        "sad",
+        "running",
+        "tests",
+        "coded",
+        "##ing",
+        "##s",
+        "##ed",
+        "##er",
+        "##e",
+        "##d",
+        "##y",
+        "##ment",
+        "##tion",
+        "память",
+        "поиск",
+        ",",
+        ".",
+    ];
+
+    fn toy_dims() -> skinki_encoder::format::EncoderDims {
+        skinki_encoder::format::EncoderDims {
+            layers: 2,
+            hidden: 16,
+            ffn: 32,
+            heads: 2,
+            vocab: 50,
+            max_pos: 16,
+            pooling: skinki_encoder::format::Pooling::Cls,
+            ln_eps: 1e-12,
+        }
+    }
+
+    /// Byte-image of a `SKENC001 v2` WordPiece artifact with explicit query
+    /// / passage prefixes. Deterministic in `seed`.
+    fn build_prefixed_toy_wordpiece(
+        dims: skinki_encoder::format::EncoderDims,
+        seed: u64,
+        query_prefix: &str,
+        passage_prefix: &str,
+    ) -> Vec<u8> {
+        let pooling_tag: u32 = match dims.pooling {
+            skinki_encoder::format::Pooling::Cls => 0,
+            skinki_encoder::format::Pooling::Mean => 1,
+        };
+        let mut out = Vec::new();
+        out.extend_from_slice(TOY_MAGIC);
+        for v in [
+            TOY_FORMAT_VERSION,
+            TOY_ARCH_BERT,
+            dims.layers as u32,
+            dims.hidden as u32,
+            dims.ffn as u32,
+            dims.heads as u32,
+            dims.vocab as u32,
+            dims.max_pos as u32,
+            pooling_tag,
+            TOY_TOK_WORDPIECE,
+        ] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        let qb = query_prefix.as_bytes();
+        let pb = passage_prefix.as_bytes();
+        out.extend_from_slice(&(qb.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(pb.len() as u32).to_le_bytes());
+        out.extend_from_slice(qb);
+        out.extend_from_slice(pb);
+        out.extend_from_slice(&dims.ln_eps.to_le_bytes());
+        for s in TOY_VOCAB {
+            out.extend_from_slice(&(s.len() as u32).to_le_bytes());
+            out.extend_from_slice(s.as_bytes());
+        }
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+        append_toy_tensors(&mut out, dims, seed);
+        out
+    }
+
+    /// Seeded `~N(0, scale)` weights, LayerNorm gamma=1/beta=0 — mirrors
+    /// `skinki_encoder::format::toy::append_toy_tensors` exactly so an
+    /// empty-prefix call reproduces `fixtures/encoder_toy.skenc`
+    /// byte-for-byte (guarded by `toy_dup_matches_committed_fixture`).
+    fn append_toy_tensors(out: &mut Vec<u8>, d: skinki_encoder::format::EncoderDims, seed: u64) {
+        let mut rng = skinki_vector::Rng::new(seed);
+        let mut norm = |out: &mut Vec<u8>, count: usize, scale: f32| {
+            for _ in 0..count {
+                out.extend_from_slice(&(rng.normal() * scale).to_le_bytes());
+            }
+        };
+        let ones = |out: &mut Vec<u8>, count: usize| {
+            for _ in 0..count {
+                out.extend_from_slice(&1.0f32.to_le_bytes());
+            }
+        };
+        let zeros = |out: &mut Vec<u8>, count: usize| {
+            for _ in 0..count {
+                out.extend_from_slice(&0.0f32.to_le_bytes());
+            }
+        };
+        let h = d.hidden;
+        norm(out, d.vocab * h, 0.1); // word_emb
+        norm(out, d.max_pos * h, 0.1); // pos_type_emb
+        ones(out, h); // emb_ln_gamma
+        zeros(out, h); // emb_ln_beta
+        for _ in 0..d.layers {
+            for _ in 0..4 {
+                // wq/bq, wk/bk, wv/bv, wo/bo
+                norm(out, h * h, 0.05);
+                norm(out, h, 0.02);
+            }
+            ones(out, h); // ln1_gamma
+            zeros(out, h); // ln1_beta
+            norm(out, h * d.ffn, 0.05); // w1
+            norm(out, d.ffn, 0.02); // b1
+            norm(out, d.ffn * h, 0.05); // w2
+            norm(out, h, 0.02); // b2
+            ones(out, h); // ln2_gamma
+            zeros(out, h); // ln2_beta
+        }
+    }
+
+    /// The harness-side dup of the toy builder must reproduce the committed
+    /// `fixtures/encoder_toy.skenc` byte-for-byte — this is the regression
+    /// guard against the dup drifting from the canonical builder inside
+    /// `skinki-encoder`. Skips when the fixture isn't present (CI runs it on
+    /// the committed 22 KB toy alone).
+    #[test]
+    fn toy_dup_matches_committed_fixture() {
+        let fixture = toy_artifact();
+        if !fixture.exists() {
+            eprintln!("skipping: {} missing", fixture.display());
+            return;
+        }
+        let dup = build_prefixed_toy_wordpiece(toy_dims(), 0xC0DE, "", "");
+        let on_disk = std::fs::read(&fixture).unwrap();
+        assert_eq!(
+            dup, on_disk,
+            "harness dup of toy builder drifted from committed fixture"
+        );
+    }
+
+    /// Step-0 fix: `run_encoder_embed` must route the queries file through
+    /// `embed_query` (query prefix) and the entries file through `embed`
+    /// (passage prefix). Built on a prefixed toy artifact so query/passage
+    /// outputs are observably different — the property the e5 trend row
+    /// (Step-0 prerequisite) hinges on. Also asserts the query dump is
+    /// thread-count invariant (rule 2), since the threaded query path lives
+    /// in the harness now.
+    #[test]
+    fn run_encoder_embed_routes_queries_through_query_prefix() {
+        let dir = std::env::temp_dir().join(format!(
+            "skinki_t3a_prefix_{}_{}",
+            std::process::id(),
+            std::sync::atomic::AtomicU64::new(0).fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let artifact_path = dir.join("toy_prefixed.skenc");
+        // Mean pooling mirrors `embed_query_uses_query_prefix` in
+        // `skinki-encoder`: CLS pooling on the toy's 2-layer net can pull
+        // the [CLS] hidden state to the same value for two different
+        // sequences (the toy scales are intentionally tiny), so the query/
+        // passage distinction would be invisible. Mean pooling propagates a
+        // different token count straight into the pooled vector.
+        let dims = skinki_encoder::format::EncoderDims {
+            pooling: skinki_encoder::format::Pooling::Mean,
+            ..toy_dims()
+        };
+        let artifact_bytes = build_prefixed_toy_wordpiece(dims, 0x5E5, "memory ", "engine ");
+        std::fs::write(&artifact_path, &artifact_bytes).unwrap();
+
+        let encoder = skinki_encoder::RustEncoder::from_bytes(&artifact_bytes).unwrap();
+        assert_eq!(encoder.query_prefix(), "memory ");
+        assert_eq!(encoder.passage_prefix(), "engine ");
+
+        let entries = ["the memory engine", "rust vector search", "running tests"];
+        let queries = ["which memory", "find the rust engine", "tests"];
+        write_json_array(&dir.join("entries.json"), &entries);
+        write_json_array(&dir.join("queries.json"), &queries);
+
+        // Sanity: with non-empty, mismatched prefixes the query and passage
+        // paths must produce different vectors for the same text —
+        // otherwise the routing distinction is invisible (guard against
+        // future regression to symmetric prefixes).
+        for q in queries {
+            assert_ne!(
+                encoder.embed_query(q),
+                encoder.embed(q),
+                "query/passage prefixes must yield different embeddings for {q:?}"
+            );
+        }
+
+        // End-to-end: the CLI command must produce the same bits the
+        // direct encoder calls do, for each row, on each side of the
+        // query/passage divide.
+        run_encoder_embed(artifact_path.clone(), dir.clone(), None, 4, false).unwrap();
+
+        let dim = encoder.dim();
+        let e_rows = read_embeddings_file(&dir.join("entries.f32"), dim, entries.len()).unwrap();
+        let q_rows = read_embeddings_file(&dir.join("queries.f32"), dim, queries.len()).unwrap();
+
+        for (i, text) in entries.iter().enumerate() {
+            let want = encoder.embed(text);
+            assert_eq!(
+                e_rows[i], want,
+                "entries row {i} ({text:?}) must equal the passage-side embed()"
+            );
+        }
+        for (i, text) in queries.iter().enumerate() {
+            let want = encoder.embed_query(text);
+            assert_eq!(
+                q_rows[i], want,
+                "queries row {i} ({text:?}) must equal the query-side embed_query() \
+                 — the 1D-T2 Step-0 invariant"
+            );
+            // And explicitly must NOT equal the passage-side embed (would be
+            // the bug the Step-0 fix removes).
+            assert_ne!(
+                q_rows[i],
+                encoder.embed(text),
+                "queries row {i} ({text:?}) was passage-embedded — the bug"
+            );
+        }
+
+        // Thread-count invariance for the query branch: re-run with 1
+        // thread, expect byte-identical output (rule 2 extends to the
+        // threaded query path the harness now owns).
+        let dir1 = dir.join("threads1");
+        std::fs::create_dir_all(&dir1).unwrap();
+        write_json_array(&dir1.join("entries.json"), &entries);
+        write_json_array(&dir1.join("queries.json"), &queries);
+        run_encoder_embed(artifact_path, dir1.clone(), None, 1, false).unwrap();
+        let q1 = std::fs::read(dir1.join("queries.f32")).unwrap();
+        let q4 = std::fs::read(dir.join("queries.f32")).unwrap();
+        assert_eq!(q1, q4, "query dump not thread-count invariant");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
