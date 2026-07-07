@@ -2,14 +2,20 @@
 """Stage 1C-B / 1D — T1: convert a BERT-class HF sentence encoder into the
 `SKENC001` v2 weight artifact + dump the parity goldens for the Rust forward.
 
-Two model families are supported (auto-selected from `cfg.model_type`):
+Two model families are supported (selected via `--tokenizer`, or inferred
+from `--unigram-sku` if omitted — NOT from `cfg.model_type`, which does not
+determine the tokenizer family: `multilingual-e5-small` is `model_type='bert'`
+yet uses a SentencePiece Unigram vocab):
 
   * **WordPiece / BERT** (e.g. `BAAI/bge-small-en-v1.5`) — Stage 1C-B. The vocab
     is written inline (`vocab × (u32 len | UTF-8 bytes)`), id = order; `[UNK]`,
     `[CLS]`, `[SEP]` required. The v1 artifact layout the original T1 shipped is
     preserved verbatim under the new v2 header (which adds `tok_kind` and the
-    two prefix strings). bge uses CLS pooling and carries no inline prefixes —
-    its query instruction is an engine convention applied at the serving layer.
+    two prefix strings). bge uses CLS pooling and carries its
+    `"Represent this sentence for searching relevant passages: "` instruction
+    in `query_prefix` (passage side empty) so the engine applies it
+    automatically via `EmbedderSpec::Encoder` — the 1C-B D2 finding that a
+    forgotten query prefix costs ~25% recall, made structural.
   * **Unigram / XLM-R** (e.g. `intfloat/multilingual-e5-small`) — Stage 1D T1.
     The tokenizer section is `<u32 sku_size><SKUNI001 bytes>` — the FULL
     SentencePiece Unigram artifact produced by `scripts/dump_unigram_fixtures.py`
@@ -507,7 +513,12 @@ def main() -> int:
         "--tokenizer",
         choices=["wordpiece", "unigram"],
         default=None,
-        help="auto-detected from model_type if omitted",
+        help="tokenizer family for the artifact. If omitted, inferred from "
+        "the other flags: present --unigram-sku selects 'unigram', else "
+        "'wordpiece'. (NOT auto-detected from model_type: multilingual-e5-small "
+        "is model_type='bert' — a MiniLM student with an XLM-R vocab — yet "
+        "needs the Unigram path; the model_type→tokenizer mapping is not "
+        "reliable, so the caller states it.)",
     )
     ap.add_argument(
         "--unigram-sku",
@@ -531,10 +542,37 @@ def main() -> int:
     )
     assert getattr(cfg, "position_embedding_type", "absolute") == "absolute"
 
-    # Auto-select tokenizer kind from model_type unless overridden.
+    # Select the tokenizer family. Do NOT infer from model_type: the
+    # tokenizer family and the encoder architecture are independent —
+    # multilingual-e5-small is model_type='bert' (a MiniLM student) but uses
+    # a SentencePiece Unigram vocab, while a real XLM-RoBERTa backbone uses
+    # Unigram with model_type='xlm-roberta'. The caller states the family
+    # explicitly (--tokenizer) or via the presence of --unigram-sku.
     if args.tokenizer is None:
-        args.tokenizer = "unigram" if cfg.model_type == "xlm-roberta" else "wordpiece"
+        args.tokenizer = "unigram" if args.unigram_sku else "wordpiece"
     tok_kind = TOK_UNIGRAM if args.tokenizer == "unigram" else TOK_WORDPIECE
+    if tok_kind == TOK_UNIGRAM:
+        assert args.unigram_sku, (
+            "--tokenizer unigram requires --unigram-sku PATH "
+            "(run scripts/dump_unigram_fixtures.py first)"
+        )
+
+    # Real XLM-RoBERTa backbones (model_type='xlm-roberta', e.g. bge-m3) shift
+    # position ids by padding_idx+1 when computing embeddings; the Rust
+    # encoder indexes position rows 0..seq directly. This converter currently
+    # handles only model_type='bert' (no shift) — the two MiniLM/BERT-shape
+    # models we ship (bge-small-en, multilingual-e5-small). A genuine
+    # XLM-RoBERTa teacher needs a separate ticket: reapply the padding_idx+1
+    # shift to emb.position_embeddings before pre-summing token-type-0, then
+    # verify layer parity. The check is loud (goldens would not converge) but
+    # explicit so the failure points here, not at a mystery parity drop.
+    assert cfg.model_type == "bert", (
+        f"model_type={cfg.model_type!r} not supported by this converter: real "
+        "XLM-RoBERTa backbones apply a padding_idx+1 position-id shift that "
+        "is not yet implemented. Only model_type='bert' (bge-small-en, "
+        "multilingual-e5-small) is handled. File a ticket for XLM-R backbone "
+        "support."
+    )
 
     layers = cfg.num_hidden_layers
     hidden = cfg.hidden_size
@@ -553,7 +591,7 @@ def main() -> int:
         piece_to_id, unk_id = {}, 0  # filled by write_wordpiece_section
         sku = None
     else:
-        assert args.unigram_sku, "--tokenizer unigram requires --unigram-sku PATH"
+        # --unigram-sku presence already asserted above.
         sku = unigram_load_sku(Path(args.unigram_sku))
         tokenizer = None
 

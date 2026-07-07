@@ -42,8 +42,9 @@
 //!
 //! **Prefixes (Stage 1D):** `query_prefix` / `passage_prefix` are stored in the
 //! header because they are a model contract, not an engine policy. e5 needs
-//! `"query: "` / `"passage: "`; bge's query instruction is added by the
-//! serving layer (kept empty in the artifact when the engine applies it);
+//! `"query: "` / `"passage: "`; bge carries its
+//! `"Represent this sentence for searching relevant passages: "` instruction
+//! in `query_prefix` and leaves `passage_prefix` empty (documents embed raw);
 //! a future model will carry different strings. The engine never hardcodes a
 //! prefix string — see `RustEncoder::embed` / `embed_query`.
 //!
@@ -730,9 +731,11 @@ pub(crate) mod toy {
 
     /// Build the toy `SKUNI001` byte image — a verbatim mirror of
     /// `skinki-vector::unigram::toy::build_toy_artifact`. Kept in sync by the
-    /// `toy_sku_matches_skinki_vector` test below. Public-encoder tests need a
-    /// Unigram tokenizer inline but cannot reach `skinki-vector`'s `cfg(test)`
-    /// toy module cross-crate.
+    /// `toy_sku_parses_as_standalone_unigram` test below (it re-extracts the
+    /// inlined bytes and parses them through `UnigramTokenizer::from_bytes`,
+    /// catching both parser regressions and copy drift). Public-encoder tests
+    /// need a Unigram tokenizer inline but cannot reach `skinki-vector`'s
+    /// `cfg(test)` toy module cross-crate.
     fn build_toy_sku() -> Vec<u8> {
         // Constants copied from `skinki-vector/src/unigram.rs` (TOY_PIECES,
         // TOY_CHARSMAP). Same hand-authored vocab + charsmap; same flags.
@@ -897,6 +900,45 @@ mod tests {
         assert!(!ids.is_empty());
     }
 
+    /// The toy `SKUNI001` byte image inlined by `build_toy_unigram` must
+    /// actually parse as a standalone `UnigramTokenizer` — this is the
+    /// contract the local `build_toy_sku` mirror (a deliberate copy of
+    /// `skinki-vector::unigram::toy::build_toy_artifact`, kept here because
+    /// cross-crate `cfg(test)` toys aren't reachable) is held to. If the two
+    /// copies drift, this test catches it on the encoder side; if the parser
+    /// regresses, `build_toy_unigram`'s inlined bytes stop loading.
+    #[test]
+    fn toy_sku_parses_as_standalone_unigram() {
+        // Re-extract the inlined SKU bytes from a v2 Unigram toy artifact:
+        // the encoder writes `<u32 sku_size><sku_bytes>` after ln_eps.
+        let dims = EncoderDims {
+            pooling: Pooling::Mean,
+            ..TOY_DIMS
+        };
+        let bytes = build_toy_unigram(dims, 0, "", "");
+        // Locate the SKUNI001 magic inside the v2 artifact.
+        let sku_off = bytes
+            .windows(8)
+            .position(|w| w == b"SKUNI001")
+            .expect("toy unigram artifact inlines a SKUNI001 blob");
+        // The sku_size u32 sits 4 bytes before the magic (the encoder writes
+        // size then bytes; the magic is the first 8 bytes of those bytes).
+        let size_off = sku_off - 4;
+        let size = u32::from_le_bytes([
+            bytes[size_off],
+            bytes[size_off + 1],
+            bytes[size_off + 2],
+            bytes[size_off + 3],
+        ]) as usize;
+        let sku_bytes = &bytes[sku_off..sku_off + size];
+        // Parses standalone via the same loader the .sku file uses.
+        let tok = skinki_vector::unigram::UnigramTokenizer::from_bytes(sku_bytes)
+            .expect("inlined toy SKU must parse as a UnigramTokenizer");
+        assert_eq!(tok.vocab_size(), 8);
+        assert_eq!(tok.bos_hf_id(), 0);
+        assert_eq!(tok.eos_hf_id(), 2);
+    }
+
     #[test]
     fn wordpiece_prefixes_round_trip() {
         let bytes = build_toy_wordpiece(TOY_DIMS, 7, "q:", "p:");
@@ -939,8 +981,12 @@ mod tests {
 
     /// The real converted artifact parses and matches the bge-small shape.
     /// `#[ignore]` — the ~130 MB artifact is not committed; regenerate with
-    /// `scripts/convert_encoder_to_skenc.py --teacher BAAI/bge-small-en-v1.5`
-    /// first.
+    /// `scripts/convert_encoder_to_skenc.py --teacher BAAI/bge-small-en-v1.5
+    /// --query-prefix 'Represent this sentence for searching relevant passages: '`
+    /// (bge's query instruction is baked into the artifact so the
+    /// `EmbedderSpec::Encoder` path applies it automatically — the 1C-B D2
+    /// finding that a forgotten query prefix costs ~25% recall, made
+    /// structural; the engine never hardcodes the string).
     #[test]
     #[ignore = "needs fixtures/encoder_bge_small.skenc — regenerate with scripts/convert_encoder_to_skenc.py"]
     fn real_artifact_loads() {
@@ -958,6 +1004,13 @@ mod tests {
         // The tokenizer must resolve BERT's canonical special ids.
         assert_eq!(e.tok.bos_id(), 101); // [CLS]
         assert_eq!(e.tok.eos_id(), 102); // [SEP]
+                                         // bge's query instruction lives in the artifact (passage side empty —
+                                         // documents embed raw, the documented bge convention).
+        assert_eq!(
+            e.query_prefix,
+            "Represent this sentence for searching relevant passages: "
+        );
+        assert_eq!(e.passage_prefix, "");
     }
 
     /// The real converted multilingual-e5-small artifact parses.
@@ -1043,8 +1096,11 @@ mod tests {
     #[test]
     fn rejects_corrupt_vocab_len_and_dim_overflow() {
         let good = build_toy_artifact(3);
-        // First vocab length prefix is at byte 60 (8 magic + 11*4 header +
-        // 2*4 prefix-len + 0 prefix bytes + 4 eps = 60).
+        // First vocab length prefix is at byte 60 = magic(8) + 10*4 header
+        // fields (version..tok_kind) + 2*4 prefix-len + 0 prefix bytes +
+        // 4 ln_eps. (Header is 10 u32, not 11: version, arch, layers, hidden,
+        // ffn, heads, vocab, max_pos, pooling, tok_kind — the two prefix-len
+        // fields are accounted in the `2*4` term below.)
         let mut bad = good.clone();
         bad[60..64].copy_from_slice(&u32::MAX.to_le_bytes());
         assert!(EncoderArtifact::from_bytes(&bad).is_err());
