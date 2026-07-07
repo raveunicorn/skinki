@@ -537,8 +537,21 @@ def main() -> int:
     torch.set_grad_enabled(False)
     model = AutoModel.from_pretrained(args.teacher).eval().to(torch.float32)
     cfg = model.config
-    assert cfg.model_type in ("bert", "xlm-roberta"), (
-        f"need a BERT- or XLM-R-class teacher, got model_type={cfg.model_type!r}"
+    # Real XLM-RoBERTa backbones (model_type='xlm-roberta', e.g. bge-m3) shift
+    # position ids by padding_idx+1 when computing embeddings; the Rust
+    # encoder indexes position rows 0..seq directly. This converter currently
+    # handles only model_type='bert' (no shift) — the two MiniLM/BERT-shape
+    # models we ship (bge-small-en, multilingual-e5-small). A genuine
+    # XLM-RoBERTa teacher needs a separate ticket: reapply the padding_idx+1
+    # shift to emb.position_embeddings before pre-summing token-type-0, then
+    # verify layer parity. The check is loud (goldens would not converge) but
+    # explicit so the failure points here, not at a mystery parity drop.
+    assert cfg.model_type == "bert", (
+        f"model_type={cfg.model_type!r} not supported by this converter: real "
+        "XLM-RoBERTa backbones apply a padding_idx+1 position-id shift that "
+        "is not yet implemented. Only model_type='bert' (bge-small-en, "
+        "multilingual-e5-small) is handled. File a ticket for XLM-R backbone "
+        "support."
     )
     assert getattr(cfg, "position_embedding_type", "absolute") == "absolute"
 
@@ -556,23 +569,6 @@ def main() -> int:
             "--tokenizer unigram requires --unigram-sku PATH "
             "(run scripts/dump_unigram_fixtures.py first)"
         )
-
-    # Real XLM-RoBERTa backbones (model_type='xlm-roberta', e.g. bge-m3) shift
-    # position ids by padding_idx+1 when computing embeddings; the Rust
-    # encoder indexes position rows 0..seq directly. This converter currently
-    # handles only model_type='bert' (no shift) — the two MiniLM/BERT-shape
-    # models we ship (bge-small-en, multilingual-e5-small). A genuine
-    # XLM-RoBERTa teacher needs a separate ticket: reapply the padding_idx+1
-    # shift to emb.position_embeddings before pre-summing token-type-0, then
-    # verify layer parity. The check is loud (goldens would not converge) but
-    # explicit so the failure points here, not at a mystery parity drop.
-    assert cfg.model_type == "bert", (
-        f"model_type={cfg.model_type!r} not supported by this converter: real "
-        "XLM-RoBERTa backbones apply a padding_idx+1 position-id shift that "
-        "is not yet implemented. Only model_type='bert' (bge-small-en, "
-        "multilingual-e5-small) is handled. File a ticket for XLM-R backbone "
-        "support."
-    )
 
     layers = cfg.num_hidden_layers
     hidden = cfg.hidden_size
