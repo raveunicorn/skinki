@@ -9,3 +9,4 @@ description = "A BM25 lexical baseline retriever — the yardstick every real en
 skinki-corpus.workspace = true
 skinki-eval.workspace = true
 skinki-vector.workspace = true
+skinki-encoder.workspace = true
