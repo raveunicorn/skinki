@@ -15,6 +15,8 @@
 
 use crate::{normalize, Rng, VectorSet};
 use skinki_corpus::Corpus;
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 /// FNV-1a 64-bit hash — small, fast, deterministic across platforms.
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -58,37 +60,68 @@ pub trait Embedder {
 /// A static (non-contextual) embedder: token -> seeded random vector, averaged.
 pub struct StaticHashEmbedder {
     dim: usize,
+    token_cache: RefCell<HashMap<String, Vec<f32>>>,
 }
 
 impl StaticHashEmbedder {
     pub fn new(dim: usize) -> Self {
-        StaticHashEmbedder { dim }
+        StaticHashEmbedder {
+            dim,
+            token_cache: RefCell::new(HashMap::new()),
+        }
     }
 
-    /// Deterministic per-token vector, generated on the fly (no table to store).
-    fn token_vector(&self, token: &str, out: &mut [f32]) {
-        let seed = fnv1a(token.to_lowercase().as_bytes());
+    fn token_key<'a>(&self, token: &'a str) -> std::borrow::Cow<'a, str> {
+        if token.bytes().all(|b| !b.is_ascii_uppercase()) {
+            std::borrow::Cow::Borrowed(token)
+        } else {
+            std::borrow::Cow::Owned(token.to_lowercase())
+        }
+    }
+
+    fn build_token_vector(&self, key: &str) -> Vec<f32> {
+        let seed = fnv1a(key.as_bytes());
         let mut r = Rng::new(seed ^ 0x5125_3a9b_7f01_c3d1);
-        for x in out.iter_mut() {
+        let mut out = vec![0.0f32; self.dim];
+        for x in &mut out {
             *x = r.normal();
         }
-        normalize(out);
+        normalize(&mut out);
+        out
+    }
+
+    /// Add a deterministic per-token vector to `acc`. Cached because
+    /// corpus-scale indexing sees a tiny vocabulary many times; the cache is
+    /// never iterated, so HashMap order cannot affect output determinism.
+    fn add_token_vector(&self, token: &str, acc: &mut [f32]) {
+        let key = self.token_key(token);
+        {
+            let cache = self.token_cache.borrow();
+            if let Some(v) = cache.get(key.as_ref()) {
+                for i in 0..self.dim {
+                    acc[i] += v[i];
+                }
+                return;
+            }
+        }
+
+        let v = self.build_token_vector(key.as_ref());
+        for i in 0..self.dim {
+            acc[i] += v[i];
+        }
+        self.token_cache.borrow_mut().insert(key.into_owned(), v);
     }
 
     pub fn embed(&self, text: &str) -> Vec<f32> {
         let mut acc = vec![0.0f32; self.dim];
-        let mut tmp = vec![0.0f32; self.dim];
         let mut n = 0u32;
         for tok in tokenize(text) {
-            self.token_vector(tok, &mut tmp);
-            for i in 0..self.dim {
-                acc[i] += tmp[i];
-            }
+            self.add_token_vector(tok, &mut acc);
             n += 1;
         }
         if n == 0 {
             // Empty doc: deterministic but distinct fallback.
-            self.token_vector("\u{0}empty", &mut acc);
+            self.add_token_vector("\u{0}empty", &mut acc);
         }
         normalize(&mut acc);
         acc
@@ -200,6 +233,47 @@ mod tests {
         let b = e.embed("the quick brown fox");
         assert_eq!(a, b);
         assert!((dot(&a, &a) - 1.0).abs() < 1e-5);
+    }
+
+    fn uncached_embed_reference(text: &str, dim: usize) -> Vec<f32> {
+        let mut acc = vec![0.0f32; dim];
+        let mut tmp = vec![0.0f32; dim];
+        let mut n = 0u32;
+        for tok in tokenize(text) {
+            let seed = fnv1a(tok.to_lowercase().as_bytes());
+            let mut r = Rng::new(seed ^ 0x5125_3a9b_7f01_c3d1);
+            for x in &mut tmp {
+                *x = r.normal();
+            }
+            normalize(&mut tmp);
+            for i in 0..dim {
+                acc[i] += tmp[i];
+            }
+            n += 1;
+        }
+        if n == 0 {
+            let seed = fnv1a("\u{0}empty".as_bytes());
+            let mut r = Rng::new(seed ^ 0x5125_3a9b_7f01_c3d1);
+            for x in &mut acc {
+                *x = r.normal();
+            }
+            normalize(&mut acc);
+        }
+        normalize(&mut acc);
+        acc
+    }
+
+    #[test]
+    fn cached_hash_embedder_matches_uncached_reference_byte_for_byte() {
+        let e = StaticHashEmbedder::new(64);
+        for text in [
+            "",
+            "the quick brown fox",
+            "The QUICK brown fox; the quick brown fox",
+            "distributed systems latency budgets on call",
+        ] {
+            assert_eq!(e.embed(text), uncached_embed_reference(text, 64));
+        }
     }
 
     #[test]

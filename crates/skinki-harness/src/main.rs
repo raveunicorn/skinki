@@ -266,6 +266,25 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         assert_gate: bool,
     },
+    /// DEV-ONLY: component timings for cold indexing on a deterministic corpus.
+    /// This measures build time only; search output is checked for deterministic
+    /// replay across two fresh indexes of each retriever.
+    ColdIndexBench {
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long, default_value_t = 5)]
+        years: u32,
+        #[arg(long, default_value_t = 6)]
+        entries_per_day: u32,
+        #[arg(long, default_value = "v2")]
+        difficulty: String,
+        #[arg(long, default_value_t = 10)]
+        k: usize,
+        /// Number of planted recall queries to use for deterministic-output
+        /// checks. The index itself is built over the full generated corpus.
+        #[arg(long, default_value_t = 64)]
+        queries: usize,
+    },
     /// Stage 5 — Insight Engine keystone gate. Scores the structural, temporal,
     /// and contradiction detectors against the planted ground truth, beside the
     /// naive co-mention baseline (the Law-2 contrast). `--assert-gate` enforces
@@ -930,6 +949,22 @@ fn main() -> Result<()> {
             });
             run_graph_eval(&corpus, k, assert_gate)?;
         }
+        Cmd::ColdIndexBench {
+            seed,
+            years,
+            entries_per_day,
+            difficulty,
+            k,
+            queries,
+        } => {
+            let corpus = generate(&GenConfig {
+                seed,
+                years,
+                entries_per_day,
+                difficulty: parse_difficulty(&difficulty)?,
+            });
+            run_cold_index_bench(&corpus, k, queries)?;
+        }
         Cmd::InsightEval {
             seed,
             years,
@@ -1373,6 +1408,89 @@ fn person_names_in(text: &str, corpus: &Corpus) -> std::collections::BTreeSet<St
         .map(|e| e.name.to_lowercase())
         .filter(|n| text_lower.contains(n.as_str()))
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// DEV — cold-index-bench: component timings + deterministic replay check
+// ---------------------------------------------------------------------------
+
+fn run_cold_index_bench(corpus: &Corpus, k: usize, query_limit: usize) -> anyhow::Result<()> {
+    let queries: Vec<&str> = corpus
+        .ground_truth
+        .recall
+        .iter()
+        .take(query_limit)
+        .map(|q| q.question.as_str())
+        .collect();
+
+    println!("\n=== skinki — cold-index-bench ===");
+    println!(
+        "corpus: {} entries, {} recall queries checked, k={k}",
+        corpus.entries.len(),
+        queries.len()
+    );
+
+    let bm25 = bench_index_replay("bm25", corpus, &queries, k, Bm25::new)?;
+    let semantic = bench_index_replay("semantic-hash", corpus, &queries, k, || {
+        SemanticRetriever::new(Box::new(StaticHashEmbedder::new(256)), "semantic-hash")
+    })?;
+    let graph = bench_index_replay("graph-comention", corpus, &queries, k, GraphRetriever::new)?;
+    let relation = bench_index_replay(
+        "graph-relation",
+        corpus,
+        &queries,
+        k,
+        RelationRetriever::new,
+    )?;
+
+    println!("\nsummary:");
+    println!("  bm25           {:>10.3}s", bm25.as_secs_f64());
+    println!("  semantic-hash  {:>10.3}s", semantic.as_secs_f64());
+    println!("  graph          {:>10.3}s", graph.as_secs_f64());
+    println!("  relation       {:>10.3}s", relation.as_secs_f64());
+    println!(
+        "  total          {:>10.3}s",
+        (bm25 + semantic + graph + relation).as_secs_f64()
+    );
+    Ok(())
+}
+
+fn bench_index_replay<S, F>(
+    name: &str,
+    corpus: &Corpus,
+    queries: &[&str],
+    k: usize,
+    mut build: F,
+) -> anyhow::Result<Duration>
+where
+    S: RetrievalSystem,
+    F: FnMut() -> S,
+{
+    let mut first = build();
+    let start = Instant::now();
+    first.index(corpus);
+    let elapsed = start.elapsed();
+    let first_hits: Vec<Vec<EntryId>> = queries.iter().map(|q| first.search(q, k)).collect();
+
+    let mut second = build();
+    second.index(corpus);
+    for (i, q) in queries.iter().enumerate() {
+        let second_hits = second.search(q, k);
+        anyhow::ensure!(
+            first_hits[i] == second_hits,
+            "{name} replay mismatch for query {i} ({q:?}): {:?} vs {:?}",
+            first_hits[i],
+            second_hits
+        );
+    }
+
+    let per_entry_us = elapsed.as_secs_f64() * 1_000_000.0 / corpus.entries.len().max(1) as f64;
+    println!(
+        "{name:<15} index {:>8.3}s  {:>8.2} us/entry  replay=OK",
+        elapsed.as_secs_f64(),
+        per_entry_us
+    );
+    Ok(elapsed)
 }
 
 // ---------------------------------------------------------------------------
