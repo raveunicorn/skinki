@@ -127,6 +127,60 @@ pub fn exp64xn<const N: usize>(x: [f64; N]) -> [f64; N] {
     out
 }
 
+/// N-lane f32 exp for the softmax path. Same construction as `exp64xn`
+/// (range-reduce to `x = n·ln2 + r`, Taylor Horner with fused `mul_add`,
+/// 2^n by exponent-bit assembly) but in f32 throughout — this is the
+/// precision the torch teacher's own f32 softmax kernels work at; the f64
+/// version was extra precision the parity bar never required, at twice the
+/// SIMD width cost and double the Horner depth. Degree-7 keeps the
+/// truncation term r⁸/8! < 6e-10 at |r| ≤ ln2/2, below f32 resolution.
+/// Deterministic: fixed straight-line ops, correctly rounded on every
+/// target. Inputs are softmax-shifted (x ≤ 0); x < -87 underflows to 0
+/// (exp(-87) is already denormal-adjacent and contributes nothing to a sum
+/// that is ≥ 1 by construction).
+#[allow(clippy::excessive_precision)] // literals document the exact reals
+pub fn exp32xn<const N: usize>(x: [f32; N]) -> [f32; N] {
+    const LOG2E: f32 = std::f32::consts::LOG2_E;
+    // ln2 split hi/lo: hi is exact in 10 bits so `n·hi` subtracts exactly.
+    const LN2_HI: f32 = 0.693_359_375;
+    const LN2_LO: f32 = -2.121_944_4e-4;
+    let mut out = [0.0f32; N];
+    let mut n = [0.0f32; N];
+    let mut r = [0.0f32; N];
+    for l in 0..N {
+        let xc = x[l].clamp(-87.0, 88.0);
+        n[l] = (xc * LOG2E).round();
+        r[l] = (xc - n[l] * LN2_HI) - n[l] * LN2_LO;
+    }
+    let mut p = [EXP32_C[7]; N];
+    let mut i = 7usize;
+    while i > 0 {
+        i -= 1;
+        for l in 0..N {
+            p[l] = p[l].mul_add(r[l], EXP32_C[i]);
+        }
+    }
+    for l in 0..N {
+        let ni = n[l] as i32;
+        debug_assert!((-126..=127).contains(&ni));
+        let scale = f32::from_bits(((ni + 127) as u32) << 23);
+        out[l] = if x[l] < -87.0 { 0.0 } else { p[l] * scale };
+    }
+    out
+}
+
+/// 1/k! in f32 for the exp32 Horner, k = 0..=7 (CTFE division of literals).
+const EXP32_C: [f32; 8] = [
+    1.0,
+    1.0,
+    1.0 / 2.0,
+    1.0 / 6.0,
+    1.0 / 24.0,
+    1.0 / 120.0,
+    1.0 / 720.0,
+    1.0 / 5040.0,
+];
+
 /// erf(x) via Abramowitz–Stegun 7.1.26 (max abs error 1.5e-7), sign-folded.
 pub fn erf64(x: f64) -> f64 {
     const A1: f64 = 0.254_829_592;
@@ -149,52 +203,60 @@ pub fn gelu(x: f32) -> f32 {
     (xf * 0.5 * (1.0 + erf64(xf / std::f64::consts::SQRT_2))) as f32
 }
 
-/// Four-lane erf: per lane the identical op sequence as `erf64` (the A&S
-/// polynomial is already straight-line; only the inner exp becomes the
-/// four-lane variant). Bit-exact per lane, ~4 independent chains of ILP.
-fn erf64x4(x: [f64; 4]) -> [f64; 4] {
-    const A1: f64 = 0.254_829_592;
-    const A2: f64 = -0.284_496_736;
-    const A3: f64 = 1.421_413_741;
-    const A4: f64 = -1.453_152_027;
-    const A5: f64 = 1.061_405_429;
-    const P: f64 = 0.327_591_1;
-    let mut sign = [0.0f64; 4];
-    let mut ax = [0.0f64; 4];
-    let mut nxx = [0.0f64; 4];
-    for l in 0..4 {
+/// N-lane f32 erf via the same Abramowitz–Stegun 7.1.26 polynomial as
+/// `erf64`, evaluated in f32 with fused `mul_add` and `exp32xn`. The
+/// formula's own error (1.5e-7 abs) dominates the f32 rounding, so the
+/// approximation class is unchanged — this is the precision the torch
+/// teacher's f32 GELU kernel works at. Deterministic straight-line ops.
+#[allow(clippy::excessive_precision)] // literals document the exact reals
+fn erf32xn<const N: usize>(x: [f32; N]) -> [f32; N] {
+    const A1: f32 = 0.254_829_59;
+    const A2: f32 = -0.284_496_74;
+    const A3: f32 = 1.421_413_74;
+    const A4: f32 = -1.453_152_03;
+    const A5: f32 = 1.061_405_43;
+    const P: f32 = 0.327_591_1;
+    let mut sign = [0.0f32; N];
+    let mut ax = [0.0f32; N];
+    let mut nxx = [0.0f32; N];
+    for l in 0..N {
         sign[l] = if x[l] < 0.0 { -1.0 } else { 1.0 };
         ax[l] = x[l].abs();
         nxx[l] = -ax[l] * ax[l];
     }
-    let e = exp64x4(nxx);
-    let mut out = [0.0f64; 4];
-    for l in 0..4 {
-        let t = 1.0 / (1.0 + P * ax[l]);
-        let y = 1.0 - (((((A5 * t + A4) * t) + A3) * t + A2) * t + A1) * t * e[l];
-        out[l] = sign[l] * y;
+    let e = exp32xn::<N>(nxx);
+    let mut out = [0.0f32; N];
+    for l in 0..N {
+        let t = 1.0 / P.mul_add(ax[l], 1.0);
+        let poly = A5
+            .mul_add(t, A4)
+            .mul_add(t, A3)
+            .mul_add(t, A2)
+            .mul_add(t, A1)
+            * t;
+        out[l] = sign[l] * (1.0 - poly * e[l]);
     }
     out
 }
 
-/// In-place GELU over a slice: four-lane interleaved main body (bit-exact
-/// per element vs the scalar `gelu`), scalar tail.
+/// In-place GELU over a slice: 16 interleaved f32 lanes (`erf32xn`), scalar
+/// f32 tail. `x·½·(1 + erf(x/√2))`, the exact BERT `gelu`.
 pub fn gelu_slice(xs: &mut [f32]) {
-    let mut chunks = xs.chunks_exact_mut(4);
-    for ch in &mut chunks {
-        let xf = [ch[0] as f64, ch[1] as f64, ch[2] as f64, ch[3] as f64];
-        let er = erf64x4([
-            xf[0] / std::f64::consts::SQRT_2,
-            xf[1] / std::f64::consts::SQRT_2,
-            xf[2] / std::f64::consts::SQRT_2,
-            xf[3] / std::f64::consts::SQRT_2,
-        ]);
-        for l in 0..4 {
-            ch[l] = (xf[l] * 0.5 * (1.0 + er[l])) as f32;
+    const INV_SQRT2: f32 = 0.707_106_77;
+    let mut wide = xs.chunks_exact_mut(16);
+    for ch in &mut wide {
+        let mut args = [0.0f32; 16];
+        for l in 0..16 {
+            args[l] = ch[l] * INV_SQRT2;
+        }
+        let er = erf32xn::<16>(args);
+        for l in 0..16 {
+            ch[l] = ch[l] * 0.5 * (1.0 + er[l]);
         }
     }
-    for v in chunks.into_remainder() {
-        *v = gelu(*v);
+    for v in wide.into_remainder() {
+        let er = erf32xn::<1>([*v * INV_SQRT2]);
+        *v = *v * 0.5 * (1.0 + er[0]);
     }
 }
 
@@ -222,54 +284,52 @@ pub fn layernorm_row(row: &mut [f32], gamma: &[f32], beta: &[f32], eps: f32) {
     }
 }
 
-/// In-place softmax over `row`: max-subtracted, `exp64`, f64 sum
-/// left-to-right, divide. The all-finite input invariant holds by
-/// construction (scores are dot products of finite activations).
+/// In-place softmax over `row`: max-subtracted, `exp32` (the teacher's own
+/// working precision — see `exp32xn`), f32 sum strictly left-to-right,
+/// divide. The all-finite input invariant holds by construction (scores are
+/// dot products of finite activations).
 pub fn softmax_row(row: &mut [f32]) {
-    let mut max = f32::NEG_INFINITY;
-    for &v in row.iter() {
-        if v > max {
-            max = v;
+    // Lane-wise max then a fixed 16-lane fold: `max` is order-independent
+    // over finite scores (the all-finite invariant below), so this computes
+    // the identical value as a sequential scan — just vectorizably.
+    let mut lane_max = [f32::NEG_INFINITY; 16];
+    let mut wide = row.chunks_exact(16);
+    for ch in &mut wide {
+        for l in 0..16 {
+            lane_max[l] = lane_max[l].max(ch[l]);
         }
     }
-    let mut sum = 0.0f64;
+    for (l, &v) in wide.remainder().iter().enumerate() {
+        lane_max[l] = lane_max[l].max(v);
+    }
+    let mut max = f32::NEG_INFINITY;
+    for &v in lane_max.iter() {
+        max = max.max(v);
+    }
+    let mut sum = 0.0f32;
     // Two passes with a scratch-free design: store exp in place, then scale.
-    // The exp pass runs four interleaved lanes (bit-exact per element; see
-    // `exp64x4`); the sum stays strictly left-to-right in index order.
+    // The exp pass runs 16 interleaved f32 lanes; the sum stays strictly
+    // left-to-right in index order.
     let mut wide = row.chunks_exact_mut(16);
     for ch in &mut wide {
-        let mut xs = [0.0f64; 16];
+        let mut xs = [0.0f32; 16];
         for l in 0..16 {
-            xs[l] = (ch[l] - max) as f64;
+            xs[l] = ch[l] - max;
         }
-        let e = exp64xn::<16>(xs);
+        let e = exp32xn::<16>(xs);
         for l in 0..16 {
-            ch[l] = e[l] as f32;
+            ch[l] = e[l];
             sum += e[l];
         }
     }
-    let rem = wide.into_remainder();
-    let mut chunks = rem.chunks_exact_mut(4);
-    for ch in &mut chunks {
-        let e = exp64x4([
-            (ch[0] - max) as f64,
-            (ch[1] - max) as f64,
-            (ch[2] - max) as f64,
-            (ch[3] - max) as f64,
-        ]);
-        for l in 0..4 {
-            ch[l] = e[l] as f32;
-            sum += e[l];
-        }
-    }
-    for v in chunks.into_remainder() {
-        let e = exp64((*v - max) as f64);
-        *v = e as f32;
-        sum += e;
+    for v in wide.into_remainder() {
+        let e = exp32xn::<1>([*v - max]);
+        *v = e[0];
+        sum += e[0];
     }
     let inv = 1.0 / sum;
     for v in row.iter_mut() {
-        *v = (*v as f64 * inv) as f32;
+        *v *= inv;
     }
 }
 
@@ -360,6 +420,26 @@ mod tests {
         assert!((row[2] - 0.665_241).abs() < 1e-5);
     }
 
+    /// exp32 must stay within a couple of f32 ULPs of the true exp over the
+    /// softmax input range ((-inf, 0] after max subtraction).
+    #[test]
+    fn exp32xn_accuracy_softmax_range() {
+        let mut worst = 0.0f64;
+        let mut x = -87.0f32;
+        while x <= 0.0 {
+            let got = exp32xn::<1>([x])[0] as f64;
+            let want = (x as f64).exp();
+            let rel = ((got - want) / want).abs();
+            if rel > worst {
+                worst = rel;
+            }
+            x += 0.001953125; // 2^-9: exact step, deterministic sweep
+        }
+        assert!(worst < 3e-7, "exp32 worst rel error {worst}");
+        assert_eq!(exp32xn::<1>([0.0])[0], 1.0);
+        assert_eq!(exp32xn::<1>([-100.0])[0], 0.0);
+    }
+
     /// The x4 interleaves exist for ILP only: every lane must reproduce the
     /// scalar bit-for-bit, including the out-of-range select edges.
     #[test]
@@ -390,13 +470,19 @@ mod tests {
     }
 
     #[test]
-    fn gelu_slice_matches_scalar_bit_exact() {
-        // Sweep the activation range plus a non-multiple-of-4 tail.
+    fn gelu_slice_matches_f64_reference() {
+        // The f32 path must stay in the same error class as the f64 scalar
+        // (the A&S formula's 1.5e-7 abs bound dominates both): sweep the
+        // activation range plus a non-multiple-of-16 tail.
         let mut xs: Vec<f32> = (-4000..=4001).map(|i| i as f32 * 0.00390625).collect();
-        let want: Vec<u32> = xs.iter().map(|&v| gelu(v).to_bits()).collect();
+        let want: Vec<f32> = xs.iter().map(|&v| gelu(v)).collect();
         gelu_slice(&mut xs);
         for (i, (g, w)) in xs.iter().zip(want.iter()).enumerate() {
-            assert_eq!(g.to_bits(), *w, "gelu_slice deviates at index {i}");
+            let tol = 4e-7f32.max(3e-7 * w.abs());
+            assert!(
+                (g - w).abs() <= tol,
+                "gelu_slice deviates at index {i}: got {g} want {w}"
+            );
         }
     }
 
