@@ -1452,6 +1452,13 @@ fn run_cold_index_bench(corpus: &Corpus, k: usize, query_limit: usize) -> anyhow
         "  total          {:>10.3}s",
         (bm25 + semantic + graph + relation).as_secs_f64()
     );
+
+    let bundle = bench_shared_bm25_bundle(corpus, &queries, k)?;
+    println!(
+        "\nshared-bm25 bundle total {:>8.3}s  (standalone component sum {:>8.3}s)",
+        bundle.as_secs_f64(),
+        (bm25 + semantic + graph + relation).as_secs_f64()
+    );
     Ok(())
 }
 
@@ -1491,6 +1498,106 @@ where
         per_entry_us
     );
     Ok(elapsed)
+}
+
+fn bench_shared_bm25_bundle(
+    corpus: &Corpus,
+    queries: &[&str],
+    k: usize,
+) -> anyhow::Result<Duration> {
+    let (first, first_elapsed) = build_shared_bm25_bundle(corpus);
+    let first_hits = first.search_all(queries, k);
+
+    let (second, _) = build_shared_bm25_bundle(corpus);
+    let second_hits = second.search_all(queries, k);
+    anyhow::ensure!(
+        first_hits == second_hits,
+        "shared-bm25 bundle replay mismatch: {first_hits:?} vs {second_hits:?}"
+    );
+
+    println!(
+        "\nshared-bm25 bundle replay=OK: bm25={:.3}s semantic={:.3}s graph-only={:.3}s relation-only={:.3}s total={:.3}s",
+        first_elapsed.bm25.as_secs_f64(),
+        first_elapsed.semantic.as_secs_f64(),
+        first_elapsed.graph.as_secs_f64(),
+        first_elapsed.relation.as_secs_f64(),
+        first_elapsed.total().as_secs_f64()
+    );
+    Ok(first_elapsed.total())
+}
+
+struct SharedBm25Bundle {
+    bm25: Bm25,
+    semantic: SemanticRetriever,
+    graph: GraphRetriever,
+    relation: RelationRetriever,
+}
+
+impl SharedBm25Bundle {
+    fn search_all(&self, queries: &[&str], k: usize) -> Vec<Vec<Vec<EntryId>>> {
+        queries
+            .iter()
+            .map(|q| {
+                vec![
+                    self.bm25.search(q, k),
+                    self.semantic.search(q, k),
+                    self.graph.search_with_bm25(q, k, &self.bm25),
+                    self.relation.search_with_bm25(q, k, &self.bm25),
+                ]
+            })
+            .collect()
+    }
+}
+
+struct SharedBm25BundleTiming {
+    bm25: Duration,
+    semantic: Duration,
+    graph: Duration,
+    relation: Duration,
+}
+
+impl SharedBm25BundleTiming {
+    fn total(&self) -> Duration {
+        self.bm25 + self.semantic + self.graph + self.relation
+    }
+}
+
+fn build_shared_bm25_bundle(corpus: &Corpus) -> (SharedBm25Bundle, SharedBm25BundleTiming) {
+    let mut bm25 = Bm25::new();
+    let start = Instant::now();
+    bm25.index(corpus);
+    let bm25_elapsed = start.elapsed();
+
+    let mut semantic =
+        SemanticRetriever::new(Box::new(StaticHashEmbedder::new(256)), "semantic-hash");
+    let start = Instant::now();
+    semantic.index(corpus);
+    let semantic_elapsed = start.elapsed();
+
+    let mut graph = GraphRetriever::new();
+    let start = Instant::now();
+    graph.index_graph_only(corpus);
+    let graph_elapsed = start.elapsed();
+
+    let mut relation = RelationRetriever::new();
+    let start = Instant::now();
+    relation.index_graph_only(corpus);
+    let relation_elapsed = start.elapsed();
+
+    (
+        SharedBm25Bundle {
+            bm25,
+            semantic,
+            graph,
+            relation,
+        },
+        SharedBm25BundleTiming {
+            bm25: bm25_elapsed,
+            semantic: semantic_elapsed,
+            graph: graph_elapsed,
+            relation: relation_elapsed,
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
