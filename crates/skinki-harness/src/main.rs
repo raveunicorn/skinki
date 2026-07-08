@@ -420,6 +420,16 @@ enum Cmd {
         /// measurements unchanged until D1 freezes the static bars.
         #[arg(long, default_value = "hash")]
         embedder: String,
+        /// Stage 1D T6 (pooled mode only): per-instance doc2query artifact
+        /// logs (`<dir>/<safe_id>/doc2query.artifacts.jsonl` from
+        /// `tools/doc2query-longmemeval.py`). Adds ONE column
+        /// `bm25+doc2query`: a BM25 index where each entry's indexed text =
+        /// its own text + "\n" + its generated questions. Entry ids are
+        /// unchanged — retrieval still returns the source entry. The LLM is
+        /// never re-run: the log is the source of truth and the index is
+        /// rebuild-deterministic from it.
+        #[arg(long)]
+        doc2query_artifacts: Option<PathBuf>,
     },
     /// Stage 1C-B T0: kill-switch microbench for the pure-Rust f32 GEMM that
     /// the future BERT forward pass would use. Sustained GFLOP/s at 384-class
@@ -1029,6 +1039,7 @@ fn main() -> Result<()> {
             embeddings_file,
             query_embeddings_file,
             embedder,
+            doc2query_artifacts,
         } => {
             let instances = load_longmemeval(&path, question_type.as_deref(), limit)?;
             if let Some(dir) = dump_texts {
@@ -1045,8 +1056,12 @@ fn main() -> Result<()> {
                     embeddings_file.as_deref(),
                     query_embeddings_file.as_deref(),
                     EmbedderSpec::parse(&embedder).map_err(|e| anyhow::anyhow!(e))?,
+                    doc2query_artifacts.as_deref(),
                 )?;
             } else {
+                if doc2query_artifacts.is_some() {
+                    anyhow::bail!("--doc2query-artifacts is pooled-mode only");
+                }
                 run_longmemeval_eval(&instances, k, graph_artifacts_dir.as_deref())?;
             }
         }
@@ -3732,6 +3747,106 @@ fn build_pooled_corpus(instances: &[LongMemEvalInstance]) -> Option<(Corpus, Que
     ))
 }
 
+/// Load per-entry doc2query questions from per-instance artifact logs into a
+/// map keyed by GLOBAL [`EntryId`]. The log line shape (per-instance) is:
+/// `{"entry_index": i, "questions": ["...", ...], "model": "...", "ts": ...}`.
+/// `entry_index` is per-instance (matches the dump's entries.json order, which
+/// is the same as `to_corpus()`); we offset by the instance's `entry_start` in
+/// `query_to_instance` to reach the global pool id.
+///
+/// Determinism (Stage-1D rule): rebuild is byte-identical from the log alone —
+/// we parse JSONL into a [`BTreeMap`] keyed by entry_index, so a given log
+/// always reproduces the same map regardless of line order; if duplicate
+/// `entry_index` lines exist, the LAST one wins (still deterministic given a
+/// fixed log). Failed parses are silently skipped so a half-written final line
+/// from a crash doesn't poison the whole replay.
+pub(crate) fn load_doc2query_expansions(
+    dir: &std::path::Path,
+    query_to_instance: &QueryInstanceMap,
+    n_entries: usize,
+) -> Result<std::collections::BTreeMap<EntryId, Vec<String>>> {
+    use std::collections::BTreeMap;
+    let mut out: BTreeMap<EntryId, Vec<String>> = BTreeMap::new();
+    let mut seen_any = false;
+    for (safe_id, entry_start, _turn_count) in query_to_instance {
+        let log_path = dir.join(safe_id).join("doc2query.artifacts.jsonl");
+        if !log_path.exists() {
+            continue;
+        }
+        seen_any = true;
+        let mut per_instance: BTreeMap<u32, Vec<String>> = BTreeMap::new();
+        for line in std::fs::read_to_string(&log_path)?.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let v: serde_json::Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let Some(idx) = v.get("entry_index").and_then(|x| x.as_u64()) else {
+                continue;
+            };
+            let qs: Vec<String> = v
+                .get("questions")
+                .and_then(|x| x.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|q| q.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            per_instance.insert(idx as u32, qs);
+        }
+        for (local, qs) in per_instance {
+            let global = *entry_start as EntryId + local as EntryId;
+            if (global as usize) < n_entries {
+                out.insert(global, qs);
+            }
+        }
+    }
+    if !seen_any {
+        anyhow::bail!(
+            "no doc2query artifact logs found under {}/<safe_id>/doc2query.artifacts.jsonl",
+            dir.display()
+        );
+    }
+    Ok(out)
+}
+
+/// Clone `corpus` with each entry's text expanded by appending its generated
+/// questions (one per line). Entries with no log line keep their original text;
+/// ids, ground truth, and meta are preserved. The result feeds `Bm25::index`.
+pub(crate) fn expand_corpus_texts(
+    corpus: &Corpus,
+    expansion: &std::collections::BTreeMap<EntryId, Vec<String>>,
+) -> Corpus {
+    let mut expanded: Vec<Entry> = Vec::with_capacity(corpus.entries.len());
+    for e in &corpus.entries {
+        let mut text = e.text.clone();
+        if let Some(qs) = expansion.get(&e.id) {
+            if !qs.is_empty() {
+                text.push('\n');
+                text.push_str(&qs.join("\n"));
+            }
+        }
+        expanded.push(Entry {
+            id: e.id,
+            day: e.day,
+            date: e.date.clone(),
+            kind: e.kind,
+            text,
+        });
+    }
+    Corpus {
+        meta: corpus.meta.clone(),
+        entries: expanded,
+        ground_truth: corpus.ground_truth.clone(),
+    }
+}
+
 fn run_longmemeval_pooled_eval(
     instances: &[LongMemEvalInstance],
     k: usize,
@@ -3739,6 +3854,7 @@ fn run_longmemeval_pooled_eval(
     embeddings_file: Option<&std::path::Path>,
     query_embeddings_file: Option<&std::path::Path>,
     embedder: EmbedderSpec,
+    doc2query_artifacts: Option<&std::path::Path>,
 ) -> Result<()> {
     let Some((corpus, query_to_instance)) = build_pooled_corpus(instances) else {
         println!("\nNo scoreable instances (all had empty evidence).");
@@ -3759,6 +3875,37 @@ fn run_longmemeval_pooled_eval(
     let mut bm25 = Bm25::new();
     bm25.index(&corpus);
     cols.push(("bm25".into(), locomo_score(&bm25, &corpus, k)));
+
+    // Stage 1D T6: doc2query expansion. Same BM25, but each entry's indexed
+    // text is `entry text + "\n" + its generated questions` (from per-instance
+    // artifact logs). Entry ids are unchanged — retrieval still returns the
+    // source entry, the questions only add searchable terms at zero query-time
+    // cost. No LLM in the loop here: the log is replayed.
+    if let Some(dir) = doc2query_artifacts {
+        let expansion = load_doc2query_expansions(dir, &query_to_instance, corpus.entries.len())?;
+        let mut covered = 0usize;
+        let mut total_qs = 0usize;
+        for q in expansion.values() {
+            if !q.is_empty() {
+                covered += 1;
+                total_qs += q.len();
+            }
+        }
+        let expanded_corpus = expand_corpus_texts(&corpus, &expansion);
+        let mut bm25_d2q = Bm25::new();
+        bm25_d2q.index(&expanded_corpus);
+        // Score against `corpus` (NOT expanded_corpus) so `answer_in_entries`
+        // checks the SOURCE entry's text — apples-to-apples vs the `bm25`
+        // column. The BM25 index was built over the expanded text; the
+        // `corpus` param here only feeds `entry_text` for the answer check.
+        cols.push(("bm25+doc2query".into(), locomo_score(&bm25_d2q, &corpus, k)));
+        println!(
+            "doc2query: {covered}/{} entries covered, {total_qs} questions total ({:.2} q/covered entry) from {}",
+            corpus.entries.len(),
+            if covered == 0 { 0.0 } else { total_qs as f64 / covered as f64 },
+            dir.display(),
+        );
+    }
 
     // Semantic-static (hash-of-tokens, or the SKEMB001 artifact if --embedder
     // static:<path> was passed). Hash stays the default so existing pooled
@@ -4558,6 +4705,227 @@ mod longmemeval_eval_tests {
         let dir = tmp_dir("graph_empty");
         let instances = vec![tiny_instance("s1", "single-session-user")];
         run_longmemeval_eval(&instances, 5, Some(&dir)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod doc2query_tests {
+    use super::*;
+    use skinki_corpus::{
+        Corpus, CorpusMeta, Difficulty, Entry, EntryKind, GroundTruth, RecallQuery,
+    };
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NONCE: AtomicU64 = AtomicU64::new(0);
+
+    fn nonce_dir(label: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "skinki_doc2query_{}_{}_{}",
+            label,
+            std::process::id(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// Build a tiny pooled corpus + instance map (2 instances × 2 turns each =
+    /// 4 global entries) by hand, mirroring build_pooled_corpus's layout.
+    fn tiny_pooled() -> (Corpus, QueryInstanceMap) {
+        let entries = vec![
+            Entry {
+                id: 0,
+                day: 0,
+                date: String::new(),
+                kind: EntryKind::Text,
+                text: "user: I bought a red bike.".to_string(),
+            },
+            Entry {
+                id: 1,
+                day: 0,
+                date: String::new(),
+                kind: EntryKind::Text,
+                text: "assistant: Nice!".to_string(),
+            },
+            Entry {
+                id: 2,
+                day: 1,
+                date: String::new(),
+                kind: EntryKind::Text,
+                text: "user: The bike is a Trek.".to_string(),
+            },
+            Entry {
+                id: 3,
+                day: 1,
+                date: String::new(),
+                kind: EntryKind::Text,
+                text: "assistant: Cool.".to_string(),
+            },
+        ];
+        let corpus = Corpus {
+            meta: CorpusMeta {
+                seed: 0,
+                years: 0,
+                num_entries: entries.len(),
+                difficulty: Difficulty::V2,
+            },
+            entries,
+            ground_truth: GroundTruth {
+                recall: vec![RecallQuery {
+                    id: 0,
+                    question: "What brand is the user's bike?".to_string(),
+                    answer: "Trek".to_string(),
+                    relevant_entries: vec![2],
+                }],
+                ..Default::default()
+            },
+        };
+        let qmap: QueryInstanceMap = vec![
+            ("two_hop_1".to_string(), 0usize, 2usize),
+            ("two_hop_2".to_string(), 2usize, 2usize),
+        ];
+        (corpus, qmap)
+    }
+
+    /// Write a fixture doc2query JSONL log for one instance. The `lines`
+    /// slice is `(entry_index, questions_json)` — caller-controlled order so
+    /// callers can prove replay is order-independent.
+    fn write_log(dir: &std::path::Path, safe_id: &str, lines: &[(&str, &str)]) {
+        let inst_dir = dir.join(safe_id);
+        std::fs::create_dir_all(&inst_dir).unwrap();
+        let path = inst_dir.join("doc2query.artifacts.jsonl");
+        let mut out = String::new();
+        for (idx, qs_json) in lines {
+            out.push_str(&format!(
+                r#"{{"entry_index": {idx}, "questions": {qs_json}, "model": "toy", "ts": "x", "v": 1}}
+"#
+            ));
+        }
+        std::fs::write(&path, out).unwrap();
+    }
+
+    /// A log with a non-trivial question for entry 0 of instance "two_hop_2"
+    /// (which is GLOBAL entry 2 — the relevant entry). Entry 1 of that instance
+    /// has no log line, so it stays at its original text in the expanded corpus.
+    #[test]
+    fn load_expansions_maps_local_index_to_global_id() {
+        let dir = nonce_dir("load_global_map");
+        // Reverse order to prove replay is line-order-independent.
+        write_log(
+            &dir,
+            "two_hop_2",
+            &[
+                ("1", r#"[]"#),
+                (
+                    "0",
+                    r#"["What brand is the user's bike?", "Did the user buy a bike?"]"#,
+                ),
+            ],
+        );
+        let (_corpus, qmap) = tiny_pooled();
+        let out = load_doc2query_expansions(&dir, &qmap, 4).unwrap();
+        // two_hop_2's entry 0 is global id 2.
+        assert_eq!(out.get(&2).unwrap().len(), 2);
+        assert_eq!(out.get(&2).unwrap()[0], "What brand is the user's bike?");
+        // entry 1 (global 3) has an empty questions array -> present but empty.
+        assert!(out.get(&3).unwrap().is_empty());
+        // No log for instance two_hop_1 -> its entries (0,1) are absent.
+        assert!(!out.contains_key(&0));
+        assert!(!out.contains_key(&1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No per-instance logs at all -> bail loudly (a silent empty column would
+    /// mislabel the bench as "doc2query lifted nothing" when really the path
+    /// was wrong).
+    #[test]
+    fn load_expansions_errors_when_no_logs() {
+        let dir = nonce_dir("empty");
+        let (_corpus, qmap) = tiny_pooled();
+        assert!(load_doc2query_expansions(&dir, &qmap, 4).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A half-written / corrupt final line is skipped, not fatal — the log is
+    /// append-only and the LAST line may be torn from a crash mid-write.
+    #[test]
+    fn load_expansions_skips_corrupt_lines() {
+        let dir = nonce_dir("torn");
+        let inst_dir = dir.join("two_hop_1");
+        std::fs::create_dir_all(&inst_dir).unwrap();
+        std::fs::write(
+            inst_dir.join("doc2query.artifacts.jsonl"),
+            concat!(
+                r#"{"entry_index": 0, "questions": ["q1"], "model": "toy", "ts": "x", "v": 1}"#,
+                "\n",
+                "THIS LINE IS GARBAGE\n",
+                r#"{"broken": "#, // truncated JSON
+            ),
+        )
+        .unwrap();
+        let (_corpus, qmap) = tiny_pooled();
+        let out = load_doc2query_expansions(&dir, &qmap, 4).unwrap();
+        assert_eq!(out.get(&0).unwrap(), &vec!["q1".to_string()]);
+        assert!(!out.contains_key(&1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Expanded-text build: only entries WITH a non-empty questions list get
+    /// "\n" + the joined questions appended; entries with no log or empty list
+    /// keep their original text byte-for-byte. ids and ground truth are
+    /// preserved verbatim — the relevant_entries ids still resolve.
+    #[test]
+    fn expand_corpus_appends_questions_and_preserves_ids() {
+        let (corpus, _qmap) = tiny_pooled();
+        let mut exp: BTreeMap<EntryId, Vec<String>> = BTreeMap::new();
+        exp.insert(0, vec!["Did the user buy a bike?".to_string()]);
+        exp.insert(1, Vec::new()); // present-but-empty -> original text intact.
+                                   // entry 2: no map entry -> original text intact.
+        let expanded = expand_corpus_texts(&corpus, &exp);
+
+        assert_eq!(
+            expanded.entries[0].text,
+            "user: I bought a red bike.\nDid the user buy a bike?"
+        );
+        assert_eq!(expanded.entries[1].text, "assistant: Nice!");
+        assert_eq!(expanded.entries[2].text, "user: The bike is a Trek.");
+        assert_eq!(
+            expanded.entries.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        assert_eq!(expanded.ground_truth.recall[0].relevant_entries, vec![2]);
+    }
+
+    /// End-to-end wiring: BM25 built over the expanded corpus surfaces the
+    /// relevant entry on a query that overlaps the generated question rather
+    /// than the original entry text — the property the spike hinges on (ids
+    /// stay valid, expansion adds searchable terms).
+    #[test]
+    fn doc2query_column_lifts_recall_on_self_asked_question() {
+        let (corpus, qmap) = tiny_pooled();
+        let dir = nonce_dir("e2e");
+        // The relevant entry (global 2 = instance two_hop_2 entry 0) carries
+        // a question that overlaps a query word the original text lacks.
+        write_log(
+            &dir,
+            "two_hop_2",
+            &[("0", r#"["Which brand is the bicycle?"]"#)],
+        );
+
+        let exp = load_doc2query_expansions(&dir, &qmap, 4).unwrap();
+        let expanded = expand_corpus_texts(&corpus, &exp);
+
+        let mut bm25_d2q = Bm25::new();
+        bm25_d2q.index(&expanded);
+
+        let q = "which brand is the bicycle";
+        let d2q_hits = bm25_d2q.search(q, 4);
+        assert!(
+            d2q_hits.contains(&2),
+            "expanded BM25 must surface relevant entry 2; got {d2q_hits:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
