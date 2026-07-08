@@ -284,6 +284,15 @@ enum Cmd {
         /// checks. The index itself is built over the full generated corpus.
         #[arg(long, default_value_t = 64)]
         queries: usize,
+        /// Measure only the production-like shared-BM25 bundle build. This
+        /// avoids the standalone per-component double builds used for small
+        /// profiling runs, so multi-million-entry checks stay tractable.
+        #[arg(long, default_value_t = false)]
+        bundle_only: bool,
+        /// Skip the second build used to prove replay determinism. Useful for
+        /// very large timing-only runs after smaller replay-checked runs pass.
+        #[arg(long, default_value_t = false)]
+        no_replay: bool,
     },
     /// Stage 5 — Insight Engine keystone gate. Scores the structural, temporal,
     /// and contradiction detectors against the planted ground truth, beside the
@@ -950,6 +959,8 @@ fn main() -> Result<()> {
             difficulty,
             k,
             queries,
+            bundle_only,
+            no_replay,
         } => {
             let corpus = generate(&GenConfig {
                 seed,
@@ -957,7 +968,7 @@ fn main() -> Result<()> {
                 entries_per_day,
                 difficulty: parse_difficulty(&difficulty)?,
             });
-            run_cold_index_bench(&corpus, k, queries)?;
+            run_cold_index_bench(&corpus, k, queries, bundle_only, !no_replay)?;
         }
         Cmd::InsightEval {
             seed,
@@ -1340,7 +1351,13 @@ fn person_names_in(text: &str, corpus: &Corpus) -> std::collections::BTreeSet<St
 // DEV — cold-index-bench: component timings + deterministic replay check
 // ---------------------------------------------------------------------------
 
-fn run_cold_index_bench(corpus: &Corpus, k: usize, query_limit: usize) -> anyhow::Result<()> {
+fn run_cold_index_bench(
+    corpus: &Corpus,
+    k: usize,
+    query_limit: usize,
+    bundle_only: bool,
+    replay: bool,
+) -> anyhow::Result<()> {
     let queries: Vec<&str> = corpus
         .ground_truth
         .recall
@@ -1355,6 +1372,12 @@ fn run_cold_index_bench(corpus: &Corpus, k: usize, query_limit: usize) -> anyhow
         corpus.entries.len(),
         queries.len()
     );
+
+    if bundle_only {
+        let bundle = bench_shared_bm25_bundle(corpus, &queries, k, replay)?;
+        println!("\nshared-bm25 bundle total {:>8.3}s", bundle.as_secs_f64());
+        return Ok(());
+    }
 
     let bm25 = bench_index_replay("bm25", corpus, &queries, k, Bm25::new)?;
     let semantic = bench_index_replay("semantic-hash", corpus, &queries, k, || {
@@ -1379,7 +1402,7 @@ fn run_cold_index_bench(corpus: &Corpus, k: usize, query_limit: usize) -> anyhow
         (bm25 + semantic + graph + relation).as_secs_f64()
     );
 
-    let bundle = bench_shared_bm25_bundle(corpus, &queries, k)?;
+    let bundle = bench_shared_bm25_bundle(corpus, &queries, k, replay)?;
     println!(
         "\nshared-bm25 bundle total {:>8.3}s  (standalone component sum {:>8.3}s)",
         bundle.as_secs_f64(),
@@ -1430,19 +1453,22 @@ fn bench_shared_bm25_bundle(
     corpus: &Corpus,
     queries: &[&str],
     k: usize,
+    replay: bool,
 ) -> anyhow::Result<Duration> {
     let (first, first_elapsed) = build_shared_bm25_bundle(corpus);
-    let first_hits = first.search_all(queries, k);
-
-    let (second, _) = build_shared_bm25_bundle(corpus);
-    let second_hits = second.search_all(queries, k);
-    anyhow::ensure!(
-        first_hits == second_hits,
-        "shared-bm25 bundle replay mismatch: {first_hits:?} vs {second_hits:?}"
-    );
+    if replay {
+        let first_hits = first.search_all(queries, k);
+        let (second, _) = build_shared_bm25_bundle(corpus);
+        let second_hits = second.search_all(queries, k);
+        anyhow::ensure!(
+            first_hits == second_hits,
+            "shared-bm25 bundle replay mismatch: {first_hits:?} vs {second_hits:?}"
+        );
+    }
 
     println!(
-        "\nshared-bm25 bundle replay=OK: bm25={:.3}s semantic={:.3}s graph-only={:.3}s relation-only={:.3}s total={:.3}s",
+        "\nshared-bm25 bundle replay={}: bm25={:.3}s semantic={:.3}s graph-only={:.3}s relation-only={:.3}s total={:.3}s",
+        if replay { "OK" } else { "SKIP" },
         first_elapsed.bm25.as_secs_f64(),
         first_elapsed.semantic.as_secs_f64(),
         first_elapsed.graph.as_secs_f64(),
