@@ -21,7 +21,7 @@ use skinki_vector::embed::Embedder;
 
 use crate::format::{EncoderArtifact, Pooling};
 use crate::gemm::gemm;
-use crate::math::{gelu, layernorm_row, softmax_row};
+use crate::math::{gelu_slice, layernorm_row, softmax_row};
 
 /// A ready-to-run pure-Rust sentence encoder.
 #[derive(Debug)]
@@ -111,19 +111,31 @@ impl RustEncoder {
         if threads <= 1 || texts.len() <= 1 {
             return texts.iter().map(|t| self.embed(t)).collect();
         }
-        let bands = threads.min(texts.len());
-        let chunk = texts.len().div_ceil(bands);
-        let mut out: Vec<Vec<Vec<f32>>> = Vec::with_capacity(bands);
+        // Dynamic scheduling: workers pull the next text off a shared atomic
+        // counter instead of owning a fixed contiguous band. Text lengths vary
+        // wildly (seq² attention), so static bands leave threads idle at the
+        // join. Each text's embedding is a pure function of that text alone —
+        // output slot `i` is the same no matter which worker computes it or
+        // in what order, so determinism is untouched by the scheduling.
+        let workers = threads.min(texts.len());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let slots: Vec<std::sync::OnceLock<Vec<f32>>> = (0..texts.len())
+            .map(|_| std::sync::OnceLock::new())
+            .collect();
         thread::scope(|s| {
-            let mut handles = Vec::with_capacity(bands);
-            for band in texts.chunks(chunk) {
-                handles.push(s.spawn(move || band.iter().map(|t| self.embed(t)).collect()));
-            }
-            for h in handles {
-                out.push(h.join().expect("encoder worker panicked"));
+            for _ in 0..workers {
+                s.spawn(|| loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(text) = texts.get(i) else { break };
+                    let v = self.embed(text);
+                    slots[i].set(v).expect("slot set twice");
+                });
             }
         });
-        out.into_iter().flatten().collect()
+        slots
+            .into_iter()
+            .map(|s| s.into_inner().expect("worker filled every slot"))
+            .collect()
     }
 
     /// Full forward for a framed id sequence, pooled + normalized.
@@ -225,7 +237,32 @@ impl RustEncoder {
                 let off = head * hd;
                 for i in 0..seq {
                     let qi = &q[i * h + off..i * h + off + hd];
-                    for (j, sc) in scores[..seq].iter_mut().enumerate() {
+                    // Four independent q·k_j accumulator chains per pass:
+                    // each dot still sums its own hd elements strictly
+                    // left-to-right (bit-identical per (i, j)); interleaving
+                    // *different* j chains only buys ILP — a single f32 dot
+                    // is a latency-bound dependency chain the compiler may
+                    // not reorder.
+                    let mut j = 0;
+                    while j + 4 <= seq {
+                        let k0 = &k[j * h + off..j * h + off + hd];
+                        let k1 = &k[(j + 1) * h + off..(j + 1) * h + off + hd];
+                        let k2 = &k[(j + 2) * h + off..(j + 2) * h + off + hd];
+                        let k3 = &k[(j + 3) * h + off..(j + 3) * h + off + hd];
+                        let (mut d0, mut d1, mut d2, mut d3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+                        for (t, &qv) in qi.iter().enumerate() {
+                            d0 += qv * k0[t];
+                            d1 += qv * k1[t];
+                            d2 += qv * k2[t];
+                            d3 += qv * k3[t];
+                        }
+                        scores[j] = d0 * scale;
+                        scores[j + 1] = d1 * scale;
+                        scores[j + 2] = d2 * scale;
+                        scores[j + 3] = d3 * scale;
+                        j += 4;
+                    }
+                    for (j, sc) in scores[..seq].iter_mut().enumerate().skip(j) {
                         let kj = &k[j * h + off..j * h + off + hd];
                         let mut dot = 0.0f32;
                         for (a, b) in qi.iter().zip(kj.iter()) {
@@ -235,11 +272,22 @@ impl RustEncoder {
                     }
                     softmax_row(&mut scores[..seq]);
                     let ci = &mut ctx[i * h + off..i * h + off + hd];
-                    ci.fill(0.0);
-                    for (j, &p) in scores[..seq].iter().enumerate() {
-                        let vj = &v[j * h + off..j * h + off + hd];
-                        for (c, &vv) in ci.iter_mut().zip(vj.iter()) {
-                            *c += p * vv;
+                    // Weighted sum over V: per output lane the additions run
+                    // in ascending j, exactly like the naive loop — the
+                    // monomorphized paths only keep the accumulator row in
+                    // registers instead of round-tripping ctx through cache
+                    // once per j.
+                    match hd {
+                        32 => attn_weighted_sum::<32>(&scores[..seq], &v, h, off, ci),
+                        64 => attn_weighted_sum::<64>(&scores[..seq], &v, h, off, ci),
+                        _ => {
+                            ci.fill(0.0);
+                            for (j, &p) in scores[..seq].iter().enumerate() {
+                                let vj = &v[j * h + off..j * h + off + hd];
+                                for (c, &vv) in ci.iter_mut().zip(vj.iter()) {
+                                    *c += p * vv;
+                                }
+                            }
                         }
                     }
                 }
@@ -258,9 +306,7 @@ impl RustEncoder {
             // FFN: h1 = gelu(x·W1 + b1); h2 = h1·W2 + b2; residual + LN2.
             fill_bias(&mut h1, lw.b1, seq);
             gemm(seq, d.ffn, h, &x, lw.w1, &mut h1, 1).expect("gemm ffn1");
-            for e in h1.iter_mut() {
-                *e = gelu(*e);
-            }
+            gelu_slice(&mut h1);
             fill_bias(&mut h2, lw.b2, seq);
             gemm(seq, h, d.ffn, &h1, lw.w2, &mut h2, 1).expect("gemm ffn2");
             for (xi, hi) in x.iter_mut().zip(h2.iter()) {
@@ -280,6 +326,29 @@ impl RustEncoder {
     fn hidden_states(&self, ids: &[u32]) -> Vec<f32> {
         self.forward_states(ids, None)
     }
+}
+
+/// `out[l] = Σ_j scores[j] · v[j*h + off + l]` for `l < HD`, additions in
+/// ascending `j` per lane — bit-identical to the naive `ci[l] +=` loop (an
+/// f32 register accumulator vs a store/reload round-trip is exact). The
+/// const HD lets the accumulator row live entirely in vector registers.
+fn attn_weighted_sum<const HD: usize>(
+    scores: &[f32],
+    v: &[f32],
+    h: usize,
+    off: usize,
+    out: &mut [f32],
+) {
+    let mut acc = [0.0f32; HD];
+    for (j, &p) in scores.iter().enumerate() {
+        let vj: &[f32; HD] = v[j * h + off..j * h + off + HD]
+            .try_into()
+            .expect("HD-sized V slice");
+        for l in 0..HD {
+            acc[l] += p * vj[l];
+        }
+    }
+    out.copy_from_slice(&acc);
 }
 
 /// Fill `c` (`seq` rows) with the broadcast `bias` row — the pre-gemm bias

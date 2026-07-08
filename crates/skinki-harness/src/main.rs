@@ -570,9 +570,15 @@ fn main() -> Result<()> {
                 entries_per_day,
                 difficulty: parse_difficulty(&difficulty)?,
             });
-            let file = std::fs::File::create(&out)
-                .with_context(|| format!("creating {}", out.display()))?;
-            serde_json::to_writer(file, &corpus).context("writing corpus")?;
+            // Buffered: serde_json emits many tiny writes; a raw File turns
+            // a ~1 s serialization into ~15 s of syscalls at 200k entries.
+            let mut file = std::io::BufWriter::with_capacity(
+                1 << 20,
+                std::fs::File::create(&out)
+                    .with_context(|| format!("creating {}", out.display()))?,
+            );
+            serde_json::to_writer(&mut file, &corpus).context("writing corpus")?;
+            std::io::Write::flush(&mut file).context("flushing corpus")?;
             println!(
                 "Generated corpus: {} entries over {} years (seed {}) -> {}",
                 corpus.entries.len(),
@@ -1233,51 +1239,72 @@ fn dump_embeddings(
     out_path: &std::path::Path,
     as_queries: bool,
 ) -> Result<usize> {
-    let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-    // Threaded query path mirrors `RustEncoder::embed_batch`'s partitioning:
-    // sequences are split into bands, never the per-row arithmetic, so the
-    // dump stays byte-identical for any thread count (rule 2). The encoder
-    // exposes no batched query-side entry point (it lives inside the
-    // quarantined crate we don't touch here), so the band loop is inlined.
-    let vecs: Vec<Vec<f32>> = if as_queries {
-        if threads <= 1 || refs.len() <= 1 {
-            refs.iter().map(|t| encoder.embed_query(t)).collect()
+    // Encode in blocks so a multi-hour run reports progress/ETA (stderr =
+    // telemetry only) and streams to disk instead of holding every vector.
+    // Block boundaries don't touch the numbers: each text embeds alone.
+    const BLOCK: usize = 512;
+    let start = std::time::Instant::now();
+    let file = std::fs::File::create(out_path)
+        .with_context(|| format!("creating {}", out_path.display()))?;
+    let mut w = std::io::BufWriter::with_capacity(1 << 20, file);
+    let mut done = 0usize;
+    for block in texts.chunks(BLOCK) {
+        let refs: Vec<&str> = block.iter().map(|s| s.as_str()).collect();
+        // `as_queries` selects the model-contract prefix path: `false` routes
+        // through `embed_batch` (passage prefix / index-time); `true` routes
+        // per row through `embed_query` (query prefix / search-time). Both
+        // paths are thread-count invariant (bands partition sequences, not
+        // arithmetic), so the dump stays byte-identical for any thread count.
+        let vecs: Vec<Vec<f32>> = if as_queries {
+            if threads <= 1 || refs.len() <= 1 {
+                refs.iter().map(|t| encoder.embed_query(t)).collect()
+            } else {
+                let bands = threads.min(refs.len());
+                let chunk = refs.len().div_ceil(bands);
+                let mut out: Vec<Vec<Vec<f32>>> = Vec::with_capacity(bands);
+                std::thread::scope(|s| {
+                    let mut handles = Vec::with_capacity(bands);
+                    for band in refs.chunks(chunk) {
+                        handles.push(s.spawn(move || {
+                            band.iter()
+                                .map(|t| encoder.embed_query(t))
+                                .collect::<Vec<_>>()
+                        }));
+                    }
+                    for h in handles {
+                        out.push(h.join().expect("encoder query worker panicked"));
+                    }
+                });
+                out.into_iter().flatten().collect()
+            }
         } else {
-            let bands = threads.min(refs.len());
-            let chunk = refs.len().div_ceil(bands);
-            let mut out: Vec<Vec<Vec<f32>>> = Vec::with_capacity(bands);
-            std::thread::scope(|s| {
-                let mut handles = Vec::with_capacity(bands);
-                for band in refs.chunks(chunk) {
-                    handles.push(s.spawn(move || {
-                        band.iter()
-                            .map(|t| encoder.embed_query(t))
-                            .collect::<Vec<_>>()
-                    }));
-                }
-                for h in handles {
-                    out.push(h.join().expect("encoder query worker panicked"));
-                }
-            });
-            out.into_iter().flatten().collect()
+            encoder.embed_batch(&refs, threads)
+        };
+        // Defensive: every row must have the encoder's dim.
+        anyhow::ensure!(
+            vecs.iter().all(|v| v.len() == dim),
+            "encoder produced a row with dim != {dim}"
+        );
+        for v in &vecs {
+            for &f in v {
+                std::io::Write::write_all(&mut w, &f.to_le_bytes())?;
+            }
         }
-    } else {
-        encoder.embed_batch(&refs, threads)
-    };
-    // Defensive: every row must have the encoder's dim.
-    anyhow::ensure!(
-        vecs.iter().all(|v| v.len() == dim),
-        "encoder produced a row with dim != {dim}"
-    );
-
-    let mut buf: Vec<u8> = Vec::with_capacity(vecs.len() * dim * std::mem::size_of::<f32>());
-    for v in &vecs {
-        for &f in v {
-            buf.extend_from_slice(&f.to_le_bytes());
+        done += block.len();
+        if done < texts.len() {
+            let elapsed = start.elapsed().as_secs_f64();
+            let rate = done as f64 / elapsed.max(1e-9);
+            let eta = (texts.len() - done) as f64 / rate.max(1e-9);
+            eprintln!(
+                "  … {done}/{} ({rate:.1} texts/s, ETA {:.0}m{:02.0}s)",
+                texts.len(),
+                (eta / 60.0).floor(),
+                eta % 60.0
+            );
         }
     }
-    std::fs::write(out_path, &buf).with_context(|| format!("writing {}", out_path.display()))?;
-    Ok(vecs.len())
+    std::io::Write::flush(&mut w).with_context(|| format!("writing {}", out_path.display()))?;
+    Ok(done)
 }
 
 /// Parse `--sample`: "all" or a 0-based integer index.

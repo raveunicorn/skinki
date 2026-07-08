@@ -47,6 +47,53 @@ pub fn exp64(x: f64) -> f64 {
     p * scale
 }
 
+/// Four-lane `exp64`: per lane the *identical* straight-line operation
+/// sequence as the scalar (asserted bit-exact by tests), but four
+/// independent dependency chains in flight — the scalar Horner is
+/// latency-bound (a divide + multiply + add chain per term), so interleaving
+/// lanes is a pure ILP win with zero numeric change.
+///
+/// The scalar's early returns become end-of-function selects: the main path
+/// runs on a clamped copy (`clamp` is exact for in-range inputs, so in-range
+/// lanes see bit-identical `r`), and out-of-range lanes are overwritten
+/// with the scalar's 0.0 / ∞ answers.
+pub fn exp64x4(x: [f64; 4]) -> [f64; 4] {
+    const LOG2E: f64 = std::f64::consts::LOG2_E;
+    const LN2_HI: f64 = 6.931_471_803_691_238e-1;
+    const LN2_LO: f64 = 1.908_214_929_270_587_7e-10;
+    let mut out = [0.0f64; 4];
+    let mut n = [0.0f64; 4];
+    let mut r = [0.0f64; 4];
+    for l in 0..4 {
+        // Exact for in-range lanes; keeps `n` in the representable window
+        // for the lanes the selects below will discard anyway.
+        let xc = x[l].clamp(-708.0, 709.0);
+        n[l] = (xc * LOG2E + if xc >= 0.0 { 0.5 } else { -0.5 }).trunc();
+        r[l] = (xc - n[l] * LN2_HI) - n[l] * LN2_LO;
+    }
+    let mut p = [1.0f64; 4];
+    let mut k = 12.0f64;
+    while k >= 1.0 {
+        for l in 0..4 {
+            p[l] = 1.0 + r[l] / k * p[l];
+        }
+        k -= 1.0;
+    }
+    for l in 0..4 {
+        let ni = n[l] as i64;
+        debug_assert!((-1022..=1023).contains(&ni));
+        let scale = f64::from_bits(((ni + 1023) as u64) << 52);
+        out[l] = if x[l] < -708.0 {
+            0.0
+        } else if x[l] > 709.0 {
+            f64::INFINITY
+        } else {
+            p[l] * scale
+        };
+    }
+    out
+}
+
 /// erf(x) via Abramowitz–Stegun 7.1.26 (max abs error 1.5e-7), sign-folded.
 pub fn erf64(x: f64) -> f64 {
     const A1: f64 = 0.254_829_592;
@@ -67,6 +114,55 @@ pub fn erf64(x: f64) -> f64 {
 pub fn gelu(x: f32) -> f32 {
     let xf = x as f64;
     (xf * 0.5 * (1.0 + erf64(xf / std::f64::consts::SQRT_2))) as f32
+}
+
+/// Four-lane erf: per lane the identical op sequence as `erf64` (the A&S
+/// polynomial is already straight-line; only the inner exp becomes the
+/// four-lane variant). Bit-exact per lane, ~4 independent chains of ILP.
+fn erf64x4(x: [f64; 4]) -> [f64; 4] {
+    const A1: f64 = 0.254_829_592;
+    const A2: f64 = -0.284_496_736;
+    const A3: f64 = 1.421_413_741;
+    const A4: f64 = -1.453_152_027;
+    const A5: f64 = 1.061_405_429;
+    const P: f64 = 0.327_591_1;
+    let mut sign = [0.0f64; 4];
+    let mut ax = [0.0f64; 4];
+    let mut nxx = [0.0f64; 4];
+    for l in 0..4 {
+        sign[l] = if x[l] < 0.0 { -1.0 } else { 1.0 };
+        ax[l] = x[l].abs();
+        nxx[l] = -ax[l] * ax[l];
+    }
+    let e = exp64x4(nxx);
+    let mut out = [0.0f64; 4];
+    for l in 0..4 {
+        let t = 1.0 / (1.0 + P * ax[l]);
+        let y = 1.0 - (((((A5 * t + A4) * t) + A3) * t + A2) * t + A1) * t * e[l];
+        out[l] = sign[l] * y;
+    }
+    out
+}
+
+/// In-place GELU over a slice: four-lane interleaved main body (bit-exact
+/// per element vs the scalar `gelu`), scalar tail.
+pub fn gelu_slice(xs: &mut [f32]) {
+    let mut chunks = xs.chunks_exact_mut(4);
+    for ch in &mut chunks {
+        let xf = [ch[0] as f64, ch[1] as f64, ch[2] as f64, ch[3] as f64];
+        let er = erf64x4([
+            xf[0] / std::f64::consts::SQRT_2,
+            xf[1] / std::f64::consts::SQRT_2,
+            xf[2] / std::f64::consts::SQRT_2,
+            xf[3] / std::f64::consts::SQRT_2,
+        ]);
+        for l in 0..4 {
+            ch[l] = (xf[l] * 0.5 * (1.0 + er[l])) as f32;
+        }
+    }
+    for v in chunks.into_remainder() {
+        *v = gelu(*v);
+    }
 }
 
 /// In-place LayerNorm over `row` (one token's hidden vector): biased
@@ -105,7 +201,22 @@ pub fn softmax_row(row: &mut [f32]) {
     }
     let mut sum = 0.0f64;
     // Two passes with a scratch-free design: store exp in place, then scale.
-    for v in row.iter_mut() {
+    // The exp pass runs four interleaved lanes (bit-exact per element; see
+    // `exp64x4`); the sum stays strictly left-to-right in index order.
+    let mut chunks = row.chunks_exact_mut(4);
+    for ch in &mut chunks {
+        let e = exp64x4([
+            (ch[0] - max) as f64,
+            (ch[1] - max) as f64,
+            (ch[2] - max) as f64,
+            (ch[3] - max) as f64,
+        ]);
+        for l in 0..4 {
+            ch[l] = e[l] as f32;
+            sum += e[l];
+        }
+    }
+    for v in chunks.into_remainder() {
         let e = exp64((*v - max) as f64);
         *v = e as f32;
         sum += e;
@@ -201,6 +312,46 @@ mod tests {
         assert!(row[2] > row[1] && row[1] > row[0]);
         // Reference: softmax([1,2,3])[2] = e³/(e+e²+e³) ≈ 0.665240956.
         assert!((row[2] - 0.665_241).abs() < 1e-5);
+    }
+
+    /// The x4 interleaves exist for ILP only: every lane must reproduce the
+    /// scalar bit-for-bit, including the out-of-range select edges.
+    #[test]
+    fn exp64x4_matches_scalar_bit_exact() {
+        let mut x = -30.0f64;
+        while x <= 30.0 {
+            let lanes = [x, x + 0.25, -x, x * 1.5];
+            let got = exp64x4(lanes);
+            for l in 0..4 {
+                assert_eq!(
+                    got[l].to_bits(),
+                    exp64(lanes[l]).to_bits(),
+                    "exp64x4 lane {l} deviates at x={}",
+                    lanes[l]
+                );
+            }
+            x += 0.001953125; // 2^-9: exact step, deterministic sweep
+        }
+        // Range edges and clamp selects.
+        let edges = [-800.0, -708.5, -708.0, 0.0, 709.0, 709.5, 800.0];
+        for w in edges.windows(4) {
+            let lanes = [w[0], w[1], w[2], w[3]];
+            let got = exp64x4(lanes);
+            for l in 0..4 {
+                assert_eq!(got[l].to_bits(), exp64(lanes[l]).to_bits());
+            }
+        }
+    }
+
+    #[test]
+    fn gelu_slice_matches_scalar_bit_exact() {
+        // Sweep the activation range plus a non-multiple-of-4 tail.
+        let mut xs: Vec<f32> = (-4000..=4001).map(|i| i as f32 * 0.00390625).collect();
+        let want: Vec<u32> = xs.iter().map(|&v| gelu(v).to_bits()).collect();
+        gelu_slice(&mut xs);
+        for (i, (g, w)) in xs.iter().zip(want.iter()).enumerate() {
+            assert_eq!(g.to_bits(), *w, "gelu_slice deviates at index {i}");
+        }
     }
 
     #[test]
