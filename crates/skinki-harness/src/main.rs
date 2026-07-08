@@ -266,6 +266,34 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         assert_gate: bool,
     },
+    /// DEV-ONLY: component timings for cold indexing on a deterministic corpus.
+    /// This measures build time only; search output is checked for deterministic
+    /// replay across two fresh indexes of each retriever.
+    ColdIndexBench {
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        #[arg(long, default_value_t = 5)]
+        years: u32,
+        #[arg(long, default_value_t = 6)]
+        entries_per_day: u32,
+        #[arg(long, default_value = "v2")]
+        difficulty: String,
+        #[arg(long, default_value_t = 10)]
+        k: usize,
+        /// Number of planted recall queries to use for deterministic-output
+        /// checks. The index itself is built over the full generated corpus.
+        #[arg(long, default_value_t = 64)]
+        queries: usize,
+        /// Measure only the production-like shared-BM25 bundle build. This
+        /// avoids the standalone per-component double builds used for small
+        /// profiling runs, so multi-million-entry checks stay tractable.
+        #[arg(long, default_value_t = false)]
+        bundle_only: bool,
+        /// Skip the second build used to prove replay determinism. Useful for
+        /// very large timing-only runs after smaller replay-checked runs pass.
+        #[arg(long, default_value_t = false)]
+        no_replay: bool,
+    },
     /// Stage 5 — Insight Engine keystone gate. Scores the structural, temporal,
     /// and contradiction detectors against the planted ground truth, beside the
     /// naive co-mention baseline (the Law-2 contrast). `--assert-gate` enforces
@@ -930,6 +958,24 @@ fn main() -> Result<()> {
             });
             run_graph_eval(&corpus, k, assert_gate)?;
         }
+        Cmd::ColdIndexBench {
+            seed,
+            years,
+            entries_per_day,
+            difficulty,
+            k,
+            queries,
+            bundle_only,
+            no_replay,
+        } => {
+            let corpus = generate(&GenConfig {
+                seed,
+                years,
+                entries_per_day,
+                difficulty: parse_difficulty(&difficulty)?,
+            });
+            run_cold_index_bench(&corpus, k, queries, bundle_only, !no_replay)?;
+        }
         Cmd::InsightEval {
             seed,
             years,
@@ -1373,6 +1419,211 @@ fn person_names_in(text: &str, corpus: &Corpus) -> std::collections::BTreeSet<St
         .map(|e| e.name.to_lowercase())
         .filter(|n| text_lower.contains(n.as_str()))
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// DEV — cold-index-bench: component timings + deterministic replay check
+// ---------------------------------------------------------------------------
+
+fn run_cold_index_bench(
+    corpus: &Corpus,
+    k: usize,
+    query_limit: usize,
+    bundle_only: bool,
+    replay: bool,
+) -> anyhow::Result<()> {
+    let queries: Vec<&str> = corpus
+        .ground_truth
+        .recall
+        .iter()
+        .take(query_limit)
+        .map(|q| q.question.as_str())
+        .collect();
+
+    println!("\n=== skinki — cold-index-bench ===");
+    println!(
+        "corpus: {} entries, {} recall queries checked, k={k}",
+        corpus.entries.len(),
+        queries.len()
+    );
+
+    if bundle_only {
+        let bundle = bench_shared_bm25_bundle(corpus, &queries, k, replay)?;
+        println!("\nshared-bm25 bundle total {:>8.3}s", bundle.as_secs_f64());
+        return Ok(());
+    }
+
+    let bm25 = bench_index_replay("bm25", corpus, &queries, k, Bm25::new)?;
+    let semantic = bench_index_replay("semantic-hash", corpus, &queries, k, || {
+        SemanticRetriever::new(Box::new(StaticHashEmbedder::new(256)), "semantic-hash")
+    })?;
+    let graph = bench_index_replay("graph-comention", corpus, &queries, k, GraphRetriever::new)?;
+    let relation = bench_index_replay(
+        "graph-relation",
+        corpus,
+        &queries,
+        k,
+        RelationRetriever::new,
+    )?;
+
+    println!("\nsummary:");
+    println!("  bm25           {:>10.3}s", bm25.as_secs_f64());
+    println!("  semantic-hash  {:>10.3}s", semantic.as_secs_f64());
+    println!("  graph          {:>10.3}s", graph.as_secs_f64());
+    println!("  relation       {:>10.3}s", relation.as_secs_f64());
+    println!(
+        "  total          {:>10.3}s",
+        (bm25 + semantic + graph + relation).as_secs_f64()
+    );
+
+    let bundle = bench_shared_bm25_bundle(corpus, &queries, k, replay)?;
+    println!(
+        "\nshared-bm25 bundle total {:>8.3}s  (standalone component sum {:>8.3}s)",
+        bundle.as_secs_f64(),
+        (bm25 + semantic + graph + relation).as_secs_f64()
+    );
+    Ok(())
+}
+
+fn bench_index_replay<S, F>(
+    name: &str,
+    corpus: &Corpus,
+    queries: &[&str],
+    k: usize,
+    mut build: F,
+) -> anyhow::Result<Duration>
+where
+    S: RetrievalSystem,
+    F: FnMut() -> S,
+{
+    let mut first = build();
+    let start = Instant::now();
+    first.index(corpus);
+    let elapsed = start.elapsed();
+    let first_hits: Vec<Vec<EntryId>> = queries.iter().map(|q| first.search(q, k)).collect();
+
+    let mut second = build();
+    second.index(corpus);
+    for (i, q) in queries.iter().enumerate() {
+        let second_hits = second.search(q, k);
+        anyhow::ensure!(
+            first_hits[i] == second_hits,
+            "{name} replay mismatch for query {i} ({q:?}): {:?} vs {:?}",
+            first_hits[i],
+            second_hits
+        );
+    }
+
+    let per_entry_us = elapsed.as_secs_f64() * 1_000_000.0 / corpus.entries.len().max(1) as f64;
+    println!(
+        "{name:<15} index {:>8.3}s  {:>8.2} us/entry  replay=OK",
+        elapsed.as_secs_f64(),
+        per_entry_us
+    );
+    Ok(elapsed)
+}
+
+fn bench_shared_bm25_bundle(
+    corpus: &Corpus,
+    queries: &[&str],
+    k: usize,
+    replay: bool,
+) -> anyhow::Result<Duration> {
+    let (first, first_elapsed) = build_shared_bm25_bundle(corpus);
+    if replay {
+        let first_hits = first.search_all(queries, k);
+        let (second, _) = build_shared_bm25_bundle(corpus);
+        let second_hits = second.search_all(queries, k);
+        anyhow::ensure!(
+            first_hits == second_hits,
+            "shared-bm25 bundle replay mismatch: {first_hits:?} vs {second_hits:?}"
+        );
+    }
+
+    println!(
+        "\nshared-bm25 bundle replay={}: bm25={:.3}s semantic={:.3}s graph-only={:.3}s relation-only={:.3}s total={:.3}s",
+        if replay { "OK" } else { "SKIP" },
+        first_elapsed.bm25.as_secs_f64(),
+        first_elapsed.semantic.as_secs_f64(),
+        first_elapsed.graph.as_secs_f64(),
+        first_elapsed.relation.as_secs_f64(),
+        first_elapsed.total().as_secs_f64()
+    );
+    Ok(first_elapsed.total())
+}
+
+struct SharedBm25Bundle {
+    bm25: Bm25,
+    semantic: SemanticRetriever,
+    graph: GraphRetriever,
+    relation: RelationRetriever,
+}
+
+impl SharedBm25Bundle {
+    fn search_all(&self, queries: &[&str], k: usize) -> Vec<Vec<Vec<EntryId>>> {
+        queries
+            .iter()
+            .map(|q| {
+                vec![
+                    self.bm25.search(q, k),
+                    self.semantic.search(q, k),
+                    self.graph.search_with_bm25(q, k, &self.bm25),
+                    self.relation.search_with_bm25(q, k, &self.bm25),
+                ]
+            })
+            .collect()
+    }
+}
+
+struct SharedBm25BundleTiming {
+    bm25: Duration,
+    semantic: Duration,
+    graph: Duration,
+    relation: Duration,
+}
+
+impl SharedBm25BundleTiming {
+    fn total(&self) -> Duration {
+        self.bm25 + self.semantic + self.graph + self.relation
+    }
+}
+
+fn build_shared_bm25_bundle(corpus: &Corpus) -> (SharedBm25Bundle, SharedBm25BundleTiming) {
+    let mut bm25 = Bm25::new();
+    let start = Instant::now();
+    bm25.index(corpus);
+    let bm25_elapsed = start.elapsed();
+
+    let mut semantic =
+        SemanticRetriever::new(Box::new(StaticHashEmbedder::new(256)), "semantic-hash");
+    let start = Instant::now();
+    semantic.index(corpus);
+    let semantic_elapsed = start.elapsed();
+
+    let mut graph = GraphRetriever::new();
+    let start = Instant::now();
+    graph.index_graph_only(corpus);
+    let graph_elapsed = start.elapsed();
+
+    let mut relation = RelationRetriever::new();
+    let start = Instant::now();
+    relation.index_graph_only(corpus);
+    let relation_elapsed = start.elapsed();
+
+    (
+        SharedBm25Bundle {
+            bm25,
+            semantic,
+            graph,
+            relation,
+        },
+        SharedBm25BundleTiming {
+            bm25: bm25_elapsed,
+            semantic: semantic_elapsed,
+            graph: graph_elapsed,
+            relation: relation_elapsed,
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
