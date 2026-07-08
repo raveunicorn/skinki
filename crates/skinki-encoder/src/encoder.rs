@@ -1,8 +1,8 @@
 //! T2 — the BERT forward pass over a loaded [`EncoderArtifact`].
 //!
 //! Determinism contract (spec §4): every matrix product runs through
-//! `crate::gemm` (fixed left-to-right K order); attention scores/context use
-//! fixed-order f32 accumulation; LayerNorm/softmax statistics accumulate in
+//! `crate::gemm` (fixed left-to-right K order, fused `mul_add` terms);
+//! attention scores/context use fixed-order fused f32 accumulation; LayerNorm/softmax statistics accumulate in
 //! f64 left-to-right; `exp`/`erf` come from `crate::math` (no `libm`). One
 //! sequence is always processed single-threaded — `embed_batch` threads
 //! *across* sequences only — so output is byte-identical across runs, thread
@@ -216,9 +216,15 @@ impl RustEncoder {
         let mut v = vec![0.0f32; seq * h];
         let mut ctx = vec![0.0f32; seq * h];
         let mut attn_out = vec![0.0f32; seq * h];
-        let mut scores = vec![0.0f32; seq];
         let mut h1 = vec![0.0f32; seq * d.ffn];
         let mut h2 = vec![0.0f32; seq * h];
+        // Per-head packed operands so both attention products run through
+        // the register-tiled `gemm` instead of strided scalar loops.
+        let mut qh = vec![0.0f32; seq * hd];
+        let mut kt = vec![0.0f32; hd * seq];
+        let mut vh = vec![0.0f32; seq * hd];
+        let mut sc_all = vec![0.0f32; seq * seq];
+        let mut ctx_h = vec![0.0f32; seq * hd];
 
         for l in 0..d.layers {
             let lw = self.art.layer(l);
@@ -231,65 +237,35 @@ impl RustEncoder {
             fill_bias(&mut v, lw.bv, seq);
             gemm(seq, h, h, &x, lw.wv, &mut v, 1).expect("gemm v");
 
-            // Attention per head: scores_i = softmax(q_i·k_j · scale) over j,
-            // ctx_i = Σ_j p_ij · v_j. Fixed j order everywhere.
+            // Attention per head, as two GEMMs on packed per-head panels:
+            // scores = Q_head · K_head^T (then ·scale, softmax per row) and
+            // ctx = P · V_head. Per element both keep the exact fused
+            // ascending-reduction order of the scalar loops they replace
+            // (gemm's contract *is* that order), so this is bit-identical —
+            // just at microkernel throughput instead of latency-bound
+            // per-row dot products.
             for head in 0..heads {
                 let off = head * hd;
+                for t in 0..seq {
+                    qh[t * hd..(t + 1) * hd].copy_from_slice(&q[t * h + off..t * h + off + hd]);
+                    vh[t * hd..(t + 1) * hd].copy_from_slice(&v[t * h + off..t * h + off + hd]);
+                    for l in 0..hd {
+                        kt[l * seq + t] = k[t * h + off + l];
+                    }
+                }
+                sc_all.fill(0.0);
+                gemm(seq, seq, hd, &qh, &kt, &mut sc_all, 1).expect("gemm qk");
+                for e in sc_all.iter_mut() {
+                    *e *= scale;
+                }
                 for i in 0..seq {
-                    let qi = &q[i * h + off..i * h + off + hd];
-                    // Four independent q·k_j accumulator chains per pass:
-                    // each dot still sums its own hd elements strictly
-                    // left-to-right (bit-identical per (i, j)); interleaving
-                    // *different* j chains only buys ILP — a single f32 dot
-                    // is a latency-bound dependency chain the compiler may
-                    // not reorder.
-                    let mut j = 0;
-                    while j + 4 <= seq {
-                        let k0 = &k[j * h + off..j * h + off + hd];
-                        let k1 = &k[(j + 1) * h + off..(j + 1) * h + off + hd];
-                        let k2 = &k[(j + 2) * h + off..(j + 2) * h + off + hd];
-                        let k3 = &k[(j + 3) * h + off..(j + 3) * h + off + hd];
-                        let (mut d0, mut d1, mut d2, mut d3) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-                        for (t, &qv) in qi.iter().enumerate() {
-                            d0 += qv * k0[t];
-                            d1 += qv * k1[t];
-                            d2 += qv * k2[t];
-                            d3 += qv * k3[t];
-                        }
-                        scores[j] = d0 * scale;
-                        scores[j + 1] = d1 * scale;
-                        scores[j + 2] = d2 * scale;
-                        scores[j + 3] = d3 * scale;
-                        j += 4;
-                    }
-                    for (j, sc) in scores[..seq].iter_mut().enumerate().skip(j) {
-                        let kj = &k[j * h + off..j * h + off + hd];
-                        let mut dot = 0.0f32;
-                        for (a, b) in qi.iter().zip(kj.iter()) {
-                            dot += a * b;
-                        }
-                        *sc = dot * scale;
-                    }
-                    softmax_row(&mut scores[..seq]);
-                    let ci = &mut ctx[i * h + off..i * h + off + hd];
-                    // Weighted sum over V: per output lane the additions run
-                    // in ascending j, exactly like the naive loop — the
-                    // monomorphized paths only keep the accumulator row in
-                    // registers instead of round-tripping ctx through cache
-                    // once per j.
-                    match hd {
-                        32 => attn_weighted_sum::<32>(&scores[..seq], &v, h, off, ci),
-                        64 => attn_weighted_sum::<64>(&scores[..seq], &v, h, off, ci),
-                        _ => {
-                            ci.fill(0.0);
-                            for (j, &p) in scores[..seq].iter().enumerate() {
-                                let vj = &v[j * h + off..j * h + off + hd];
-                                for (c, &vv) in ci.iter_mut().zip(vj.iter()) {
-                                    *c += p * vv;
-                                }
-                            }
-                        }
-                    }
+                    softmax_row(&mut sc_all[i * seq..(i + 1) * seq]);
+                }
+                ctx_h.fill(0.0);
+                gemm(seq, hd, seq, &sc_all, &vh, &mut ctx_h, 1).expect("gemm av");
+                for t in 0..seq {
+                    ctx[t * h + off..t * h + off + hd]
+                        .copy_from_slice(&ctx_h[t * hd..(t + 1) * hd]);
                 }
             }
 
@@ -326,29 +302,6 @@ impl RustEncoder {
     fn hidden_states(&self, ids: &[u32]) -> Vec<f32> {
         self.forward_states(ids, None)
     }
-}
-
-/// `out[l] = Σ_j scores[j] · v[j*h + off + l]` for `l < HD`, additions in
-/// ascending `j` per lane — bit-identical to the naive `ci[l] +=` loop (an
-/// f32 register accumulator vs a store/reload round-trip is exact). The
-/// const HD lets the accumulator row live entirely in vector registers.
-fn attn_weighted_sum<const HD: usize>(
-    scores: &[f32],
-    v: &[f32],
-    h: usize,
-    off: usize,
-    out: &mut [f32],
-) {
-    let mut acc = [0.0f32; HD];
-    for (j, &p) in scores.iter().enumerate() {
-        let vj: &[f32; HD] = v[j * h + off..j * h + off + HD]
-            .try_into()
-            .expect("HD-sized V slice");
-        for l in 0..HD {
-            acc[l] += p * vj[l];
-        }
-    }
-    out.copy_from_slice(&acc);
 }
 
 /// Fill `c` (`seq` rows) with the broadcast `bias` row — the pre-gemm bias

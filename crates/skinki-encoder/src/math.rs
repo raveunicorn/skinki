@@ -1,8 +1,8 @@
 //! In-crate numerics for the T2 forward pass — **no `libm` anywhere on the
 //! forward path** (spec §4): `exp` and `erf` are fixed polynomial/rational
-//! approximations built from IEEE-exact primitives (`+ - * /`, `sqrt`,
-//! `floor`, bit casts), so encoder output is byte-identical across
-//! OS/libc/arch. Reductions (LayerNorm statistics, softmax sums) accumulate
+//! approximations built from IEEE-exact primitives (`+ - * /`, fused
+//! `mul_add`, `sqrt`, `floor`, bit casts — all correctly rounded on every
+//! target), so encoder output is byte-identical across OS/libc/arch. Reductions (LayerNorm statistics, softmax sums) accumulate
 //! in f64, strictly left-to-right — f64 arithmetic is just as deterministic
 //! as f32 and cuts the drift vs the f32 teacher roughly in half.
 //!
@@ -17,8 +17,9 @@
 /// exp(x) for f64 via range reduction + Taylor/Horner, deterministic.
 ///
 /// x = n·ln2 + r with |r| ≤ ln2/2, exp(x) = 2^n · exp(r); exp(r) by a
-/// 12-term Horner Taylor (term 13 ≈ r¹³/13! < 2e-14 at |r| ≤ 0.347); 2^n
-/// assembled by exponent-bit construction (no `powi`, no `libm`).
+/// 12-term Horner Taylor over precomputed 1/k! constants with fused
+/// `mul_add` (term 13 ≈ r¹³/13! < 2e-14 at |r| ≤ 0.347); 2^n assembled by
+/// exponent-bit construction (no `powi`, no `libm`).
 pub fn exp64(x: f64) -> f64 {
     if x < -708.0 {
         return 0.0;
@@ -32,12 +33,17 @@ pub fn exp64(x: f64) -> f64 {
     const LN2_LO: f64 = 1.908_214_929_270_587_7e-10;
     let n = (x * LOG2E + if x >= 0.0 { 0.5 } else { -0.5 }).trunc();
     let r = (x - n * LN2_HI) - n * LN2_LO;
-    // Horner: 1 + r(1 + r/2(1 + r/3(... (1 + r/12) ...)))
-    let mut p = 1.0f64;
-    let mut k = 12.0f64;
-    while k >= 1.0 {
-        p = 1.0 + r / k * p;
-        k -= 1.0;
+    // Horner over precomputed 1/k! coefficients, one fused `mul_add` per
+    // term: the old `1 + r/k·p` form spent 12 *serial* f64 divides per call
+    // on the single divide port; reciprocal-factorial constants (rounded
+    // once, at compile time — still IEEE-exact operations at run time) plus
+    // fma keep the truncation error < 2e-14 and cut the chain to 12 fused
+    // ops. Term-13 bound: r¹³/13! < 2e-14 at |r| ≤ ln2/2.
+    let mut p = EXP_C[12];
+    let mut i = 12usize;
+    while i > 0 {
+        i -= 1;
+        p = p.mul_add(r, EXP_C[i]);
     }
     let n = n as i64;
     // 2^n via exponent bits; n ∈ [-1022, 1023] after the clamps above
@@ -46,6 +52,24 @@ pub fn exp64(x: f64) -> f64 {
     let scale = f64::from_bits(((n + 1023) as u64) << 52);
     p * scale
 }
+
+/// 1/k! for the exp Taylor Horner, k = 0..=12; each constant is the
+/// correctly-rounded f64 of the exact rational (CTFE division of literals).
+const EXP_C: [f64; 13] = [
+    1.0,
+    1.0,
+    1.0 / 2.0,
+    1.0 / 6.0,
+    1.0 / 24.0,
+    1.0 / 120.0,
+    1.0 / 720.0,
+    1.0 / 5040.0,
+    1.0 / 40320.0,
+    1.0 / 362880.0,
+    1.0 / 3628800.0,
+    1.0 / 39916800.0,
+    1.0 / 479001600.0,
+];
 
 /// Four-lane `exp64`: per lane the *identical* straight-line operation
 /// sequence as the scalar (asserted bit-exact by tests), but four
@@ -58,28 +82,37 @@ pub fn exp64(x: f64) -> f64 {
 /// lanes see bit-identical `r`), and out-of-range lanes are overwritten
 /// with the scalar's 0.0 / ∞ answers.
 pub fn exp64x4(x: [f64; 4]) -> [f64; 4] {
+    exp64xn::<4>(x)
+}
+
+/// N-lane `exp64` (N = const): per lane the identical straight-line op
+/// sequence as the scalar, N independent chains in flight. The 12-term fma
+/// Horner is a ~50-cycle latency chain per lane; softmax rows call this at
+/// N = 16 so the two f64 FMA pipes stay saturated instead of idling on one
+/// chain's latency.
+pub fn exp64xn<const N: usize>(x: [f64; N]) -> [f64; N] {
     const LOG2E: f64 = std::f64::consts::LOG2_E;
     const LN2_HI: f64 = 6.931_471_803_691_238e-1;
     const LN2_LO: f64 = 1.908_214_929_270_587_7e-10;
-    let mut out = [0.0f64; 4];
-    let mut n = [0.0f64; 4];
-    let mut r = [0.0f64; 4];
-    for l in 0..4 {
+    let mut out = [0.0f64; N];
+    let mut n = [0.0f64; N];
+    let mut r = [0.0f64; N];
+    for l in 0..N {
         // Exact for in-range lanes; keeps `n` in the representable window
         // for the lanes the selects below will discard anyway.
         let xc = x[l].clamp(-708.0, 709.0);
         n[l] = (xc * LOG2E + if xc >= 0.0 { 0.5 } else { -0.5 }).trunc();
         r[l] = (xc - n[l] * LN2_HI) - n[l] * LN2_LO;
     }
-    let mut p = [1.0f64; 4];
-    let mut k = 12.0f64;
-    while k >= 1.0 {
-        for l in 0..4 {
-            p[l] = 1.0 + r[l] / k * p[l];
+    let mut p = [EXP_C[12]; N];
+    let mut i = 12usize;
+    while i > 0 {
+        i -= 1;
+        for l in 0..N {
+            p[l] = p[l].mul_add(r[l], EXP_C[i]);
         }
-        k -= 1.0;
     }
-    for l in 0..4 {
+    for l in 0..N {
         let ni = n[l] as i64;
         debug_assert!((-1022..=1023).contains(&ni));
         let scale = f64::from_bits(((ni + 1023) as u64) << 52);
@@ -203,7 +236,20 @@ pub fn softmax_row(row: &mut [f32]) {
     // Two passes with a scratch-free design: store exp in place, then scale.
     // The exp pass runs four interleaved lanes (bit-exact per element; see
     // `exp64x4`); the sum stays strictly left-to-right in index order.
-    let mut chunks = row.chunks_exact_mut(4);
+    let mut wide = row.chunks_exact_mut(16);
+    for ch in &mut wide {
+        let mut xs = [0.0f64; 16];
+        for l in 0..16 {
+            xs[l] = (ch[l] - max) as f64;
+        }
+        let e = exp64xn::<16>(xs);
+        for l in 0..16 {
+            ch[l] = e[l] as f32;
+            sum += e[l];
+        }
+    }
+    let rem = wide.into_remainder();
+    let mut chunks = rem.chunks_exact_mut(4);
     for ch in &mut chunks {
         let e = exp64x4([
             (ch[0] - max) as f64,
