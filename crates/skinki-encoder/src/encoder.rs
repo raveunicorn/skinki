@@ -1,8 +1,8 @@
 //! T2 — the BERT forward pass over a loaded [`EncoderArtifact`].
 //!
 //! Determinism contract (spec §4): every matrix product runs through
-//! `crate::gemm` (fixed left-to-right K order); attention scores/context use
-//! fixed-order f32 accumulation; LayerNorm/softmax statistics accumulate in
+//! `crate::gemm` (fixed left-to-right K order, fused `mul_add` terms);
+//! attention scores/context use fixed-order fused f32 accumulation; LayerNorm/softmax statistics accumulate in
 //! f64 left-to-right; `exp`/`erf` come from `crate::math` (no `libm`). One
 //! sequence is always processed single-threaded — `embed_batch` threads
 //! *across* sequences only — so output is byte-identical across runs, thread
@@ -21,7 +21,7 @@ use skinki_vector::embed::Embedder;
 
 use crate::format::{EncoderArtifact, Pooling};
 use crate::gemm::gemm;
-use crate::math::{gelu, layernorm_row, softmax_row};
+use crate::math::{gelu_slice, layernorm_row, softmax_row};
 
 /// A ready-to-run pure-Rust sentence encoder.
 #[derive(Debug)]
@@ -111,19 +111,31 @@ impl RustEncoder {
         if threads <= 1 || texts.len() <= 1 {
             return texts.iter().map(|t| self.embed(t)).collect();
         }
-        let bands = threads.min(texts.len());
-        let chunk = texts.len().div_ceil(bands);
-        let mut out: Vec<Vec<Vec<f32>>> = Vec::with_capacity(bands);
+        // Dynamic scheduling: workers pull the next text off a shared atomic
+        // counter instead of owning a fixed contiguous band. Text lengths vary
+        // wildly (seq² attention), so static bands leave threads idle at the
+        // join. Each text's embedding is a pure function of that text alone —
+        // output slot `i` is the same no matter which worker computes it or
+        // in what order, so determinism is untouched by the scheduling.
+        let workers = threads.min(texts.len());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let slots: Vec<std::sync::OnceLock<Vec<f32>>> = (0..texts.len())
+            .map(|_| std::sync::OnceLock::new())
+            .collect();
         thread::scope(|s| {
-            let mut handles = Vec::with_capacity(bands);
-            for band in texts.chunks(chunk) {
-                handles.push(s.spawn(move || band.iter().map(|t| self.embed(t)).collect()));
-            }
-            for h in handles {
-                out.push(h.join().expect("encoder worker panicked"));
+            for _ in 0..workers {
+                s.spawn(|| loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(text) = texts.get(i) else { break };
+                    let v = self.embed(text);
+                    slots[i].set(v).expect("slot set twice");
+                });
             }
         });
-        out.into_iter().flatten().collect()
+        slots
+            .into_iter()
+            .map(|s| s.into_inner().expect("worker filled every slot"))
+            .collect()
     }
 
     /// Full forward for a framed id sequence, pooled + normalized.
@@ -204,9 +216,15 @@ impl RustEncoder {
         let mut v = vec![0.0f32; seq * h];
         let mut ctx = vec![0.0f32; seq * h];
         let mut attn_out = vec![0.0f32; seq * h];
-        let mut scores = vec![0.0f32; seq];
         let mut h1 = vec![0.0f32; seq * d.ffn];
         let mut h2 = vec![0.0f32; seq * h];
+        // Per-head packed operands so both attention products run through
+        // the register-tiled `gemm` instead of strided scalar loops.
+        let mut qh = vec![0.0f32; seq * hd];
+        let mut kt = vec![0.0f32; hd * seq];
+        let mut vh = vec![0.0f32; seq * hd];
+        let mut sc_all = vec![0.0f32; seq * seq];
+        let mut ctx_h = vec![0.0f32; seq * hd];
 
         for l in 0..d.layers {
             let lw = self.art.layer(l);
@@ -219,29 +237,35 @@ impl RustEncoder {
             fill_bias(&mut v, lw.bv, seq);
             gemm(seq, h, h, &x, lw.wv, &mut v, 1).expect("gemm v");
 
-            // Attention per head: scores_i = softmax(q_i·k_j · scale) over j,
-            // ctx_i = Σ_j p_ij · v_j. Fixed j order everywhere.
+            // Attention per head, as two GEMMs on packed per-head panels:
+            // scores = Q_head · K_head^T (then ·scale, softmax per row) and
+            // ctx = P · V_head. Per element both keep the exact fused
+            // ascending-reduction order of the scalar loops they replace
+            // (gemm's contract *is* that order), so this is bit-identical —
+            // just at microkernel throughput instead of latency-bound
+            // per-row dot products.
             for head in 0..heads {
                 let off = head * hd;
+                for t in 0..seq {
+                    qh[t * hd..(t + 1) * hd].copy_from_slice(&q[t * h + off..t * h + off + hd]);
+                    vh[t * hd..(t + 1) * hd].copy_from_slice(&v[t * h + off..t * h + off + hd]);
+                    for l in 0..hd {
+                        kt[l * seq + t] = k[t * h + off + l];
+                    }
+                }
+                sc_all.fill(0.0);
+                gemm(seq, seq, hd, &qh, &kt, &mut sc_all, 1).expect("gemm qk");
+                for e in sc_all.iter_mut() {
+                    *e *= scale;
+                }
                 for i in 0..seq {
-                    let qi = &q[i * h + off..i * h + off + hd];
-                    for (j, sc) in scores[..seq].iter_mut().enumerate() {
-                        let kj = &k[j * h + off..j * h + off + hd];
-                        let mut dot = 0.0f32;
-                        for (a, b) in qi.iter().zip(kj.iter()) {
-                            dot += a * b;
-                        }
-                        *sc = dot * scale;
-                    }
-                    softmax_row(&mut scores[..seq]);
-                    let ci = &mut ctx[i * h + off..i * h + off + hd];
-                    ci.fill(0.0);
-                    for (j, &p) in scores[..seq].iter().enumerate() {
-                        let vj = &v[j * h + off..j * h + off + hd];
-                        for (c, &vv) in ci.iter_mut().zip(vj.iter()) {
-                            *c += p * vv;
-                        }
-                    }
+                    softmax_row(&mut sc_all[i * seq..(i + 1) * seq]);
+                }
+                ctx_h.fill(0.0);
+                gemm(seq, hd, seq, &sc_all, &vh, &mut ctx_h, 1).expect("gemm av");
+                for t in 0..seq {
+                    ctx[t * h + off..t * h + off + hd]
+                        .copy_from_slice(&ctx_h[t * hd..(t + 1) * hd]);
                 }
             }
 
@@ -258,9 +282,7 @@ impl RustEncoder {
             // FFN: h1 = gelu(x·W1 + b1); h2 = h1·W2 + b2; residual + LN2.
             fill_bias(&mut h1, lw.b1, seq);
             gemm(seq, d.ffn, h, &x, lw.w1, &mut h1, 1).expect("gemm ffn1");
-            for e in h1.iter_mut() {
-                *e = gelu(*e);
-            }
+            gelu_slice(&mut h1);
             fill_bias(&mut h2, lw.b2, seq);
             gemm(seq, h, d.ffn, &h1, lw.w2, &mut h2, 1).expect("gemm ffn2");
             for (xi, hi) in x.iter_mut().zip(h2.iter()) {

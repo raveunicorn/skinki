@@ -6,9 +6,14 @@
 //!
 //! ## Numeric / determinism contract
 //!
-//! `C[i, j] += sum_{p=0..k} A[i, p] * B[p, j]`, where the sum is taken
-//! **strictly left-to-right over `p`** (the outer K-loop), one BK-chunk at a
-//! time — no pairwise / tree reduction, no reordering. Threads partition the
+//! `C[i, j] = fma(A[i, k-1], B[k-1, j], … fma(A[i, 1], B[1, j],
+//! fma(A[i, 0], B[0, j], C[i, j])))`: one **fused** multiply-add
+//! (`f32::mul_add`) per term, applied strictly left-to-right over `p` — no
+//! pairwise / tree reduction, no reordering. `fma` is IEEE-754
+//! correctly-rounded on every target (hardware on arm64 / fma-enabled
+//! x86_64, soft-float otherwise), so the bits are platform-independent
+//! exactly like the separate mul+add contract this replaces — at twice the
+//! peak arithmetic throughput. Threads partition the
 //! M dimension (rows of C); no thread ever touches another thread's row, so
 //! the same `C` is produced regardless of thread count. This is the
 //! Stage-1C-B rule-2 invariant, by construction: `gemm(m, n, k, A, B)` is
@@ -17,35 +22,44 @@
 //!
 //! ## Loop structure
 //!
-//! The hot inner loop is over `j` (the N dimension):
+//! Register-tiled microkernel: an MR × NR tile of C is loaded into locals
+//! once, accumulates the **entire** K range in ascending `p`, and is stored
+//! back once:
 //!
 //! ```text
-//! for ii in M blocks:  for pp in K blocks:  for jj in N blocks:
-//!   for i in ii..:  for p in pp..:
-//!     let aip = A[i, p];
-//!     for j in jj..:                      // <-- inner: contiguous in B and C
-//!       C[i, j] += aip * B[p, j];
+//! for jj in NR strips of N:  for ii in MR blocks of M:
+//!   acc[MR][NR] = C[ii.., jj..];         // load tile once
+//!   for p in 0..k:                        // ascending, full range
+//!     for r in 0..MR: for l in 0..NR:
+//!       acc[r][l] = fma(A[ii+r, p], B[p, jj+l], acc[r][l]);
+//!   C[ii.., jj..] = acc;                  // store tile once
 //! ```
 //!
-//! The inner `j` loop walks contiguous memory in both `B[p, jj..]` and
-//! `C[i, jj..]`, so `--release` auto-vectorizes it comfortably (NEON/SSE)
-//! without any hand-written SIMD. The K dimension is the *outer* `p` loop,
-//! so for each `(i, j)` the additions still happen strictly left-to-right
-//! over `p` — that is what buys rule-2 determinism.
+//! The `l` loop is over independent C lanes (contiguous in B and C), so
+//! `--release` auto-vectorizes it (NEON/SSE) without hand-written SIMD, and
+//! the MR rows give the vector units independent accumulation chains. For
+//! each `(i, j)` the fused terms apply strictly left-to-right over `p` into
+//! one f32 accumulator — bit-identical to an in-memory per-`p` update
+//! (register vs store/reload round-trip of an f32 is exact) — that is what
+//! buys rule-2 determinism. Keeping C in registers instead of streaming it
+//! through cache once per `p`, plus the fused ops, is the entire speedup.
 
 use std::io;
 use std::thread;
 
-/// Outer M block (rows of C per thread slice, then per outer block).
-const BM: usize = 64;
-/// Outer N block (columns of C per outer block). Small, because the inner
-/// `j` loop touches both `B[p, jj..]` and `C[i, jj..]`, and we want the
-/// `(ii, jj)` tile of `C` (BM × BN f32) plus a `BK × BN` slab of `B` to
-/// stay in L1/L2.
-const BN: usize = 256;
-/// K block — reduction chunk size. The reduction over `p` is taken
-/// left-to-right within one BK chunk, chunks processed in order, so the
-/// per-element sum order is fixed and documented.
+/// Microkernel rows: how many rows of C accumulate in registers at once.
+const MR: usize = 4;
+/// Microkernel columns: f32 lanes of C kept in registers per row (four NEON
+/// vectors). MR × NR/4 = 16 vector accumulators: the per-(i, j) ascending-`p`
+/// fma chain has ~4-cycle latency, so saturating 4 FMA pipes needs
+/// latency × pipes = 16 *independent* chains in flight. (x86_64 SSE has only
+/// 16 vector registers and will spill some accumulators to L1 — correctness
+/// is unaffected; arm64 is the performance target.)
+const NR: usize = 16;
+/// K block used only by the *tests'* chunked reference (the kernel itself
+/// accumulates the full K range in registers; per-(i, j) order is unchanged
+/// — see the determinism contract above).
+#[cfg(test)]
 const BK: usize = 256;
 
 /// Compute `C += A · B` for `A ∈ R^{m×k}`, `B ∈ R^{k×n}`, `C ∈ R^{m×n}`,
@@ -142,59 +156,89 @@ fn gemm_threaded(
     });
 }
 
-/// Single-threaded tiled GEMM, used both as the `threads <= 1` path and as
-/// the per-thread worker. K is the outer reduction loop, so for each
-/// `(i, j)` the additions happen strictly left-to-right over `p`.
+/// Single-threaded register-tiled GEMM, used both as the `threads <= 1` path
+/// and as the per-thread worker.
+///
+/// The C tile (MR × NR) lives in registers for the whole K range: it is
+/// loaded from memory once, receives one fused `mul_add` per `p` strictly
+/// left-to-right, and is stored once. Per `(i, j)` this is the *identical*
+/// sequence of f32 operations as an in-memory per-`p` update (a store/reload
+/// round-trip of an f32 register is exact), so the output is bit-for-bit the
+/// documented order — asserted by
+/// `kernel_matches_documented_order_bit_exact`.
 fn gemm_serial(m: usize, n: usize, k: usize, a: &[f32], b: &[f32], c: &mut [f32]) {
-    let mut ii = 0;
-    while ii < m {
-        let ii_end = (ii + BM).min(m);
-        let mut pp = 0;
-        while pp < k {
-            let pp_end = (pp + BK).min(k);
-            let mut jj = 0;
-            while jj < n {
-                let jj_end = (jj + BN).min(n);
-                kernel_block(ii, ii_end, jj, jj_end, pp, pp_end, n, k, a, b, c);
-                jj = jj_end;
-            }
-            pp = pp_end;
+    let mut jj = 0;
+    while jj + NR <= n {
+        let mut ii = 0;
+        while ii + MR <= m {
+            kernel_mr_nr(ii, jj, n, k, a, b, c);
+            ii += MR;
         }
-        ii = ii_end;
+        // M tail: remaining rows one at a time, same NR strip.
+        for i in ii..m {
+            kernel_1_nr(i, jj, n, k, a, b, c);
+        }
+        jj += NR;
+    }
+    // N tail: scalar per (i, j), accumulator in a register, ascending `p` —
+    // the same per-element order as everywhere else.
+    if jj < n {
+        for i in 0..m {
+            let a_row = &a[i * k..(i + 1) * k];
+            for j in jj..n {
+                let mut cij = c[i * n + j];
+                for (p, &ap) in a_row.iter().enumerate() {
+                    cij = ap.mul_add(b[p * n + j], cij);
+                }
+                c[i * n + j] = cij;
+            }
+        }
     }
 }
 
-/// Process one `(ii..ii_end) × (jj..jj_end)` tile of C, accumulating the
-/// `(pp..pp_end)` slice of K. Inner loop is over `j` (contiguous in B and C).
-#[allow(clippy::too_many_arguments)]
-fn kernel_block(
-    ii: usize,
-    ii_end: usize,
-    jj: usize,
-    jj_end: usize,
-    pp: usize,
-    pp_end: usize,
-    n: usize,
-    k: usize,
-    a: &[f32],
-    b: &[f32],
-    c: &mut [f32],
-) {
-    for i in ii..ii_end {
-        let a_row = &a[i * k..];
-        let c_row = &mut c[i * n..];
-        for p in pp..pp_end {
-            // Inner loop over `j` is contiguous in both B[p, *] and C[i, *].
-            // The compiler auto-vectorizes this; we never reorder the
-            // additions for a given (i, j) — `p` is the outer loop — so
-            // the sum order is fixed left-to-right (rule 2).
-            let aip = a_row[p];
-            let b_row = &b[p * n..];
-            for j in jj..jj_end {
-                c_row[j] += aip * b_row[j];
-            }
+/// MR × NR register microkernel: C tile in registers, full-K accumulation,
+/// ascending `p`. The inner `l` loop is over independent C lanes, so the
+/// compiler vectorizes it without touching any per-(i, j) sum order.
+fn kernel_mr_nr(ii: usize, jj: usize, n: usize, k: usize, a: &[f32], b: &[f32], c: &mut [f32]) {
+    let mut acc = [[0.0f32; NR]; MR];
+    for (r, acc_r) in acc.iter_mut().enumerate() {
+        acc_r.copy_from_slice(&c[(ii + r) * n + jj..(ii + r) * n + jj + NR]);
+    }
+    let a0 = &a[ii * k..(ii + 1) * k];
+    let a1 = &a[(ii + 1) * k..(ii + 2) * k];
+    let a2 = &a[(ii + 2) * k..(ii + 3) * k];
+    let a3 = &a[(ii + 3) * k..(ii + 4) * k];
+    for p in 0..k {
+        let b_row: &[f32; NR] = b[p * n + jj..p * n + jj + NR]
+            .try_into()
+            .expect("NR-sized B strip");
+        let (x0, x1, x2, x3) = (a0[p], a1[p], a2[p], a3[p]);
+        for l in 0..NR {
+            acc[0][l] = x0.mul_add(b_row[l], acc[0][l]);
+            acc[1][l] = x1.mul_add(b_row[l], acc[1][l]);
+            acc[2][l] = x2.mul_add(b_row[l], acc[2][l]);
+            acc[3][l] = x3.mul_add(b_row[l], acc[3][l]);
         }
     }
+    for (r, acc_r) in acc.iter().enumerate() {
+        c[(ii + r) * n + jj..(ii + r) * n + jj + NR].copy_from_slice(acc_r);
+    }
+}
+
+/// 1 × NR variant for the M tail. Same order contract as `kernel_mr_nr`.
+fn kernel_1_nr(i: usize, jj: usize, n: usize, k: usize, a: &[f32], b: &[f32], c: &mut [f32]) {
+    let mut acc = [0.0f32; NR];
+    acc.copy_from_slice(&c[i * n + jj..i * n + jj + NR]);
+    let a_row = &a[i * k..(i + 1) * k];
+    for (p, &ap) in a_row.iter().enumerate() {
+        let b_row: &[f32; NR] = b[p * n + jj..p * n + jj + NR]
+            .try_into()
+            .expect("NR-sized B strip");
+        for l in 0..NR {
+            acc[l] = ap.mul_add(b_row[l], acc[l]);
+        }
+    }
+    c[i * n + jj..i * n + jj + NR].copy_from_slice(&acc);
 }
 
 #[cfg(test)]
@@ -216,7 +260,7 @@ mod tests {
                 for j in 0..n {
                     let mut acc = 0.0f32;
                     for p in p0..p1 {
-                        acc += a[i * k + p] * b[p * n + j];
+                        acc = a[i * k + p].mul_add(b[p * n + j], acc);
                     }
                     c[i * n + j] += acc;
                 }
@@ -229,17 +273,17 @@ mod tests {
     use crate::bench::seeded_inputs;
 
     /// An independent scalar implementation of the *documented* association:
-    /// for each `(i, j)`, `c[i,j] += a[i,p] * b[p,j]` applied `p = 0..k`
-    /// strictly left-to-right, accumulating straight into C. This is exactly
-    /// the order the module docs promise; the tiled kernel must reproduce it
-    /// bit-for-bit no matter how it blocks or vectorizes.
+    /// for each `(i, j)`, `c[i,j] = fma(a[i,p], b[p,j], c[i,j])` applied
+    /// `p = 0..k` strictly left-to-right, accumulating straight into C. This
+    /// is exactly the order the module docs promise; the tiled kernel must
+    /// reproduce it bit-for-bit no matter how it blocks or vectorizes.
     fn reference_documented_order(m: usize, n: usize, k: usize, a: &[f32], b: &[f32]) -> Vec<f32> {
         let mut c = vec![0.0f32; m * n];
         for i in 0..m {
             for p in 0..k {
                 let aip = a[i * k + p];
                 for j in 0..n {
-                    c[i * n + j] += aip * b[p * n + j];
+                    c[i * n + j] = aip.mul_add(b[p * n + j], c[i * n + j]);
                 }
             }
         }
@@ -249,10 +293,10 @@ mod tests {
     /// The rule-2 contract test: the kernel computes exactly the documented
     /// association, bit-for-bit, against an independent scalar reference.
     /// Any future tiling/vectorization change that silently reorders the
-    /// per-element sum shows up here as a bit diff. (This also demonstrates
-    /// that no FMA contraction occurs: rustc never fuses `c += a*b` into an
-    /// FMA without an explicit `mul_add`, on any platform — which is what
-    /// makes the output byte-identical across arm64/x86_64.)
+    /// per-element sum shows up here as a bit diff. (The contract is now the
+    /// explicit `mul_add` form: rustc never contracts or *un*-contracts
+    /// float ops on its own, and `fma` is correctly rounded on every target,
+    /// so the output stays byte-identical across arm64/x86_64.)
     #[test]
     fn kernel_matches_documented_order_bit_exact() {
         let shapes: &[(usize, usize, usize)] = &[
@@ -288,8 +332,9 @@ mod tests {
         // single-chunk K (k ≤ BK) the two orders coincide exactly (the
         // initial `0.0 + acc` is exact), so bit-equality is asserted; for
         // multi-chunk K they legitimately differ by summation association —
-        // a few ULPs — so a small relative tolerance applies. (No FMA is
-        // involved anywhere; see `kernel_matches_documented_order_bit_exact`.)
+        // a few ULPs — so a small relative tolerance applies. (Both sides use
+        // the same fused `mul_add` terms; the association is the only
+        // difference — see `kernel_matches_documented_order_bit_exact`.)
         let shapes: &[(usize, usize, usize)] = &[
             (1, 1, 1),
             (16, 16, 16),
