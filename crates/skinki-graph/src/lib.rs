@@ -208,14 +208,11 @@ impl GraphRetriever {
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0)));
         ranked
     }
-}
 
-impl RetrievalSystem for GraphRetriever {
-    fn name(&self) -> &str {
-        "graph-comention"
-    }
-
-    fn index(&mut self, corpus: &Corpus) {
+    /// Build only the co-mention graph structures. A cold bundle that already
+    /// builds BM25 can pair this with [`Self::search_with_bm25`] and avoid a
+    /// second lexical pass while preserving the same fused ranking.
+    pub fn index_graph_only(&mut self, corpus: &Corpus) {
         self.n_entries = corpus.entries.len();
 
         // Build the gazetteer: sorted entity names (deterministic phrase-id
@@ -258,17 +255,14 @@ impl RetrievalSystem for GraphRetriever {
         }
         self.postings = postings;
         self.entry_phrases = entry_phrases;
-
-        self.bm25 = Bm25::new();
-        self.bm25.index(corpus);
     }
 
-    fn search(&self, query: &str, k: usize) -> Vec<EntryId> {
+    pub fn search_with_bm25(&self, query: &str, k: usize, bm25: &Bm25) -> Vec<EntryId> {
         let query_lower = query.to_lowercase();
         let qph = self.phrases_in(&query_lower);
 
         let graph_ranked = self.graph_ranked(&qph);
-        let bm25_ranked = self.bm25.search(query, (k * 5).max(50));
+        let bm25_ranked = bm25.search(query, (k * 5).max(50));
 
         // Reciprocal Rank Fusion: fused[e] = sum over lists of 1 / (RRF_C + rank).
         let mut fused: BTreeMap<EntryId, f64> = BTreeMap::new();
@@ -282,6 +276,22 @@ impl RetrievalSystem for GraphRetriever {
         let mut ranked: Vec<(EntryId, f64)> = fused.into_iter().collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0)));
         ranked.into_iter().take(k).map(|(id, _)| id).collect()
+    }
+}
+
+impl RetrievalSystem for GraphRetriever {
+    fn name(&self) -> &str {
+        "graph-comention"
+    }
+
+    fn index(&mut self, corpus: &Corpus) {
+        self.index_graph_only(corpus);
+        self.bm25 = Bm25::new();
+        self.bm25.index(corpus);
+    }
+
+    fn search(&self, query: &str, k: usize) -> Vec<EntryId> {
+        self.search_with_bm25(query, k, &self.bm25)
     }
 }
 
@@ -642,14 +652,11 @@ impl RelationRetriever {
 
         intro_bytes + rec_bytes + index_bytes + ledger_bytes
     }
-}
 
-impl RetrievalSystem for RelationRetriever {
-    fn name(&self) -> &str {
-        "graph-relation"
-    }
-
-    fn index(&mut self, corpus: &Corpus) {
+    /// Build only typed-relation graph structures and the provenance ledger.
+    /// Use [`Self::search_with_bm25`] with a shared lexical index in bundle
+    /// builders that also expose BM25 directly.
+    pub fn index_graph_only(&mut self, corpus: &Corpus) {
         // Gazetteer: lowercased, deduped, sorted person names; venues from the
         // fixed VENUES list (already lowercase-friendly phrases).
         let mut persons: BTreeSet<String> = BTreeSet::new();
@@ -739,12 +746,9 @@ impl RetrievalSystem for RelationRetriever {
         self.intro_by_person = intro_by_person;
         self.rec_by_person = rec_by_person;
         self.rec_by_venue = rec_by_venue;
-
-        self.bm25 = Bm25::new();
-        self.bm25.index(corpus);
     }
 
-    fn search(&self, query: &str, k: usize) -> Vec<EntryId> {
+    pub fn search_with_bm25(&self, query: &str, k: usize, bm25: &Bm25) -> Vec<EntryId> {
         let query_lower = query.to_lowercase();
         let (mut qpersons, _qvenues) = self.entities_in(&query_lower);
 
@@ -811,7 +815,7 @@ impl RetrievalSystem for RelationRetriever {
         let mut graph_ranked: Vec<(EntryId, f64)> = score.into_iter().collect();
         graph_ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0)));
 
-        let bm25_ranked = self.bm25.search(query, (k * 5).max(50));
+        let bm25_ranked = bm25.search(query, (k * 5).max(50));
 
         // Reciprocal Rank Fusion, identical scheme to `GraphRetriever::search`.
         let mut fused: BTreeMap<EntryId, f64> = BTreeMap::new();
@@ -825,6 +829,22 @@ impl RetrievalSystem for RelationRetriever {
         let mut ranked: Vec<(EntryId, f64)> = fused.into_iter().collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap().then(a.0.cmp(&b.0)));
         ranked.into_iter().take(k).map(|(id, _)| id).collect()
+    }
+}
+
+impl RetrievalSystem for RelationRetriever {
+    fn name(&self) -> &str {
+        "graph-relation"
+    }
+
+    fn index(&mut self, corpus: &Corpus) {
+        self.index_graph_only(corpus);
+        self.bm25 = Bm25::new();
+        self.bm25.index(corpus);
+    }
+
+    fn search(&self, query: &str, k: usize) -> Vec<EntryId> {
+        self.search_with_bm25(query, k, &self.bm25)
     }
 }
 
@@ -1103,6 +1123,25 @@ mod tests {
     }
 
     #[test]
+    fn graph_only_with_shared_bm25_matches_standard_search() {
+        let corpus = two_hop_corpus();
+        let query = "What book did the person Anna introduced me to recommend?";
+
+        let mut standard = GraphRetriever::new();
+        standard.index(&corpus);
+
+        let mut bm25 = Bm25::new();
+        bm25.index(&corpus);
+        let mut shared = GraphRetriever::new();
+        shared.index_graph_only(&corpus);
+
+        assert_eq!(
+            standard.search(query, 4),
+            shared.search_with_bm25(query, 4, &bm25)
+        );
+    }
+
+    #[test]
     fn name_method_is_stable() {
         let g = GraphRetriever::new();
         assert_eq!(g.name(), "graph-comention");
@@ -1262,6 +1301,25 @@ mod tests {
 
         let out3 = r1.search(query, 4);
         assert_eq!(out1, out3);
+    }
+
+    #[test]
+    fn relation_graph_only_with_shared_bm25_matches_standard_search() {
+        let corpus = two_chain_corpus();
+        let query = "What book was recommended by the person Anna introduced me to?";
+
+        let mut standard = RelationRetriever::new();
+        standard.index(&corpus);
+
+        let mut bm25 = Bm25::new();
+        bm25.index(&corpus);
+        let mut shared = RelationRetriever::new();
+        shared.index_graph_only(&corpus);
+
+        assert_eq!(
+            standard.search(query, 4),
+            shared.search_with_bm25(query, 4, &bm25)
+        );
     }
 
     #[test]
