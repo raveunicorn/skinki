@@ -20,7 +20,7 @@ layered design and budgets.
 | Stage | Focus | Status |
 | --- | --- | --- |
 | 0 | Eval harness + synthetic corpus (the measuring stick) | **Done** |
-| 1 | Compression + retrieval-quality substrate | **Compression done; embedder-quality track still open.** RaBitQ/IVF is gated. 1B static distillation is closed/falsified; 1C-B pure-Rust encoder is built and trend-closed (bge-small ceiling); 1D multilingual-e5-small is closed negative on the full row (`rrf` 0.160 vs 0.30 bar). Next: stronger encoder/retrieval strategy. |
+| 1 | Compression + retrieval-quality substrate | **Compression done; embedder-quality track still open.** RaBitQ/IVF is gated. 1B static distillation is closed/falsified; 1C-B pure-Rust encoder is built and trend-closed (bge-small ceiling); 1D multilingual-e5-small is closed negative on the full row (`rrf` 0.160 vs 0.30 bar). Next: 1E full-D1 larger/base-class encoder bakeoff before any port or acceleration. |
 | 2 | Storage substrate (Lance/Cozo) + append-only L0; maybe a `.kx` codec | **Done** (+ 2B durability) |
 | 3 | Incremental local GraphRAG (deterministic-first, two-tier; venue-anchored multi-hop) | **Closed — graph is substrate, not a retriever (honest).** 2.5–3× BM25 on synthetic, ledger-wired + 3C assembler, gated; but on **two** real benchmarks (LoCoMo, LongMemEval) the graph does **not** beat BM25, and a semantic embedder (EmbeddingGemma) is SOTA (+51% over BM25 on LongMemEval multi-session). Default retriever → EmbeddingGemma; graph retained for structure (ledger/provenance/staleness) into Stage 5. Multi-hop gap remains open ([`STAGE_3.md`](specs/STAGE_3.md)) |
 | 4 | "Sleep" consolidation engine (idle + on-power background jobs) | **Done** (policy proven in simulation; real jobs land at Stage 3/5) |
@@ -105,6 +105,10 @@ quality and serving path that feeds the index.
   Fable's cold-indexing work makes these measurements practical and remains
   useful for future models, but e5-small is not the served default and should
   not receive the SDOT/int8 acceleration ticket.
+- **1E full-D1 encoder bakeoff — proposed next.** Measure stronger/base-class
+  candidates on the full D1 row through replayed embeddings first, then port
+  only a quality winner through `SKENC001`. Trend rows are smoke only after the
+  e5-small transfer failure.
 
 ## Stage 2 — Storage substrate (pure-Rust, gate passed) — Done
 
