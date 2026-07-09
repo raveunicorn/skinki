@@ -119,7 +119,13 @@ the same in-engine Rust path: it looked promising on the 41q/201k trend row
 **semantic-real 0.152, `rrf(bm25+real)` 0.160 vs the 0.30 target**. Fable's
 cold-indexing work is still valuable, but e5-small is not a served retriever;
 the next Stage-1 move is a stronger encoder/retrieval strategy, not SDOT
-acceleration of e5-small.
+acceleration of e5-small. The 1D diagnosis — a model *weight-class* problem
+(e5-small delivers a consistent ~1.15× over BM25; the bar needs ~2.2×), not a
+machinery problem — points to **Stage 1E**: a 768-dim MIT/Apache base-class
+encoder (multilingual-e5-base) through the *unchanged* proven forward pass and
+artifact, before inventing (Gemma bridge/port, int8). The 1D lesson is encoded
+as an invariant: the cheap trend row is an **abort** signal, never a **pass**
+signal (it was a misleading pass for e5-small: 0.423 trend → 0.160 full).
 
 **The multi-hop gap is partially closed — by retrieval strategy, not graph.**
 Coarse-to-fine (instance-level embedding + targeted fine search) lifts
