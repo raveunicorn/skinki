@@ -20,7 +20,7 @@ layered design and budgets.
 | Stage | Focus | Status |
 | --- | --- | --- |
 | 0 | Eval harness + synthetic corpus (the measuring stick) | **Done** |
-| 1 | Compression + retrieval-quality substrate | **Compression done; embedder-quality track still open.** RaBitQ/IVF is gated. 1B static distillation is closed/falsified; 1C-B pure-Rust encoder is built and trend-closed (bge-small ceiling); 1D multilingual-e5-small is closed negative on the full row (`rrf` 0.160 vs 0.30 bar). Next: stronger encoder/retrieval strategy. |
+| 1 | Compression + retrieval-quality substrate | **Compression done; embedder-quality track still open.** RaBitQ/IVF is gated. 1B static distillation is closed/falsified; 1C-B pure-Rust encoder is built and trend-closed (bge-small ceiling); 1D multilingual-e5-small is closed negative on the full row (`rrf` 0.160 vs 0.30 bar). Next: **Stage 1E — base-class encoder (768-dim, MIT/Apache) through the proven machinery** ([`STAGE_1E`](specs/STAGE_1E_BASE_CLASS_ENCODER.md)); the 1D lesson (trend row is a cheap abort, never a pass) is encoded as an invariant. |
 | 2 | Storage substrate (Lance/Cozo) + append-only L0; maybe a `.kx` codec | **Done** (+ 2B durability) |
 | 3 | Incremental local GraphRAG (deterministic-first, two-tier; venue-anchored multi-hop) | **Closed — graph is substrate, not a retriever (honest).** 2.5–3× BM25 on synthetic, ledger-wired + 3C assembler, gated; but on **two** real benchmarks (LoCoMo, LongMemEval) the graph does **not** beat BM25, and a semantic embedder (EmbeddingGemma) is SOTA (+51% over BM25 on LongMemEval multi-session). Default retriever → EmbeddingGemma; graph retained for structure (ledger/provenance/staleness) into Stage 5. Multi-hop gap remains open ([`STAGE_3.md`](specs/STAGE_3.md)) |
 | 4 | "Sleep" consolidation engine (idle + on-power background jobs) | **Done** (policy proven in simulation; real jobs land at Stage 3/5) |
@@ -84,7 +84,7 @@ layered design and budgets.
   Stage-3 co-design item (multi-bit residuals / OPQ), not a Stage-1 blocker.
   Real-model retrieval validation moved into the Stage-1 quality track below.
 
-### Stage 1 quality track — 1B / 1C-B / 1D
+### Stage 1 quality track — 1B / 1C-B / 1D / 1E
 
 The compression/index layer is done; the open Stage-1 work is the embedder
 quality and serving path that feeds the index.
@@ -105,6 +105,16 @@ quality and serving path that feeds the index.
   Fable's cold-indexing work makes these measurements practical and remains
   useful for future models, but e5-small is not the served default and should
   not receive the SDOT/int8 acceleration ticket.
+- **1E base-class encoder — specced, ready to build.** The 1D diagnosis is a
+  model *weight-class* problem (e5-small delivers a consistent ~1.15× over BM25;
+  the bar needs ~2.2×), not a machinery problem (parity 1.0000000, prefixes
+  applied, fusion beats both parents). **Stage 1E** pushes the existing block
+  one weight class up — a 768-dim MIT/Apache base-class encoder
+  (multilingual-e5-base primary) through the *unchanged* forward pass, artifact,
+  and harness — before inventing (Gemma bridge/port, int8). The 1D lesson is
+  encoded as an invariant: the trend row is a cheap **abort**, never a **pass**
+  (it was a misleading pass signal for e5-small). See
+  [`STAGE_1E`](specs/STAGE_1E_BASE_CLASS_ENCODER.md).
 
 ## Stage 2 — Storage substrate (pure-Rust, gate passed) — Done
 

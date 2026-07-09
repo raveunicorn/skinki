@@ -52,9 +52,10 @@ current state, not the original wish-list.
 | 2 | [`STAGE_1B_STATIC_EMBEDDER.md`](STAGE_1B_STATIC_EMBEDDER.md) | static-distilled semantic embedder experiment | **Closed/falsified** — static artifacts stay as measurement instruments only |
 | 2b | [`STAGE_1C_B_PURE_RUST_ENCODER.md`](STAGE_1C_B_PURE_RUST_ENCODER.md) | pure-Rust BERT-class encoder + `SKENC001` | **Closed/trend-closed** — machinery kept, bge-small not served |
 | 2c | [`STAGE_1D_RETRIEVAL_QUALITY.md`](STAGE_1D_RETRIEVAL_QUALITY.md) | multilingual/mid-size encoder quality, latency, serving decision | **e5-small closed negative** — full-row `rrf` 0.160 vs 0.30 bar; next model/strategy decision needed |
+| 2d | [`STAGE_1E_BASE_CLASS_ENCODER.md`](STAGE_1E_BASE_CLASS_ENCODER.md) | base-class encoder (768-dim, MIT/Apache) through the unchanged `SKENC001` v2 + proven forward — the diagnosed next step after 1D (weight class, not machinery) | **Specced, ready to build.** Trend row is a cheap abort, never a pass (the 1D lesson) |
 | 3 | [`STAGE_6B_AGENT_MEMORY.md`](STAGE_6B_AGENT_MEMORY.md) | MCP write path (`remember`), staleness-annotated results, `memory_asof`, full insight surface | can proceed on current hash/graph path; served semantic retriever still unresolved |
 | 4 | [`STAGE_0B_V3_CORPUS.md`](STAGE_0B_V3_CORPUS.md) | V3: LLM-paraphrased corpus, artifact-frozen — measures the template-coupling transfer gap | — (parallel-safe) |
-| 5 | [`STAGE_5D_LAW1_EVAL.md`](STAGE_5D_LAW1_EVAL.md) | **the Law-1 experiment**: end-to-end QA, small model ± substrate, on LongMemEval | 1D served-retriever decision; 5B's judgment seam |
+| 5 | [`STAGE_5D_LAW1_EVAL.md`](STAGE_5D_LAW1_EVAL.md) | **the Law-1 experiment**: end-to-end QA, small model ± substrate, on LongMemEval | 1D/1E served-retriever decision; 5B's judgment seam |
 | 6 | [`STAGE_2C_INTEGRITY.md`](STAGE_2C_INTEGRITY.md) | from-scratch SHA-256 + CRC record frames + scrub-on-sleep job | — (parallel-safe) |
 | 7 | [`STAGE_4B_SALIENCE.md`](STAGE_4B_SALIENCE.md) | reinforcement/decay ranking, near-dup consolidation, forgetting-as-demotion | 1D, 6B |
 
@@ -124,8 +125,8 @@ decisions pre-made and isolated as frontier-only tickets):
   delegated later.
 
 Stage 0 and Stage 1's compression/index layer are complete. Stage 1's
-retrieval-quality subtrack is still active under 1D; do not read "Stage 1 done"
-as "the served semantic retriever is final."
+retrieval-quality subtrack is still active under 1E (after 1B/1C-B/1D); do not
+read "Stage 1 done" as "the served semantic retriever is final."
 
 **Design notes (pre-code, "do the math before the code"):**
 
