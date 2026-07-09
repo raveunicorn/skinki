@@ -20,11 +20,11 @@ layered design and budgets.
 | Stage | Focus | Status |
 | --- | --- | --- |
 | 0 | Eval harness + synthetic corpus (the measuring stick) | **Done** |
-| 1 | Memory compression PoC (RaBitQ + Model2Vec, two-stage, mmap) | **Done** (re-validated at scale; IVF closes the scan-cost gap, gated) |
+| 1 | Compression + retrieval-quality substrate | **Compression done; embedder-quality track still open.** RaBitQ/IVF is gated. 1B static distillation is closed/falsified; 1C-B pure-Rust encoder is built and trend-closed (bge-small ceiling); 1D multilingual-e5-small is closed negative on the full row (`rrf` 0.160 vs 0.30 bar). Next: stronger encoder/retrieval strategy. |
 | 2 | Storage substrate (Lance/Cozo) + append-only L0; maybe a `.kx` codec | **Done** (+ 2B durability) |
 | 3 | Incremental local GraphRAG (deterministic-first, two-tier; venue-anchored multi-hop) | **Closed — graph is substrate, not a retriever (honest).** 2.5–3× BM25 on synthetic, ledger-wired + 3C assembler, gated; but on **two** real benchmarks (LoCoMo, LongMemEval) the graph does **not** beat BM25, and a semantic embedder (EmbeddingGemma) is SOTA (+51% over BM25 on LongMemEval multi-session). Default retriever → EmbeddingGemma; graph retained for structure (ledger/provenance/staleness) into Stage 5. Multi-hop gap remains open ([`STAGE_3.md`](specs/STAGE_3.md)) |
 | 4 | "Sleep" consolidation engine (idle + on-power background jobs) | **Done** (policy proven in simulation; real jobs land at Stage 3/5) |
-| 5 | Insight Engine (deterministic discovery + FDR + cite-or-silence) | **Structural-bridge detection earned + gated** — `skinki-insight` ships the frozen interface, BH-FDR validation, cite-or-silence, the reference detector + naive contrast; after the D0 corpus fix (rare bridge names, RNG-neutral) the reference clears the full keystone gate on 2 seeds (recall/precision 1.000, false-insight 0, apophenia 0, 0 uncited). Temporal/contradiction detectors + replayed-LLM narrator remain (delegatable). See [`STAGE_5.md`](specs/STAGE_5.md) |
+| 5 | Insight Engine (deterministic discovery + FDR + cite-or-silence) | **Synthetic keystone gated across three detector families.** Structural bridges, temporal lead/lag, and contradictions all run through cite-or-silence with 0 uncited claims and 0 false-insight/apophenia on the asserted seeds. 5C core hardening landed; next frontier is real-data transfer (5B) and Law-1 end-to-end QA (5D). |
 | 6 | Portable `skinki` (C-ABI/FFI + Python binding; MCP server) | **Done** (C-ABI + Python parity gated; `skinki-mcp` ships search + context-assembler to agents; Swift → Stage 7) |
 | 7 | skinki macOS product integration (the wrapper) | Planned |
 
@@ -49,7 +49,7 @@ layered design and budgets.
   overlap alone. The legacy generator remains behind `--difficulty v1`, pinned
   byte-for-byte by a golden-hash test.
 
-## Stage 1 — Memory compression PoC (first "impossible task") — Done
+## Stage 1 — Compression done; retrieval-quality track active
 
 - **Hypothesis:** 5M units are searchable within the RAM/latency budget via
   **RaBitQ + Model2Vec first-pass**, with recall >= 95% vs full-precision.
@@ -82,7 +82,29 @@ layered design and budgets.
   N-independent. IVF does **not** rescue the synthetic adversarial extreme (huge
   blobs k-means can't sub-partition) — that stays the stress ceiling and a
   Stage-3 co-design item (multi-bit residuals / OPQ), not a Stage-1 blocker.
-  Real-EmbeddingGemma validation remains the other open follow-up.
+  Real-model retrieval validation moved into the Stage-1 quality track below.
+
+### Stage 1 quality track — 1B / 1C-B / 1D
+
+The compression/index layer is done; the open Stage-1 work is the embedder
+quality and serving path that feeds the index.
+
+- **1B static embedder — closed/falsified.** `SKEMB001`, WordPiece, static
+  artifacts, harness/MCP `--embedder static:<path>`, and RRF instrumentation
+  landed. The D1 result was negative: static token-vector tables top out below
+  BM25 on LongMemEval full-pool multi-session, so static is an instrument, not
+  the served default.
+- **1C-B pure-Rust encoder — closed/trend-closed.** `SKENC001`,
+  `skinki-encoder`, converter, goldens, query/passage prefix support, and
+  `encoder-embed` landed. bge-small proved the machinery but not the quality
+  bar, so the sidecar fallback was rejected as a product shape and the next
+  move became 1D.
+- **1D multilingual-e5-small — closed negative.** e5 was parity-green and beat
+  bge-small on the 41q/201k trend row, but the full 594k/121q D2 row failed:
+  semantic-real recall@10 0.152 and `rrf(bm25+real)` 0.160 vs the 0.30 bar.
+  Fable's cold-indexing work makes these measurements practical and remains
+  useful for future models, but e5-small is not the served default and should
+  not receive the SDOT/int8 acceleration ticket.
 
 ## Stage 2 — Storage substrate (pure-Rust, gate passed) — Done
 

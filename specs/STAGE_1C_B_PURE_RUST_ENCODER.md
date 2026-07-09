@@ -13,8 +13,10 @@
 > (same seam, same logs, same bars — A remains a drop-in fallback by
 > construction).
 
-- **Status:** draft — T0 (kill-switch bench) is runnable now; D1 (go/no-go
-  on T0 numbers) gates the encoder core.
+- **Status:** closed / trend-closed. T0, D1, T1, T2, the embedding dump path,
+  `EmbedderSpec::Encoder`, and the bge-small D2 trend verdict are done. The
+  pure-Rust encoder machinery is kept; bge-small is not the served model. The
+  active continuation is [`STAGE_1D_RETRIEVAL_QUALITY.md`](STAGE_1D_RETRIEVAL_QUALITY.md).
 - **Owner of the design (frontier/human):** frontier; the B-first strategy
   itself was decided by the human (2026-07-04). D1 go/no-go is frontier +
   human.
@@ -137,10 +139,10 @@ impl BatchEmbedder for RustEncoder { /* per-sequence forward, threads across
 | ✅ **D1 go/no-go** on T0 numbers (+ backfill/latency projections recomputed from measured rates) | design | **frontier + human** | **GO — decided by the human 2026-07-04, on M1 Max data.** T0's question was "is a hand-written encoder worth building": worst-case sustained p5 = 46.94 GF/s with means ≈ 57–61 across shapes answers yes with margin. The M1 Air of §1's original sizing is **not available and not expected** — recorded as a measurement gap, not hidden: the dev/serving machine *is* the Max; Air-class passive-cooling hardware would land ~15–30% lower (possibly at/under the bar) and must be re-benched (one `encoder-bench --gemm --full-run --threads 4 --assert-gate` run) before any Stage-7 claim on such hardware. T3's backfill/latency projections use the measured Max rates **with an explicit ~25% derating column** for Air-class targets. T1/T2 unblocked. |
 | ✅ **T1** `SKENC001` format + `convert_encoder_to_skenc.py` + toy artifact + golden dumps (layer + e2e) | impl | cheaper | loader tests + toy goldens green — **done.** `format.rs`: bounds-checked reader (truncation/overflow/trailing-garbage/missing-specials all `InvalidData`, never a panic — 1B loader lessons applied from day one), tensors decoded once into a contiguous f32 arena (safe Rust cannot view mmap bytes as `&[f32]`; ~130 MB arena is inside the §2 RSS budget), W stored `[in][out]` so the forward runs through `gemm` with no transposes, `pos_type_emb` pre-summed with the token-type-0 row. WordPiece tokenizer extracted from `static_embed` into shared `skinki_vector::wordpiece` (1B behavior unchanged — 58 tests green). Converter dumps: 13-state layer goldens for a fixed probe (bug localization per layer) + 32-string e2e goldens with Rust-convention tokenization. Real bge-small artifact converted (133,168,692 bytes) and loads (`real_artifact_loads`, `#[ignore]`); toy fixture (22.6 KB) committed + byte-reproducible |
 | ✅ **T2 encoder core**: embeddings→12×(MHA+FFN+LN)→pooling, in-crate transcendentals, fixed-order reductions | impl | **frontier** | **done.** `math.rs`: `exp64` (range reduction + Horner Taylor, rel err < 1e-13, asserted) + `erf64` (A&S 7.1.26, abs err < 1.5e-7) + exact GELU + f64-statistics LayerNorm/softmax — zero `libm` on the forward path. `encoder.rs`: full BERT forward over the T1 arena, every projection via the T0 `gemm` with the pre-filled-bias trick, per-head attention with fixed j-order accumulation, threads partition sequences only. **Measured parity vs the torch teacher (real bge-small artifact): per-layer max abs diff ≤ 4.1e-6 across all 13 states (tolerance 5e-3 — three orders of margin); e2e min cosine over the 32 goldens = 1.0000000 (bar ≥ 0.999).** Determinism: byte-equal across runs, thread counts (1 vs 4), trait objects; Rust-self toy goldens committed for CI regression. **Honest latency note for D2:** warm single query (22 ids) p95 ≈ 67 ms vs the 50 ms bar (small-M GEMM + gelu are the known levers); 128-token turn ≈ 335 ms single-thread → ~12 turns/s at 4 threads (backfill bar ≥ 6 clears ×2) |
-| T3 batch driver: per-sequence forward, deterministic thread fan-out, Stage-4 backfill job (interruptible/resumable) | impl | cheaper | thread-invariance test green; backfill-sim numbers recorded |
-| T4 wiring: `EmbedderSpec::Encoder`, artifact-log writer (1C §3 format, `model_info` = SKENC stamp), `hybrid-rrf`, replay eval path | impl | cheaper | replayed D1 row runs end-to-end |
-| **D2 quality/latency verdict** on §2 bars; served-default decision; A-fallback executed if failed | design | **frontier** | numbers + decision recorded here |
-| T5 (parked until D2 passes) multilingual escalation: SentencePiece Unigram tokenizer port (~500 lines) + multilingual-e5-small artifact (mean pooling flag; 250k-vocab embedding table mmap) | impl | frontier-reviewed | tokenizer parity vs HF on a golden corpus; D1-row rerun recorded |
+| ✅ **T3 batch/dump path**: per-sequence deterministic fan-out + `encoder-embed` replay dump path | impl | cheaper | done; output is byte-identical across thread counts and feeds the existing pooled eval replay path |
+| ✅ **T4 wiring**: `EmbedderSpec::Encoder`, query/passage prefix route, `rrf(bm25+real)` replay column | impl | cheaper | done/absorbed into 1C-B and 1D T1/T2; the D2 trend row runs end-to-end |
+| ✅ **D2 quality/latency verdict** on bge-small bars; served-default decision | design | **frontier** | done below: bge-small fails by trend, hash remains default, 1D is the continuation |
+| ✅ **T5 promoted to 1D**: multilingual escalation via Unigram + multilingual-e5-small artifact | impl | frontier-reviewed | done as 1D K0/T1/T2; see `STAGE_1D_RETRIEVAL_QUALITY.md` |
 
 ### D2 verdict (2026-07-05, human decision: trend-close)
 
@@ -194,6 +196,13 @@ until a 1D candidate clears its bars. Deliverables kept: `skinki-encoder`
 (parity 1.0000000, byte-deterministic), `SKENC001` + converter + goldens,
 `encoder-embed` dump CLI, the prefix finding, the `rrf(bm25+real)`
 instrument, and the prefix-evaluability of pooled backfills.
+
+**Perf update (2026-07-08):** Fable's cold-indexing work keeps the same
+quality/determinism contract but makes the 1D measurements practical. The
+profiling record in [`PERF_COLD_INDEX_10X.md`](PERF_COLD_INDEX_10X.md) reports
+the 201k encoder row dropping from ~18.5h to ~1.4h on the dev box and confirms
+teacher parity / thread-count determinism remain green. This does not reopen
+bge-small as a served model; it unblocks the full e5 D2 run in 1D.
 
 ## 7. Relationship to `STAGE_1C` (variant A)
 

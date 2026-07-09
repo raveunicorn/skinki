@@ -6,7 +6,9 @@
 > gate must stay green with unchanged budgets; this stage only adds tests and
 > fixes defects those tests expose.
 
-- **Status:** ready to build
+- **Status:** core hardening closed (PR #8). T1-T4 are landed and asserted by
+  tests/gates. The remaining scale-report / soak / cleanup rows are retained as
+  backlog notes; they are not blockers for Stage 1D retrieval work.
 - **Owner of the design (frontier/human):** frontier — every fix below is fully
   designed here (exact algorithms given); nothing is left to implementer taste.
 - **Delegatable to (cheaper model):** **yes, all tickets** — the subtle parts
@@ -138,4 +140,4 @@ pub fn jsonl_replay<T: DeserializeOwned>(path: &Path) -> io::Result<Vec<T>>;
 - Real-data detectors and the oracle judge (Stage 5B).
 - The V3 corpus (Stage 0B) — T4's null-corpus test uses day-shuffling, not V3.
 - Ledger/store hash upgrades (Stage 2C).
-- Any retrieval work (Stage 1B).
+- Any retrieval work (Stage 1D and later).

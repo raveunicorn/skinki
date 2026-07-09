@@ -40,20 +40,23 @@ for the 20% that matters*.
 | 6 FFI/bindings | Low-med | Low-med | cheaper, frontier reviews `unsafe` | C-ABI, cbindgen, PyO3, Swift bridge. |
 | 7 macOS app | Medium (UX) | Medium | cheaper boilerplate, human UX | SwiftUI scaffolding is delegatable; interaction design is not. |
 
-## Batch 2026-07 — execution order (from `../REVIEW_FRONTIER_2026_07.md`)
+## Batch 2026-07 — current execution state
 
-Seven specs, written to be delegated **in this order** (each names its own
-gate; later ones consume earlier ones' outputs):
+This batch started from `../REVIEW_FRONTIER_2026_07.md`, but the Stage-1
+embedder path has since split into measured sub-stages. Read this table as the
+current state, not the original wish-list.
 
 | # | Spec | What it delivers | Depends on |
 | --- | --- | --- | --- |
-| 1 | [`STAGE_5C_HARDENING.md`](STAGE_5C_HARDENING.md) | bug fixes (candidate-id collision, Unicode word boundaries, per-family FDR, honest temporal null), insight scale gate, store test soak, cleanups | — |
-| 2 | [`STAGE_1B_STATIC_EMBEDDER.md`](STAGE_1B_STATIC_EMBEDDER.md) | pure-Rust static-distilled semantic embedder + IVF-backed serving + coarse-to-fine productionized | 5C T7 |
-| 3 | [`STAGE_6B_AGENT_MEMORY.md`](STAGE_6B_AGENT_MEMORY.md) | MCP write path (`remember`), staleness-annotated results, `memory_asof`, full insight surface | 5C T1 |
+| 1 | [`STAGE_5C_HARDENING.md`](STAGE_5C_HARDENING.md) | core insight hardening: candidate-id namespacing, Unicode boundaries, per-family FDR, temporal null fix | **Closed for the correctness-critical PR #8 scope** |
+| 2 | [`STAGE_1B_STATIC_EMBEDDER.md`](STAGE_1B_STATIC_EMBEDDER.md) | static-distilled semantic embedder experiment | **Closed/falsified** — static artifacts stay as measurement instruments only |
+| 2b | [`STAGE_1C_B_PURE_RUST_ENCODER.md`](STAGE_1C_B_PURE_RUST_ENCODER.md) | pure-Rust BERT-class encoder + `SKENC001` | **Closed/trend-closed** — machinery kept, bge-small not served |
+| 2c | [`STAGE_1D_RETRIEVAL_QUALITY.md`](STAGE_1D_RETRIEVAL_QUALITY.md) | multilingual/mid-size encoder quality, latency, serving decision | **e5-small closed negative** — full-row `rrf` 0.160 vs 0.30 bar; next model/strategy decision needed |
+| 3 | [`STAGE_6B_AGENT_MEMORY.md`](STAGE_6B_AGENT_MEMORY.md) | MCP write path (`remember`), staleness-annotated results, `memory_asof`, full insight surface | can proceed on current hash/graph path; served semantic retriever still unresolved |
 | 4 | [`STAGE_0B_V3_CORPUS.md`](STAGE_0B_V3_CORPUS.md) | V3: LLM-paraphrased corpus, artifact-frozen — measures the template-coupling transfer gap | — (parallel-safe) |
-| 5 | [`STAGE_5D_LAW1_EVAL.md`](STAGE_5D_LAW1_EVAL.md) | **the Law-1 experiment**: end-to-end QA, small model ± substrate, on LongMemEval | 1B; 5B's judgment seam |
+| 5 | [`STAGE_5D_LAW1_EVAL.md`](STAGE_5D_LAW1_EVAL.md) | **the Law-1 experiment**: end-to-end QA, small model ± substrate, on LongMemEval | 1D served-retriever decision; 5B's judgment seam |
 | 6 | [`STAGE_2C_INTEGRITY.md`](STAGE_2C_INTEGRITY.md) | from-scratch SHA-256 + CRC record frames + scrub-on-sleep job | — (parallel-safe) |
-| 7 | [`STAGE_4B_SALIENCE.md`](STAGE_4B_SALIENCE.md) | reinforcement/decay ranking, near-dup consolidation, forgetting-as-demotion | 1B, 6B |
+| 7 | [`STAGE_4B_SALIENCE.md`](STAGE_4B_SALIENCE.md) | reinforcement/decay ranking, near-dup consolidation, forgetting-as-demotion | 1D, 6B |
 
 [`STAGE_5B_REAL_INSIGHT.md`](STAGE_5B_REAL_INSIGHT.md) (already specced)
 slots between 4 and 5: build its T2 judgment seam early (5D reuses it), run
@@ -120,8 +123,9 @@ decisions pre-made and isolated as frontier-only tickets):
 - Stage 7 (macOS app) — parked; interaction design is human, boilerplate can be
   delegated later.
 
-Stages 0 and 1 are complete; their "specs" are the shipped code, tests, and the
-results documented in [`../README.md`](../README.md).
+Stage 0 and Stage 1's compression/index layer are complete. Stage 1's
+retrieval-quality subtrack is still active under 1D; do not read "Stage 1 done"
+as "the served semantic retriever is final."
 
 **Design notes (pre-code, "do the math before the code"):**
 

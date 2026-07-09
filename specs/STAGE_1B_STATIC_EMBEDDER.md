@@ -8,7 +8,11 @@
 > serves what the benchmarks measured: a real semantic embedder + the Stage-1
 > IVF index + coarse-to-fine.
 
-- **Status:** ready to build
+- **Status:** closed — D1 falsified the static-distillation hypothesis. The
+  shipped code remains useful as a parity/format/fusion instrument, but static
+  token-vector artifacts are not the served retriever and the optimistic IVF /
+  coarse-to-fine productionization tickets are deliberately not pursued until a
+  discriminative base encoder exists.
 - **Owner of the design (frontier/human):** frontier — the artifact format, the
   tokenizer contract, and the parity-gate design are locked below. The
   distillation recipe is standard (Model2Vec).
@@ -231,16 +235,17 @@ reference: 0.438); it gets its own frontier spec. Self-distillation
 (full-forward from bge-small) is now pointless — potion *is* that, done
 well, and it ceilings at 0.116.
 
-## 7. Definition of done
+## 7. Close-out
 
-- [ ] Parity + goldens + IVF integration green in CI; LongMemEval margins
-      measured, recorded here, and locally gated.
-- [ ] `skinki-mcp` default retriever is the static embedder (hash relegated to
-      `--embedder hash`); README honest-status row updated with the measured
-      number ("the served retriever" vs "the benchmarked retriever" gap closed).
-- [ ] `cargo test`, `clippy -D warnings`, `cargo fmt --check` clean.
-- [ ] Decision recorded: static distillation sufficient (by what margin) or
-      sidecar fallback (why).
+- [x] Parity + goldens for the committed toy path are green in CI; the real
+      artifact parity test is `#[ignore]` because the model-weight artifact is
+      regenerated locally and not committed.
+- [x] LongMemEval margins are measured and recorded here: static distillation
+      is insufficient by a wide margin (0.090 vs BM25 0.134 and the 0.22 bar).
+- [x] `skinki-mcp` **does not** default to the static embedder. Hash remains the
+      honest served default until a 1D encoder clears the quality/latency bars.
+- [x] Decision recorded: static distillation is closed/falsified; the successor
+      is 1C-B/1D, not more static tuning.
 
 ## 8. Out of scope
 

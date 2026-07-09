@@ -136,57 +136,27 @@ Work them **in order**; every ticket table inside marks its tier. Start here:
      first config to beat the yardstick on the D1 row; ndcg +12%; answer@10
      −7%. NOT flipped to served default (margin within noise on 121 queries;
      artifact not shipped); `hybrid-rrf` column ships as an instrument.
-     Next: `STAGE_1C_SIDECAR_EMBEDDER.md` — fusion is the pattern to
-     re-apply once a discriminative base lands.
-2b. `STAGE_1C_B_PURE_RUST_ENCODER.md` — the real sentence encoder, **pure-Rust
-   variant, human-decided B-first (2026-07-04)**.
-   - **T0 done** — kill-switch GEMM bench (`crates/skinki-encoder`,
-     `encoder-bench --gemm`): M1 Max 10-min sustained, 4-thread min p5 =
-     **46.94 GF/s ≥ 40 bar, GATE PASS** (means ≈ 57–61).
-   - **D1 done — GO** (human, 2026-07-04, on Max data; Air unavailable —
-     gap + ~25% derating rule recorded in the spec's D1 row).
-   - **T1 done (PR #18)** — `SKENC001` format + bounds-checked loader,
-     `scripts/convert_encoder_to_skenc.py` (real bge-small converted,
-     133 MB, gitignored), layer + e2e goldens committed, toy fixture,
-     WordPiece extracted to shared `skinki_vector::wordpiece`.
-   - **T2 done (PR #19)** — pure-Rust forward pass (`math.rs` no-libm
-     exp64/erf64/GELU + f64 LN/softmax stats; `encoder.rs` gemm-based
-     MHA/FFN, threads across sequences only). **Teacher parity: per-layer
-     ≤ 4.1e-6, e2e min cosine 1.0000000 over the 32 goldens.** Recorded
-     for D2: warm 22-id query p95 ≈ 67 ms vs the 50 ms bar; ~12 turns/s
-     at 4 threads (backfill bar ≥ 6 clears ×2).
-   - **Open, delegatable behind the committed goldens/gates:**
-     - **T3a embeddings dump CLI** (the D2 unblocker): harness subcommand
-       `encoder-embed --artifact <skenc> --texts <dir from --dump-texts>
-       --out <f32> --threads N` producing files byte-compatible with the
-       existing `--embeddings-file`/`--query-embeddings-file` replay path
-       of `longmemeval-eval --pooled`. Acceptance: byte-identical output
-       for any `--threads`; round-trips through the pooled eval on a
-       `--limit` smoke; clippy/fmt/tests green.
-       **Status: DONE (2026-07-04).** `encoder-embed` subcommand shipped in
-       `skinki-harness` (reads `<texts>/entries.json` + `queries.json`,
-       writes `<out>/entries.f32` + `queries.f32` flat f32 LE). Verified by
-       4 unit tests including byte-identical 1-vs-4-thread dump and
-       `read_embeddings_file` round-trip. D2 can now run: produce a dump
-       from `encoder_bge_small.skenc` over the pooled `--dump-texts` output,
-       then replay via `longmemeval-eval --pooled --embeddings-file
-       <out>/entries.f32 --query-embeddings-file <out>/queries.f32`.
-     - **T3b query-latency perf pass** (before the D2 latency verdict):
-       p95 ≤ 50 ms warm on ≤ 32-token queries **without changing any
-       committed golden byte** (`encoder_toy_golden.f32` + teacher-parity
-       suite are the regression gate; determinism properties must stay
-       green). Known levers: small-M GEMM path, cheaper deterministic
-       gelu. If a lever changes numerics, STOP — that is a frontier
-       decision, not a perf tweak.
-     - **T4 wiring**: `EmbedderSpec::Encoder { path }` (`encoder:<path>`,
-       loud parse errors like `static:`), `hybrid-rrf` over the encoder,
-       and the append-only emb artifact log per `STAGE_1C` §3 (base64
-       f32 LE + `model_info` stamp, `rebuild(log)` determinism tests).
-     - **D2 quality verdict — frontier + human, NOT delegatable**: run
-       the D1 row from dumped embeddings (single-shot + RRF columns),
-       record margins vs the ≥ 0.22 / ≥ 0.30 bars and the 0.438
-       semantic-real reference, take the served-default decision.
-     A stays the recorded fallback if D2 fails.
+     The successor path went through 1C-B and is now 1D; fusion is the pattern
+     to re-apply once a discriminative encoder base lands.
+2b. `STAGE_1C_B_PURE_RUST_ENCODER.md` — **closed/trend-closed.** The pure-Rust
+   encoder, `SKENC001`, converter, goldens, `encoder-embed`, `EmbedderSpec::Encoder`,
+   query/passage prefix seam, and bge-small trend verdict are done. bge-small is
+   not the served model; the sidecar fallback was rejected as the product shape.
+   Keep the machinery and continue in 1D.
+2c. `STAGE_1D_RETRIEVAL_QUALITY.md` — **e5-small D2 closed negative.**
+   - Done: K0 Unigram tokenizer; T1 multilingual-e5-small converter/artifact
+     path; T2 trend-row eval (41q/201k: e5 `rrf` 0.423 vs bge 0.411); T6
+     doc2query replay instrument with a preliminary negative 0.5B signal; full
+     594k/121q e5 D2 replay.
+   - Perf landed: Fable PR #27 and follow-up #28 cut the cold encoder/indexing
+     path enough that the full D1-row e5 replay is now practical. See
+     `specs/PERF_COLD_INDEX_10X.md`.
+   - **D2 result:** full row `semantic-real` recall@10 0.152,
+     `rrf(bm25+real)` 0.160 vs the ≥0.30 bar. e5-small is not the served
+     default.
+   - Do **not** spend SDOT/VDOT int8 on e5-small. PERF records safe-Rust int8
+     as only ~1.2× over the optimized f32 kernel, and unsafe SDOT is only worth
+     considering after a stronger model/strategy clears quality.
 3. `STAGE_6B_AGENT_MEMORY.md` — `remember` / staleness / `memory_asof`
    (all delegatable; T2 semantics reviewed).
 

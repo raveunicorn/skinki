@@ -99,8 +99,8 @@ the naive versions hallucinated 60–78% false insights. The next frontier:
 validate on **real** data (the synthetic win must transfer — Stage 3 just taught
 us it need not) and complete the narration with a live (replayed) LLM narrator.
 
-**The embedder path: static distillation falsified, a pure-Rust encoder built
-instead (Stages 1B → 1C-B).** The Model2Vec bet — that a static token→vector
+**The Stage-1 embedder path: 1B, 1C-B, and 1D/e5-small are closed negative.** The
+Model2Vec bet — that a static token→vector
 table could replace a live sentence encoder — was measured to death on the
 594k-entry LongMemEval pooled row: our distillation 0.090, canonical
 potion-base-8M 0.116, a deliberately over-budget 130 MB retrieval-tuned
@@ -108,13 +108,18 @@ potion-32M **0.086** (bigger decays *faster*) — all below BM25's 0.134; the
 failure is architectural (context-free token vectors lose word order and
 negation; NN margins collapse at scale). Two things survived: a deterministic
 **RRF fusion** (top-k consensus, recall@10 0.145 — the first configuration to
-beat BM25 on that row) and the falsification record itself. The replacement is
-under way: **`skinki-encoder`, a BERT-class forward pass in pure safe Rust** —
-zero dependencies, no `libm`, byte-deterministic across runs, thread counts
-and architectures — which already **reproduces its torch teacher to min cosine
-1.0000000** (per-layer drift ≤ 4.1e-6) on the committed golden suite. The
-quality verdict on real data (D2: ≥ 0.22 single-shot / ≥ 0.30 fused, vs the
-0.438 live-model reference) is the next measurement.
+beat BM25 on that row) and the falsification record itself. Stage 1C-B then
+built **`skinki-encoder`, a BERT-class forward pass in pure safe Rust** — zero
+dependencies, no `libm`, byte-deterministic across runs, thread counts and
+architectures — and closed with a trend verdict: bge-small's machinery is
+correct (teacher parity min cosine 1.0000000), but its quality ceiling is too
+low for the served default. Stage 1D then tried multilingual-e5-small through
+the same in-engine Rust path: it looked promising on the 41q/201k trend row
+(`rrf(bm25+encoder)` 0.423), but the full 594k/121q D2 row failed the bar:
+**semantic-real 0.152, `rrf(bm25+real)` 0.160 vs the 0.30 target**. Fable's
+cold-indexing work is still valuable, but e5-small is not a served retriever;
+the next Stage-1 move is a stronger encoder/retrieval strategy, not SDOT
+acceleration of e5-small.
 
 **The multi-hop gap is partially closed — by retrieval strategy, not graph.**
 Coarse-to-fine (instance-level embedding + targeted fine search) lifts
